@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -30,21 +31,17 @@ const (
 
 // Config は認証ハンドラーの初期化設定です
 type Config struct {
-	ClientID     string
-	ClientSecret string
-	RedirectURL  string
-	// SessionKey はクッキー署名用の秘密鍵です。
-	// 暗号化/署名のため、16, 24, 32バイト(AES) または 64バイト(HMAC) を推奨します。
-	SessionKey     string
-	SessionName    string // e.g. "my-app-session"
-	IsSecureCookie bool
-	AllowedEmails  []string
-	AllowedDomains []string
-	// TaskAudienceURL は Cloud Tasks の OIDC トークン検証に使用する Audience URL です。
+	ClientID        string
+	ClientSecret    string
+	RedirectURL     string
+	SessionKey      string // クッキー署名用の秘密鍵
+	SessionName     string
+	IsSecureCookie  bool
+	AllowedEmails   []string
+	AllowedDomains  []string
 	TaskAudienceURL string
 }
 
-// googleUserInfo は Google UserInfo エンドポイントのレスポンス形式です
 type googleUserInfo struct {
 	Email         string `json:"email"`
 	VerifiedEmail bool   `json:"verified_email"`
@@ -63,15 +60,9 @@ type Handler struct {
 
 // NewHandler は設定に基づき Handler を生成します
 func NewHandler(cfg Config) (*Handler, error) {
-	// セッションキーの長さを検証
 	keyLen := len(cfg.SessionKey)
 	if keyLen != 16 && keyLen != 24 && keyLen != 32 && keyLen != 64 {
 		return nil, fmt.Errorf("invalid session key length: %d. Must be 16, 24, 32, or 64 bytes", keyLen)
-	}
-
-	// 許可リストが空の場合の警告ログ
-	if len(cfg.AllowedEmails) == 0 && len(cfg.AllowedDomains) == 0 {
-		slog.Warn("認証許可リスト(AllowedEmails/AllowedDomains)が空です。全てのユーザーが拒否されます。")
 	}
 
 	oauthCfg := &oauth2.Config{
@@ -79,7 +70,7 @@ func NewHandler(cfg Config) (*Handler, error) {
 		ClientSecret: cfg.ClientSecret,
 		RedirectURL:  cfg.RedirectURL,
 		Scopes: []string{
-			"openid", // OIDC 準拠のため追加
+			"openid",
 			"https://www.googleapis.com/auth/userinfo.email",
 			"https://www.googleapis.com/auth/userinfo.profile",
 		},
@@ -115,20 +106,19 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// セッション取得とリダイレクトURLの保存ロジックの整理
 	session, err := h.store.Get(r, h.sessionName)
 	if err != nil {
 		slog.Warn("セッション取得失敗（ログイン時）。リダイレクト先URLは保存されません。", "error", err)
 	} else {
 		if redirectTo := r.URL.Query().Get("redirect_to"); redirectTo != "" {
-			// オープンリダイレクト対策
+			// オープンリダイレクト対策: 相対パスのみ許可
 			if strings.HasPrefix(redirectTo, "/") && !strings.HasPrefix(redirectTo, "//") {
 				session.Values[DefaultRedirectSessionKey] = redirectTo
 				if err := session.Save(r, w); err != nil {
 					slog.Error("リダイレクトURLの保存失敗", "error", err)
 				}
 			} else {
-				slog.Warn("無効なリダイレクトURL（外部サイトの可能性）を拒否しました", "redirect_to", redirectTo)
+				slog.Warn("無効なリダイレクトURLを拒否しました", "redirect_to", redirectTo)
 			}
 		}
 	}
@@ -150,7 +140,9 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	queryState := r.URL.Query().Get("state")
 	cookieState, err := r.Cookie(DefaultStateCookie)
-	if err != nil || cookieState.Value != queryState {
+
+	// Timing Attack対策: ConstantTimeCompare を使用
+	if err != nil || subtle.ConstantTimeCompare([]byte(cookieState.Value), []byte(queryState)) != 1 {
 		slog.Warn("CSRF攻撃の可能性を検知", "error", err)
 		http.Error(w, "Invalid state", http.StatusBadRequest)
 		return
@@ -223,13 +215,12 @@ func (h *Handler) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		session, err := h.store.Get(r, h.sessionName)
 		if err != nil {
-			// gorilla/securecookie のエラーメッセージ依存に関する注記:
-			// この文字列は将来変更される可能性があるが、現状ではキー不一致を検知する唯一の手段。
-			if err != nil && strings.Contains(err.Error(), "securecookie: the value is invalid") {
-				slog.Error("セッションキー不一致の可能性。設定を確認してください。", "error", err)
+			if session != nil && session.IsNew {
+				slog.Error("セッション解析失敗（キー不一致の可能性）。", "error", err)
 			} else {
 				slog.Warn("セッション取得失敗、ログインへリダイレクト", "error", err)
 			}
+
 			h.clearSessionCookie(w, r)
 			http.Redirect(w, r, "/auth/login", http.StatusFound)
 			return
@@ -271,12 +262,13 @@ func (h *Handler) TaskOIDCVerificationMiddleware(next http.Handler) http.Handler
 			return
 		}
 
-		slog.Debug("Task認証成功", "sub", payload.Subject)
+		// payload をログ出力に使用することで、未使用変数エラーを回避
+		slog.Debug("Task認証成功", "sub", payload.Subject, "email", payload.Claims["email"])
+
 		next.ServeHTTP(w, r)
 	})
 }
 
-// fetchUserEmail はGoogle UserInfoエンドポイントからメールアドレスを取得します
 func (h *Handler) fetchUserEmail(ctx context.Context, token *oauth2.Token) (string, error) {
 	client := h.oauthConfig.Client(ctx, token)
 	resp, err := client.Get(googleUserInfoURL)
@@ -289,15 +281,12 @@ func (h *Handler) fetchUserEmail(ctx context.Context, token *oauth2.Token) (stri
 	if err := json.NewDecoder(resp.Body).Decode(&u); err != nil {
 		return "", err
 	}
-
 	if !u.VerifiedEmail {
 		return "", fmt.Errorf("email '%s' is not verified", u.Email)
 	}
-
 	return u.Email, nil
 }
 
-// isAuthorized はメールアドレスが許可条件を満たすか判定します
 func (h *Handler) isAuthorized(email string) bool {
 	if len(h.allowedEmails) == 0 && len(h.allowedDomains) == 0 {
 		return false
@@ -306,14 +295,15 @@ func (h *Handler) isAuthorized(email string) bool {
 		return true
 	}
 
-	// net/mail を使用して厳密にパースし、ドメイン偽装対策を行う
 	addr, err := mail.ParseAddress(email)
 	if err != nil {
 		return false
 	}
 
-	if i := strings.LastIndex(addr.Address, "@"); i != -1 {
-		domain := addr.Address[i+1:]
+	// @ で分割してドメインを取得
+	parts := strings.SplitN(addr.Address, "@", 2)
+	if len(parts) == 2 {
+		domain := parts[1]
 		if _, ok := h.allowedDomains[domain]; ok {
 			return true
 		}
@@ -321,16 +311,13 @@ func (h *Handler) isAuthorized(email string) bool {
 	return false
 }
 
-// clearSessionCookie は現在のセッションクッキーを確実に無効化します
 func (h *Handler) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 	session, err := h.store.Get(r, h.sessionName)
 	if err != nil {
 		slog.Warn("クッキー取得に失敗しましたが、削除を試みます", "error", err)
 	}
 	session.Options.MaxAge = -1
-	if err := session.Save(r, w); err != nil {
-		slog.Warn("セッションクッキーのクリアに失敗", "error", err)
-	}
+	_ = session.Save(r, w)
 }
 
 func toMap(slice []string) map[string]struct{} {
@@ -346,7 +333,7 @@ func toMap(slice []string) map[string]struct{} {
 func generateState() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("failed to generate random bytes for state: %w", err)
+		return "", err
 	}
 	return base64.URLEncoding.EncodeToString(b), nil
 }

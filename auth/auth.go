@@ -53,12 +53,18 @@ func NewHandler(cfg Config) (*Handler, error) {
 	authKey := []byte(cfg.SessionAuthKey)
 	encKey := []byte(cfg.SessionEncryptKey)
 
-	// AES暗号化キーは 16, 24, 32 バイトである必要があります
-	for name, key := range map[string][]byte{"AuthKey": authKey, "EncryptKey": encKey} {
-		kl := len(key)
-		if kl != 16 && kl != 24 && kl != 32 {
-			return nil, fmt.Errorf("invalid %s length: %d. Must be 16, 24, or 32 bytes", name, kl)
-		}
+	// 1. 署名キー (HMAC) のバリデーション
+	// 署名用キーは十分な長さがあれば良いため、16バイト以上であることを確認します。
+	authLen := len(authKey)
+	if authLen < 16 {
+		return nil, fmt.Errorf("invalid AuthKey length: %d. Must be at least 16 bytes for security", authLen)
+	}
+
+	// 2. 暗号化キー (AES) のバリデーション
+	// AES暗号化を行う CookieStore の仕様上、16, 24, 32 バイトのいずれかである必要があります。
+	encLen := len(encKey)
+	if encLen != 16 && encLen != 24 && encLen != 32 {
+		return nil, fmt.Errorf("invalid EncryptKey length: %d. Must be 16, 24, or 32 bytes (AES requirement)", encLen)
 	}
 
 	oauthCfg := &oauth2.Config{

@@ -25,6 +25,8 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 				session.Values[DefaultRedirectSessionKey] = redirectTo
 				if err := session.Save(r, w); err != nil {
 					slog.Error("Failed to save session for redirect", "error", err)
+					http.Error(w, "Could not save session", http.StatusInternalServerError)
+					return
 				}
 			} else {
 				slog.Warn("Invalid redirect_to parameter detected", "redirectTo", redirectTo)

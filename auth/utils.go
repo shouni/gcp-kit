@@ -65,18 +65,18 @@ func (h *Handler) isAuthorized(email string) bool {
 }
 
 // clearSessionCookie はセッションクッキーを無効化（削除）します。
-func (h *Handler) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) clearSessionCookie(w http.ResponseWriter, r *http.Request) error {
 	session, err := h.store.Get(r, h.sessionName)
 	if err != nil {
-		// [Minor] 修正: Get でエラーが発生しても、新しい空のセッションで上書きを試みる
 		slog.Warn("Failed to get session on clear, proceeding with new session", "error", err)
 	}
 
 	session.Options.MaxAge = -1 // クッキーを即時期限切れにする
 	if err := session.Save(r, w); err != nil {
-		// [Minor] 修正: 保存失敗時はエラーログを出力
 		slog.Error("Failed to save session for clearing cookie", "error", err)
+		return err // エラーを呼び出し元に返す
 	}
+	return nil
 }
 
 // toLowerMap はスライス内の文字列を小文字に変換して map に格納します。

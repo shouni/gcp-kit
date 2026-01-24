@@ -31,7 +31,7 @@ type Config struct {
 	ClientSecret string
 	RedirectURL  string
 	// SessionKey はクッキー署名用の秘密鍵です。
-	// セキュリティのため、32バイトまたは64バイトの暗号論的に安全な乱数キーを強く推奨します。
+	// 暗号化/署名のため、16, 24, 32バイト(AES) または 64バイト(HMAC) を推奨します。
 	SessionKey     string
 	SessionName    string // e.g. "my-app-session"
 	IsSecureCookie bool
@@ -39,6 +39,14 @@ type Config struct {
 	AllowedDomains []string
 	// TaskAudienceURL は Cloud Tasks の OIDC トークン検証に使用する Audience URL です。
 	TaskAudienceURL string
+}
+
+// googleUserInfo は Google UserInfo エンドポイントのレスポンス形式です
+type googleUserInfo struct {
+	Email         string `json:"email"`
+	VerifiedEmail bool   `json:"verified_email"`
+	Name          string `json:"name"`
+	Picture       string `json:"picture"`
 }
 
 // Handler は認証ロジックを保持する構造体です
@@ -53,7 +61,13 @@ type Handler struct {
 }
 
 // NewHandler は設定に基づき Handler を生成します
-func NewHandler(cfg Config) *Handler {
+func NewHandler(cfg Config) (*Handler, error) {
+	// セッションキーの長さを検証（不適切な長さは起動時に弾く）
+	keyLen := len(cfg.SessionKey)
+	if keyLen != 16 && keyLen != 24 && keyLen != 32 && keyLen != 64 {
+		return nil, fmt.Errorf("invalid session key length: %d. Must be 16, 24, 32, or 64 bytes", keyLen)
+	}
+
 	// 許可リストが空の場合の警告ログ
 	if len(cfg.AllowedEmails) == 0 && len(cfg.AllowedDomains) == 0 {
 		slog.Warn("認証許可リスト(AllowedEmails/AllowedDomains)が空です。全てのユーザーが拒否されます。")
@@ -87,7 +101,7 @@ func NewHandler(cfg Config) *Handler {
 		isSecureCookie:  cfg.IsSecureCookie,
 		allowedEmails:   toMap(cfg.AllowedEmails),
 		allowedDomains:  toMap(cfg.AllowedDomains),
-	}
+	}, nil
 }
 
 // Login はGoogleのログイン画面へリダイレクトします
@@ -122,7 +136,6 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// stateクッキーを削除
 	http.SetCookie(w, &http.Cookie{
 		Name: DefaultStateCookie, Value: "", MaxAge: -1, Path: "/auth/callback",
 	})
@@ -135,11 +148,27 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	email, err := h.fetchUserEmail(r.Context(), token)
-	if err != nil {
-		slog.Error("ユーザー情報取得失敗", "error", err)
-		http.Error(w, "Failed to get user info", http.StatusInternalServerError)
-		return
+	// 1. IDトークンからメールアドレスを優先的に取得（APIリクエスト削減）
+	var email string
+	if rawIDToken, ok := token.Extra("id_token").(string); ok && rawIDToken != "" {
+		payload, err := idtoken.Validate(r.Context(), rawIDToken, h.oauthConfig.ClientID)
+		if err == nil {
+			if emailClaim, ok := payload.Claims["email"].(string); ok {
+				email = emailClaim
+			}
+		} else {
+			slog.Warn("IDトークン検証失敗。userinfoエンドポイントへフォールバックします。", "error", err)
+		}
+	}
+
+	// 2. IDトークンが使えない場合のみ UserInfo API を呼び出す
+	if email == "" {
+		email, err = h.fetchUserEmail(r.Context(), token)
+		if err != nil {
+			slog.Error("ユーザー情報取得失敗", "error", err)
+			http.Error(w, "Failed to get user info", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	if !h.isAuthorized(email) {
@@ -170,8 +199,7 @@ func (h *Handler) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		session, err := h.store.Get(r, h.sessionName)
 		if err != nil {
-			slog.Warn("セッション取得失敗、セッションをクリアしてリダイレクト", "error", err)
-			// リダイレクトループ防止のため不正なクッキーをクリア
+			slog.Warn("セッション取得失敗、クッキーをクリアしてリダイレクト", "error", err)
 			h.clearSessionCookie(w, r)
 			http.Redirect(w, r, "/auth/login", http.StatusFound)
 			return
@@ -189,16 +217,22 @@ func (h *Handler) Middleware(next http.Handler) http.Handler {
 // TaskOIDCVerificationMiddleware はCloud Tasksのトークンを検証します
 func (h *Handler) TaskOIDCVerificationMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h.taskAudienceURL == "" {
+			slog.Error("TaskAudienceURLが設定されていません")
+			http.Error(w, "Configuration error", http.StatusInternalServerError)
+			return
+		}
+
 		authHeader := r.Header.Get("Authorization")
-		if h.taskAudienceURL == "" || !strings.HasPrefix(authHeader, "Bearer ") {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			http.Error(w, "Unauthorized: Bearer token required", http.StatusUnauthorized)
 			return
 		}
 
 		token := strings.TrimPrefix(authHeader, "Bearer ")
 		payload, err := idtoken.Validate(r.Context(), token, h.taskAudienceURL)
 		if err != nil {
-			slog.Warn("IDトークン検証失敗", "error", err)
+			slog.Warn("IDトークン検証失敗", "error", err, "audience", h.taskAudienceURL)
 			http.Error(w, "Invalid token", http.StatusForbidden)
 			return
 		}
@@ -217,17 +251,14 @@ func (h *Handler) fetchUserEmail(ctx context.Context, token *oauth2.Token) (stri
 	}
 	defer resp.Body.Close()
 
-	var u struct {
-		Email string `json:"email"`
-	}
+	var u googleUserInfo
 	if err := json.NewDecoder(resp.Body).Decode(&u); err != nil {
 		return "", err
 	}
 	return u.Email, nil
 }
 
-// isAuthorized はメールアドレスが許可リストまたは許可ドメインに含まれるか判定します。
-// 許可リスト（AllowedEmails, AllowedDomains）が両方とも空の場合、全てのユーザーを拒否（falseを返却）します。
+// isAuthorized はメールアドレスが許可条件を満たすか判定します
 func (h *Handler) isAuthorized(email string) bool {
 	if len(h.allowedEmails) == 0 && len(h.allowedDomains) == 0 {
 		return false
@@ -235,8 +266,6 @@ func (h *Handler) isAuthorized(email string) bool {
 	if _, ok := h.allowedEmails[email]; ok {
 		return true
 	}
-
-	// 最後の@以降をドメインとして抽出
 	if i := strings.LastIndex(email, "@"); i != -1 {
 		domain := email[i+1:]
 		if _, ok := h.allowedDomains[domain]; ok {
@@ -248,9 +277,14 @@ func (h *Handler) isAuthorized(email string) bool {
 
 // clearSessionCookie は現在のセッションクッキーを無効化します
 func (h *Handler) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
-	session, _ := h.store.Get(r, h.sessionName)
+	session, err := h.store.Get(r, h.sessionName)
+	if err != nil {
+		return
+	}
 	session.Options.MaxAge = -1
-	_ = session.Save(r, w)
+	if err := session.Save(r, w); err != nil {
+		slog.Warn("セッションクッキーのクリアに失敗", "error", err)
+	}
 }
 
 // toMap はスライスを map[string]struct{} に変換します

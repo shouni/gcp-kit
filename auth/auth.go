@@ -16,23 +16,29 @@ import (
 	"google.golang.org/api/idtoken"
 )
 
-// デフォルト値の定義
+// デフォルト値およびマジックナンバーの定数化
 const (
 	DefaultUserSessionKey = "user_email"
 	DefaultStateCookie    = "oauth_state"
+	googleUserInfoURL     = "https://www.googleapis.com/oauth2/v2/userinfo"
+	sessionMaxAgeSec      = 60 * 60 * 24 * 7 // 7日間
+	stateCookieMaxAgeSec  = 60 * 10          // 10分間
 )
 
 // Config は認証ハンドラーの初期化設定です
 type Config struct {
-	ClientID        string
-	ClientSecret    string
-	RedirectURL     string
-	SessionKey      string // クッキー署名用の秘密鍵
-	SessionName     string // e.g. "my-app-session"
-	IsSecureCookie  bool
-	AllowedEmails   []string
-	AllowedDomains  []string
-	TaskAudienceURL string // Cloud Tasks検証用
+	ClientID     string
+	ClientSecret string
+	RedirectURL  string
+	// SessionKey はクッキー署名用の秘密鍵です。
+	// セキュリティのため、32バイトまたは64バイトの暗号論的に安全な乱数キーを強く推奨します。
+	SessionKey     string
+	SessionName    string // e.g. "my-app-session"
+	IsSecureCookie bool
+	AllowedEmails  []string
+	AllowedDomains []string
+	// TaskAudienceURL は Cloud Tasks の OIDC トークン検証に使用する Audience URL です。
+	TaskAudienceURL string
 }
 
 // Handler は認証ロジックを保持する構造体です
@@ -48,6 +54,11 @@ type Handler struct {
 
 // NewHandler は設定に基づき Handler を生成します
 func NewHandler(cfg Config) *Handler {
+	// 許可リストが空の場合の警告ログ
+	if len(cfg.AllowedEmails) == 0 && len(cfg.AllowedDomains) == 0 {
+		slog.Warn("認証許可リスト(AllowedEmails/AllowedDomains)が空です。全てのユーザーが拒否されます。")
+	}
+
 	oauthCfg := &oauth2.Config{
 		ClientID:     cfg.ClientID,
 		ClientSecret: cfg.ClientSecret,
@@ -62,7 +73,7 @@ func NewHandler(cfg Config) *Handler {
 	store := sessions.NewCookieStore([]byte(cfg.SessionKey))
 	store.Options = &sessions.Options{
 		Path:     "/",
-		MaxAge:   86400 * 7,
+		MaxAge:   sessionMaxAgeSec,
 		HttpOnly: true,
 		Secure:   cfg.IsSecureCookie,
 		SameSite: http.SameSiteLaxMode,
@@ -91,7 +102,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     DefaultStateCookie,
 		Value:    state,
-		MaxAge:   600,
+		MaxAge:   stateCookieMaxAgeSec,
 		HttpOnly: true,
 		Secure:   h.isSecureCookie,
 		Path:     "/auth/callback",
@@ -111,7 +122,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 使い終わったstateクッキーを削除
+	// stateクッキーを削除
 	http.SetCookie(w, &http.Cookie{
 		Name: DefaultStateCookie, Value: "", MaxAge: -1, Path: "/auth/callback",
 	})
@@ -159,7 +170,9 @@ func (h *Handler) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		session, err := h.store.Get(r, h.sessionName)
 		if err != nil {
-			slog.Warn("セッション取得失敗、ログインへリダイレクト", "error", err)
+			slog.Warn("セッション取得失敗、セッションをクリアしてリダイレクト", "error", err)
+			// リダイレクトループ防止のため不正なクッキーをクリア
+			h.clearSessionCookie(w, r)
 			http.Redirect(w, r, "/auth/login", http.StatusFound)
 			return
 		}
@@ -198,7 +211,7 @@ func (h *Handler) TaskOIDCVerificationMiddleware(next http.Handler) http.Handler
 // fetchUserEmail はGoogle UserInfoエンドポイントからメールアドレスを取得します
 func (h *Handler) fetchUserEmail(ctx context.Context, token *oauth2.Token) (string, error) {
 	client := h.oauthConfig.Client(ctx, token)
-	resp, err := client.Get("https://www.googleapis.com/oauth2/v2/userinfo")
+	resp, err := client.Get(googleUserInfoURL)
 	if err != nil {
 		return "", err
 	}
@@ -213,7 +226,8 @@ func (h *Handler) fetchUserEmail(ctx context.Context, token *oauth2.Token) (stri
 	return u.Email, nil
 }
 
-// isAuthorized はメールアドレスが許可リストまたは許可ドメインに含まれるか判定します
+// isAuthorized はメールアドレスが許可リストまたは許可ドメインに含まれるか判定します。
+// 許可リスト（AllowedEmails, AllowedDomains）が両方とも空の場合、全てのユーザーを拒否（falseを返却）します。
 func (h *Handler) isAuthorized(email string) bool {
 	if len(h.allowedEmails) == 0 && len(h.allowedDomains) == 0 {
 		return false
@@ -222,7 +236,7 @@ func (h *Handler) isAuthorized(email string) bool {
 		return true
 	}
 
-	// 最後の@以降をドメインとして抽出（SSRF/バイパス対策）
+	// 最後の@以降をドメインとして抽出
 	if i := strings.LastIndex(email, "@"); i != -1 {
 		domain := email[i+1:]
 		if _, ok := h.allowedDomains[domain]; ok {
@@ -230,6 +244,13 @@ func (h *Handler) isAuthorized(email string) bool {
 		}
 	}
 	return false
+}
+
+// clearSessionCookie は現在のセッションクッキーを無効化します
+func (h *Handler) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+	session, _ := h.store.Get(r, h.sessionName)
+	session.Options.MaxAge = -1
+	_ = session.Save(r, w)
 }
 
 // toMap はスライスを map[string]struct{} に変換します

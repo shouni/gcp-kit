@@ -9,6 +9,7 @@ import (
 	"google.golang.org/api/idtoken"
 )
 
+// Login は、OAuth2 ログイン プロセスを初期化し、状態の生成とセッション管理を処理する
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	state, err := generateState()
 	if err != nil {
@@ -46,6 +47,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, h.oauthConfig.AuthCodeURL(state), http.StatusTemporaryRedirect)
 }
 
+// Callback OAuth2 コールバックを処理し、CSRF 状態を検証し、認証コードをトークンと交換し、ユーザー セッションを処理します。
 func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	queryState := r.URL.Query().Get("state")
 	cookieState, err := r.Cookie(DefaultStateCookie)

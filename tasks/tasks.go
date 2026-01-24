@@ -28,6 +28,8 @@ type Enqueuer[T any] struct {
 }
 
 // NewEnqueuer は新しい Enqueuer を生成します。
+// 生成されたインスタンスは内部で gRPC コネクションプールを保持するため、
+// アプリケーション全体でシングルトンとして再利用することが推奨されます。
 func NewEnqueuer[T any](ctx context.Context, cfg Config) (*Enqueuer[T], error) {
 	client, err := cloudtasks.NewClient(ctx)
 	if err != nil {
@@ -76,9 +78,7 @@ func (e *Enqueuer[T]) Enqueue(ctx context.Context, payload T) error {
 		},
 	}
 
-	// ライブラリとして、タイムアウト管理は呼び出し元に任せつつ、
-	// 最低限の保護として 10秒程度のコンテキストを生成するのもアリだけど、
-	// ここでは渡された ctx を尊重するのだ。
+	// Cloud Tasks への登録を実行
 	createdTask, err := e.client.CreateTask(ctx, req)
 	if err != nil {
 		slog.Error("Cloud Tasks enqueue failed",
@@ -93,7 +93,7 @@ func (e *Enqueuer[T]) Enqueue(ctx context.Context, payload T) error {
 	return nil
 }
 
-// Close はクライアントを閉じます。
+// Close はクライアントを閉じ、保持しているリソース（コネクションなど）を解放します。
 func (e *Enqueuer[T]) Close() error {
 	return e.client.Close()
 }

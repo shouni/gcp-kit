@@ -92,8 +92,9 @@ func NewHandler(cfg Config) (*Handler, error) {
 		sessionName:     cfg.SessionName,
 		taskAudienceURL: cfg.TaskAudienceURL,
 		isSecureCookie:  cfg.IsSecureCookie,
-		allowedEmails:   toMap(cfg.AllowedEmails),
-		allowedDomains:  toMap(cfg.AllowedDomains),
+		// 許可リストを小文字に正規化して保存
+		allowedEmails:  toLowerMap(cfg.AllowedEmails),
+		allowedDomains: toLowerMap(cfg.AllowedDomains),
 	}, nil
 }
 
@@ -111,7 +112,6 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("セッション取得失敗（ログイン時）。リダイレクト先URLは保存されません。", "error", err)
 	} else {
 		if redirectTo := r.URL.Query().Get("redirect_to"); redirectTo != "" {
-			// オープンリダイレクト対策: 相対パスのみ許可
 			if strings.HasPrefix(redirectTo, "/") && !strings.HasPrefix(redirectTo, "//") {
 				session.Values[DefaultRedirectSessionKey] = redirectTo
 				if err := session.Save(r, w); err != nil {
@@ -141,7 +141,6 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	queryState := r.URL.Query().Get("state")
 	cookieState, err := r.Cookie(DefaultStateCookie)
 
-	// Timing Attack対策: ConstantTimeCompare を使用
 	if err != nil || subtle.ConstantTimeCompare([]byte(cookieState.Value), []byte(queryState)) != 1 {
 		slog.Warn("CSRF攻撃の可能性を検知", "error", err)
 		http.Error(w, "Invalid state", http.StatusBadRequest)
@@ -215,12 +214,12 @@ func (h *Handler) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		session, err := h.store.Get(r, h.sessionName)
 		if err != nil {
+			// キー不一致などでデコード失敗した場合、sessionsはerr != nilかつsession.IsNew=trueを返す
 			if session != nil && session.IsNew {
-				slog.Error("セッション解析失敗（キー不一致の可能性）。", "error", err)
+				slog.Error("セッション解析失敗。キー不一致または改竄の可能性があります。", "error", err)
 			} else {
 				slog.Warn("セッション取得失敗、ログインへリダイレクト", "error", err)
 			}
-
 			h.clearSessionCookie(w, r)
 			http.Redirect(w, r, "/auth/login", http.StatusFound)
 			return
@@ -229,7 +228,8 @@ func (h *Handler) Middleware(next http.Handler) http.Handler {
 		email, ok := session.Values[DefaultUserSessionKey].(string)
 		if !ok || email == "" {
 			loginURL := "/auth/login"
-			if r.URL.Path != "" && r.URL.Path != "/" {
+			// GETかつルート以外のパスの場合のみ、リダイレクト先をクエリに付与
+			if r.Method == http.MethodGet && r.URL.Path != "/" {
 				loginURL = fmt.Sprintf("/auth/login?redirect_to=%s", url.QueryEscape(r.URL.RequestURI()))
 			}
 			http.Redirect(w, r, loginURL, http.StatusFound)
@@ -262,9 +262,7 @@ func (h *Handler) TaskOIDCVerificationMiddleware(next http.Handler) http.Handler
 			return
 		}
 
-		// payload をログ出力に使用することで、未使用変数エラーを回避
-		slog.Debug("Task認証成功", "sub", payload.Subject, "email", payload.Claims["email"])
-
+		slog.Debug("Task認証成功", "sub", payload.Subject)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -287,20 +285,24 @@ func (h *Handler) fetchUserEmail(ctx context.Context, token *oauth2.Token) (stri
 	return u.Email, nil
 }
 
+// isAuthorized はメールアドレスが許可条件を満たすか判定します
 func (h *Handler) isAuthorized(email string) bool {
+	// 許可リストを小文字で扱うため正規化
+	normalizedEmail := strings.ToLower(email)
+
+	// 許可リストが設定されていない場合は、デフォルトで全てのユーザーを拒否する (fail-closed)
 	if len(h.allowedEmails) == 0 && len(h.allowedDomains) == 0 {
 		return false
 	}
-	if _, ok := h.allowedEmails[email]; ok {
+	if _, ok := h.allowedEmails[normalizedEmail]; ok {
 		return true
 	}
 
-	addr, err := mail.ParseAddress(email)
+	addr, err := mail.ParseAddress(normalizedEmail)
 	if err != nil {
 		return false
 	}
 
-	// @ で分割してドメインを取得
 	parts := strings.SplitN(addr.Address, "@", 2)
 	if len(parts) == 2 {
 		domain := parts[1]
@@ -320,11 +322,12 @@ func (h *Handler) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 	_ = session.Save(r, w)
 }
 
-func toMap(slice []string) map[string]struct{} {
+// 許可リストを小文字でマップ化
+func toLowerMap(slice []string) map[string]struct{} {
 	m := make(map[string]struct{})
 	for _, s := range slice {
 		if s != "" {
-			m[s] = struct{}{}
+			m[strings.ToLower(s)] = struct{}{}
 		}
 	}
 	return m

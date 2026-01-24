@@ -5,49 +5,50 @@
 [![GitHub tag (latest by date)](https://img.shields.io/github/v/tag/shouni/gcp-kit)](https://github.com/shouni/gcp-kit/tags)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## 🚀 概要 (About) - GCP上でのWeb開発を加速させるツールキット
+## 🚀 概要 (About) - Cloud Run と Cloud Tasks を使った開発を最速の軌道へ
 
----
+**GCP Kit** は、Google Cloud Platform (GCP) を活用したWebアプリケーションや非同期ワーカーの開発をシンプルかつ堅牢にするためのGo言語向けツールキットです。
 
-**GCP Kit** は、Google Cloud Platform (GCP) を活用したWebアプリケーションや非同期ワーカーの開発をシンプルかつ堅牢にするためのGo言語向けライブラリ集です。
-
-Cloud Run や App Engine 上で動くWebサービスにおいて、ボイラープレートになりがちな認証、セッション管理、そして Cloud Tasks による非同期処理のハンドリングを Generics を用いて抽象化し、ビジネスロジックに集中できる環境を提供します。
+Cloud Run や Cloud Tasks を用いたアーキテクチャにおいて、ボイラープレートになりがちな **「Google OAuth2 認証」「セッション管理」「型安全なタスク処理」** を抽象化し、ビジネスロジックに集中できる環境を提供します。
 
 ---
 
 ## ✨ 提供機能 (Features)
 
-* **`auth`**: Google OAuth2 認証 & セッション管理
-    * 署名用・暗号化用の分離キーによる堅牢なセッション設計。
-    * 許可ドメイン・メールアドレスによる認可フィルタリングと、オープンリダイレクト対策済みミドルウェア。
-* **`tasks`**: 汎用 Cloud Tasks エンキュー
-    * Generics (`[T any]`) を用いて、任意の構造体を型安全にキューへ投入。
-    * OIDC トークンベースの認証設定（サービスアカウント連携）をカプセル化。
-* **`worker`**: Cloud Tasks 向け HTTP ハンドラー
-    * 受信したタスクの自動デコードと、インターフェースによる実行ロジックの注入。
-    * 失敗時の 5xx 返却による Cloud Tasks 標準リトライとのシームレスな連携。
+* **`auth`**: **Google OAuth2 認証 & セッション管理**
+    * **署名(HMAC)・暗号化(AES)の分離キー設計**: セッションデータの改ざん防止と秘匿化を二重の鍵で保護します。
+    * **厳格なバリデーション**: セキュリティ事故を未然に防ぐため、AESキーの長さ（16/24/32 bytes）を起動時に自動検証します。
+    * **柔軟な認可**: 許可ドメインやメールアドレスによるホワイトリスト形式の認可フィルタリング機能を搭載。
+    * **OIDC 検証ミドルウェア**: Cloud Tasks からのワーカーリクエストを安全に受け入れるための OIDC トークン検証をサポート。
+* **`tasks`**: **型安全な Cloud Tasks エンキュー**
+    * **Generics 対応**: `[T any]` を用いて、独自の構造体を型安全にシリアライズしてキューへ投入できます。
+    * **認証のカプセル化**: サービスアカウントを利用した OIDC トークンベースの認証設定をシンプルに実装。
+* **`worker`**: **Cloud Tasks 向け Worker ハンドラー**
+    * **自動デコード**: 受信したタスクのペイロードを目的の型へ自動的にデコードし、ビジネスロジックへ渡します。
+    * **リトライフレンドリー**: Cloud Tasks の標準仕様に基づき、エラー時の適切な HTTP ステータス管理を自動化。
 
 ---
 
 ## 🏗 プロジェクトレイアウト (Project Layout)
 
-ライブラリとして各機能が独立しており、必要なものだけを必要なものだけをインポートして利用できます。
+機能ごとにパッケージが独立しており、必要なコンポーネントのみをインポートして利用可能です。
 
 ```text
 gcp-kit/
-├── auth/           # Google OAuth2 & Session Middleware
+├── auth/           # OAuth2, Session & OIDC Verification Middleware
 ├── tasks/          # Cloud Tasks Enqueuer (Generics)
-└── worker/         # Cloud Tasks Worker Handler (Generics)
+└── worker/         # Task Worker Handler (Generics)
+
 ```
 
 ---
 
-## 🤝 依存関係 (Dependencies)
+## 🤝 主な依存関係 (Dependencies)
 
 * `cloud.google.com/go/cloudtasks`: Cloud Tasks 操作
-* `golang.org/x/oauth2`: Google 認証
-* `github.com/gorilla/sessions`: セッション管理
-* `google.golang.org/api`: IDトークンの検証など
+* `golang.org/x/oauth2`: Google OAuth2 フロー
+* `github.com/gorilla/sessions`: セッション管理の実装
+* `google.golang.org/api/idtoken`: Google OIDC トークンの検証
 
 ---
 

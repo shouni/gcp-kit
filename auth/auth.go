@@ -5,7 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -137,7 +137,13 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session, _ := h.store.Get(r, h.sessionName)
+	session, err := h.store.Get(r, h.sessionName)
+	if err != nil {
+		slog.Error("セッション取得失敗", "error", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
 	session.Values[DefaultUserSessionKey] = email
 	if err := session.Save(r, w); err != nil {
 		slog.Error("セッション保存失敗", "error", err)
@@ -151,7 +157,13 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 // Middleware はユーザー認証を確認し、未認証ならログインへ飛ばします
 func (h *Handler) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		session, _ := h.store.Get(r, h.sessionName)
+		session, err := h.store.Get(r, h.sessionName)
+		if err != nil {
+			slog.Warn("セッション取得失敗、ログインへリダイレクト", "error", err)
+			http.Redirect(w, r, "/auth/login", http.StatusFound)
+			return
+		}
+
 		email, ok := session.Values[DefaultUserSessionKey].(string)
 		if !ok || email == "" {
 			http.Redirect(w, r, "/auth/login", http.StatusFound)
@@ -183,8 +195,7 @@ func (h *Handler) TaskOIDCVerificationMiddleware(next http.Handler) http.Handler
 	})
 }
 
-// fetchUserEmail Google UserInfo エンドポイントを使用して、OAuth2 トークンからユーザーのメールアドレスを取得します。
-// // メールアドレスを文字列として返します。プロセスが失敗した場合はエラーを返します
+// fetchUserEmail はGoogle UserInfoエンドポイントからメールアドレスを取得します
 func (h *Handler) fetchUserEmail(ctx context.Context, token *oauth2.Token) (string, error) {
 	client := h.oauthConfig.Client(ctx, token)
 	resp, err := client.Get("https://www.googleapis.com/oauth2/v2/userinfo")
@@ -202,7 +213,7 @@ func (h *Handler) fetchUserEmail(ctx context.Context, token *oauth2.Token) (stri
 	return u.Email, nil
 }
 
-// isAuthorized ハンドラー構成で許可された電子メールまたはドメインに基づいて、提供された電子メールが承認されているかどうかを確認します。
+// isAuthorized はメールアドレスが許可リストまたは許可ドメインに含まれるか判定します
 func (h *Handler) isAuthorized(email string) bool {
 	if len(h.allowedEmails) == 0 && len(h.allowedDomains) == 0 {
 		return false
@@ -210,15 +221,18 @@ func (h *Handler) isAuthorized(email string) bool {
 	if _, ok := h.allowedEmails[email]; ok {
 		return true
 	}
-	parts := strings.Split(email, "@")
-	if len(parts) == 2 {
-		_, ok := h.allowedDomains[parts[1]]
-		return ok
+
+	// 最後の@以降をドメインとして抽出（SSRF/バイパス対策）
+	if i := strings.LastIndex(email, "@"); i != -1 {
+		domain := email[i+1:]
+		if _, ok := h.allowedDomains[domain]; ok {
+			return true
+		}
 	}
 	return false
 }
 
-// toMap 文字列のスライスをマップに変換します。マップでは、各文字列がキーとなり、値として空の構造体を持ちます。
+// toMap はスライスを map[string]struct{} に変換します
 func toMap(slice []string) map[string]struct{} {
 	m := make(map[string]struct{})
 	for _, s := range slice {
@@ -229,11 +243,11 @@ func toMap(slice []string) map[string]struct{} {
 	return m
 }
 
-// generateState OAuth フローの状態パラメータとして使用されるランダムな base64 エンコード文字列を生成します。
+// generateState はOAuth2フローのstate用にランダムなbase64文字列を生成します
 func generateState() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
-		return "", errors.New("state generation failed")
+		return "", fmt.Errorf("failed to generate random bytes for state: %w", err)
 	}
 	return base64.URLEncoding.EncodeToString(b), nil
 }

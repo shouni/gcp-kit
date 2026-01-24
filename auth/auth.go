@@ -18,11 +18,12 @@ import (
 
 // デフォルト値およびマジックナンバーの定数化
 const (
-	DefaultUserSessionKey = "user_email"
-	DefaultStateCookie    = "oauth_state"
-	googleUserInfoURL     = "https://www.googleapis.com/oauth2/v2/userinfo"
-	sessionMaxAgeSec      = 60 * 60 * 24 * 7 // 7日間
-	stateCookieMaxAgeSec  = 60 * 10          // 10分間
+	DefaultUserSessionKey     = "user_email"
+	DefaultStateCookie        = "oauth_state"
+	DefaultRedirectSessionKey = "redirect_after_login"
+	googleUserInfoURL         = "https://www.googleapis.com/oauth2/v2/userinfo"
+	sessionMaxAgeSec          = 60 * 60 * 24 * 7 // 7日間
+	stateCookieMaxAgeSec      = 60 * 10          // 10分間
 )
 
 // Config は認証ハンドラーの初期化設定です
@@ -45,8 +46,6 @@ type Config struct {
 type googleUserInfo struct {
 	Email         string `json:"email"`
 	VerifiedEmail bool   `json:"verified_email"`
-	Name          string `json:"name"`
-	Picture       string `json:"picture"`
 }
 
 // Handler は認証ロジックを保持する構造体です
@@ -62,7 +61,7 @@ type Handler struct {
 
 // NewHandler は設定に基づき Handler を生成します
 func NewHandler(cfg Config) (*Handler, error) {
-	// セッションキーの長さを検証（不適切な長さは起動時に弾く）
+	// セッションキーの長さを検証
 	keyLen := len(cfg.SessionKey)
 	if keyLen != 16 && keyLen != 24 && keyLen != 32 && keyLen != 64 {
 		return nil, fmt.Errorf("invalid session key length: %d. Must be 16, 24, 32, or 64 bytes", keyLen)
@@ -113,6 +112,15 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// リダイレクト先をセッションに保存 (UX向上)
+	session, _ := h.store.Get(r, h.sessionName)
+	if redirectTo := r.URL.Query().Get("redirect_to"); redirectTo != "" {
+		session.Values[DefaultRedirectSessionKey] = redirectTo
+		if err := session.Save(r, w); err != nil {
+			slog.Error("リダイレクトURLの保存失敗", "error", err)
+		}
+	}
+
 	http.SetCookie(w, &http.Cookie{
 		Name:     DefaultStateCookie,
 		Value:    state,
@@ -148,7 +156,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. IDトークンからメールアドレスを優先的に取得（APIリクエスト削減）
+	// IDトークンからのメール抽出を優先
 	var email string
 	if rawIDToken, ok := token.Extra("id_token").(string); ok && rawIDToken != "" {
 		payload, err := idtoken.Validate(r.Context(), rawIDToken, h.oauthConfig.ClientID)
@@ -156,12 +164,9 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 			if emailClaim, ok := payload.Claims["email"].(string); ok {
 				email = emailClaim
 			}
-		} else {
-			slog.Warn("IDトークン検証失敗。userinfoエンドポイントへフォールバックします。", "error", err)
 		}
 	}
 
-	// 2. IDトークンが使えない場合のみ UserInfo API を呼び出す
 	if email == "" {
 		email, err = h.fetchUserEmail(r.Context(), token)
 		if err != nil {
@@ -184,6 +189,13 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// リダイレクト先を取得し、セッションから削除
+	targetURL := "/"
+	if url, ok := session.Values[DefaultRedirectSessionKey].(string); ok && url != "" {
+		targetURL = url
+		delete(session.Values, DefaultRedirectSessionKey)
+	}
+
 	session.Values[DefaultUserSessionKey] = email
 	if err := session.Save(r, w); err != nil {
 		slog.Error("セッション保存失敗", "error", err)
@@ -191,7 +203,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	http.Redirect(w, r, targetURL, http.StatusSeeOther)
 }
 
 // Middleware はユーザー認証を確認し、未認証ならログインへ飛ばします
@@ -199,7 +211,11 @@ func (h *Handler) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		session, err := h.store.Get(r, h.sessionName)
 		if err != nil {
-			slog.Warn("セッション取得失敗、クッキーをクリアしてリダイレクト", "error", err)
+			if strings.Contains(err.Error(), "securecookie: the value is invalid") {
+				slog.Error("セッションの検証に失敗。セッションキーが変更された可能性があります。", "error", err)
+			} else {
+				slog.Warn("セッション取得失敗、ログインへリダイレクト", "error", err)
+			}
 			h.clearSessionCookie(w, r)
 			http.Redirect(w, r, "/auth/login", http.StatusFound)
 			return
@@ -207,7 +223,12 @@ func (h *Handler) Middleware(next http.Handler) http.Handler {
 
 		email, ok := session.Values[DefaultUserSessionKey].(string)
 		if !ok || email == "" {
-			http.Redirect(w, r, "/auth/login", http.StatusFound)
+			// 現在のパスを redirect_to に含めてログイン画面へ
+			loginURL := "/auth/login"
+			if r.URL.Path != "" && r.URL.Path != "/" {
+				loginURL = fmt.Sprintf("/auth/login?redirect_to=%s", r.URL.RequestURI())
+			}
+			http.Redirect(w, r, loginURL, http.StatusFound)
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -218,7 +239,7 @@ func (h *Handler) Middleware(next http.Handler) http.Handler {
 func (h *Handler) TaskOIDCVerificationMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if h.taskAudienceURL == "" {
-			slog.Error("TaskAudienceURLが設定されていません")
+			slog.Error("TaskAudienceURLが未設定です")
 			http.Error(w, "Configuration error", http.StatusInternalServerError)
 			return
 		}
@@ -232,7 +253,7 @@ func (h *Handler) TaskOIDCVerificationMiddleware(next http.Handler) http.Handler
 		token := strings.TrimPrefix(authHeader, "Bearer ")
 		payload, err := idtoken.Validate(r.Context(), token, h.taskAudienceURL)
 		if err != nil {
-			slog.Warn("IDトークン検証失敗", "error", err, "audience", h.taskAudienceURL)
+			slog.Warn("IDトークン検証失敗", "error", err)
 			http.Error(w, "Invalid token", http.StatusForbidden)
 			return
 		}
@@ -287,7 +308,6 @@ func (h *Handler) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// toMap はスライスを map[string]struct{} に変換します
 func toMap(slice []string) map[string]struct{} {
 	m := make(map[string]struct{})
 	for _, s := range slice {
@@ -298,7 +318,6 @@ func toMap(slice []string) map[string]struct{} {
 	return m
 }
 
-// generateState はOAuth2フローのstate用にランダムなbase64文字列を生成します
 func generateState() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/mail"
 	"net/url"
 	"strings"
 
@@ -78,6 +79,7 @@ func NewHandler(cfg Config) (*Handler, error) {
 		ClientSecret: cfg.ClientSecret,
 		RedirectURL:  cfg.RedirectURL,
 		Scopes: []string{
+			"openid", // OIDC 準拠のため追加
 			"https://www.googleapis.com/auth/userinfo.email",
 			"https://www.googleapis.com/auth/userinfo.profile",
 		},
@@ -113,22 +115,21 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// セッション取得（エラーハンドリングを追加）
+	// セッション取得とリダイレクトURLの保存ロジックの整理
 	session, err := h.store.Get(r, h.sessionName)
 	if err != nil {
 		slog.Warn("セッション取得失敗（ログイン時）。リダイレクト先URLは保存されません。", "error", err)
-	}
-
-	// オープンリダイレクト脆弱性対策済みのリダイレクト先保存
-	if redirectTo := r.URL.Query().Get("redirect_to"); redirectTo != "" && err == nil {
-		// 相対パス（/で始まる）かつ、プロトコル相対（//で始まる）でないことを確認
-		if strings.HasPrefix(redirectTo, "/") && !strings.HasPrefix(redirectTo, "//") {
-			session.Values[DefaultRedirectSessionKey] = redirectTo
-			if err := session.Save(r, w); err != nil {
-				slog.Error("リダイレクトURLの保存失敗", "error", err)
+	} else {
+		if redirectTo := r.URL.Query().Get("redirect_to"); redirectTo != "" {
+			// オープンリダイレクト対策
+			if strings.HasPrefix(redirectTo, "/") && !strings.HasPrefix(redirectTo, "//") {
+				session.Values[DefaultRedirectSessionKey] = redirectTo
+				if err := session.Save(r, w); err != nil {
+					slog.Error("リダイレクトURLの保存失敗", "error", err)
+				}
+			} else {
+				slog.Warn("無効なリダイレクトURL（外部サイトの可能性）を拒否しました", "redirect_to", redirectTo)
 			}
-		} else {
-			slog.Warn("無効なリダイレクトURL（外部サイトの可能性）を拒否しました", "redirect_to", redirectTo)
 		}
 	}
 
@@ -222,8 +223,10 @@ func (h *Handler) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		session, err := h.store.Get(r, h.sessionName)
 		if err != nil {
+			// gorilla/securecookie のエラーメッセージ依存に関する注記:
+			// この文字列は将来変更される可能性があるが、現状ではキー不一致を検知する唯一の手段。
 			if err != nil && strings.Contains(err.Error(), "securecookie: the value is invalid") {
-				slog.Error("セッションキー不一致。設定を確認してください。", "error", err)
+				slog.Error("セッションキー不一致の可能性。設定を確認してください。", "error", err)
 			} else {
 				slog.Warn("セッション取得失敗、ログインへリダイレクト", "error", err)
 			}
@@ -236,7 +239,6 @@ func (h *Handler) Middleware(next http.Handler) http.Handler {
 		if !ok || email == "" {
 			loginURL := "/auth/login"
 			if r.URL.Path != "" && r.URL.Path != "/" {
-				// QueryEscape を使用して特殊文字を安全にエンコード
 				loginURL = fmt.Sprintf("/auth/login?redirect_to=%s", url.QueryEscape(r.URL.RequestURI()))
 			}
 			http.Redirect(w, r, loginURL, http.StatusFound)
@@ -288,7 +290,6 @@ func (h *Handler) fetchUserEmail(ctx context.Context, token *oauth2.Token) (stri
 		return "", err
 	}
 
-	// Googleによる検証済みメールアドレスかチェック
 	if !u.VerifiedEmail {
 		return "", fmt.Errorf("email '%s' is not verified", u.Email)
 	}
@@ -304,8 +305,15 @@ func (h *Handler) isAuthorized(email string) bool {
 	if _, ok := h.allowedEmails[email]; ok {
 		return true
 	}
-	if i := strings.LastIndex(email, "@"); i != -1 {
-		domain := email[i+1:]
+
+	// net/mail を使用して厳密にパースし、ドメイン偽装対策を行う
+	addr, err := mail.ParseAddress(email)
+	if err != nil {
+		return false
+	}
+
+	if i := strings.LastIndex(addr.Address, "@"); i != -1 {
+		domain := addr.Address[i+1:]
 		if _, ok := h.allowedDomains[domain]; ok {
 			return true
 		}

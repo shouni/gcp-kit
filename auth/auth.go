@@ -34,7 +34,7 @@ type Config struct {
 	ClientID        string
 	ClientSecret    string
 	RedirectURL     string
-	SessionKey      string // クッキー署名用の秘密鍵
+	SessionKey      string // 認証および暗号化に使用する秘密鍵
 	SessionName     string
 	IsSecureCookie  bool
 	AllowedEmails   []string
@@ -60,7 +60,8 @@ type Handler struct {
 
 // NewHandler は設定に基づき Handler を生成します
 func NewHandler(cfg Config) (*Handler, error) {
-	keyLen := len(cfg.SessionKey)
+	keyBytes := []byte(cfg.SessionKey)
+	keyLen := len(keyBytes)
 	if keyLen != 16 && keyLen != 24 && keyLen != 32 && keyLen != 64 {
 		return nil, fmt.Errorf("invalid session key length: %d. Must be 16, 24, 32, or 64 bytes", keyLen)
 	}
@@ -77,7 +78,7 @@ func NewHandler(cfg Config) (*Handler, error) {
 		Endpoint: google.Endpoint,
 	}
 
-	store := sessions.NewCookieStore([]byte(cfg.SessionKey))
+	store := sessions.NewCookieStore(keyBytes, keyBytes)
 	store.Options = &sessions.Options{
 		Path:     "/",
 		MaxAge:   sessionMaxAgeSec,
@@ -92,9 +93,8 @@ func NewHandler(cfg Config) (*Handler, error) {
 		sessionName:     cfg.SessionName,
 		taskAudienceURL: cfg.TaskAudienceURL,
 		isSecureCookie:  cfg.IsSecureCookie,
-		// 許可リストを小文字に正規化して保存
-		allowedEmails:  toLowerMap(cfg.AllowedEmails),
-		allowedDomains: toLowerMap(cfg.AllowedDomains),
+		allowedEmails:   toLowerMap(cfg.AllowedEmails),
+		allowedDomains:  toLowerMap(cfg.AllowedDomains),
 	}, nil
 }
 
@@ -109,16 +109,17 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 
 	session, err := h.store.Get(r, h.sessionName)
 	if err != nil {
-		slog.Warn("セッション取得失敗（ログイン時）。リダイレクト先URLは保存されません。", "error", err)
+		slog.Warn("セッション取得失敗（ログイン時）", "error", err)
 	} else {
 		if redirectTo := r.URL.Query().Get("redirect_to"); redirectTo != "" {
-			if strings.HasPrefix(redirectTo, "/") && !strings.HasPrefix(redirectTo, "//") {
+			parsedURL, err := url.Parse(redirectTo)
+			if err == nil && parsedURL.Host == "" && strings.HasPrefix(parsedURL.Path, "/") {
 				session.Values[DefaultRedirectSessionKey] = redirectTo
 				if err := session.Save(r, w); err != nil {
 					slog.Error("リダイレクトURLの保存失敗", "error", err)
 				}
 			} else {
-				slog.Warn("無効なリダイレクトURLを拒否しました", "redirect_to", redirectTo)
+				slog.Warn("無効または危険なリダイレクトURLを拒否しました", "redirect_to", redirectTo)
 			}
 		}
 	}
@@ -141,6 +142,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	queryState := r.URL.Query().Get("state")
 	cookieState, err := r.Cookie(DefaultStateCookie)
 
+	// Timing Attack対策: ConstantTimeCompare を使用
 	if err != nil || subtle.ConstantTimeCompare([]byte(cookieState.Value), []byte(queryState)) != 1 {
 		slog.Warn("CSRF攻撃の可能性を検知", "error", err)
 		http.Error(w, "Invalid state", http.StatusBadRequest)
@@ -303,9 +305,8 @@ func (h *Handler) isAuthorized(email string) bool {
 		return false
 	}
 
-	parts := strings.SplitN(addr.Address, "@", 2)
-	if len(parts) == 2 {
-		domain := parts[1]
+	if i := strings.LastIndexByte(addr.Address, '@'); i != -1 {
+		domain := addr.Address[i+1:]
 		if _, ok := h.allowedDomains[domain]; ok {
 			return true
 		}
@@ -322,7 +323,6 @@ func (h *Handler) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 	_ = session.Save(r, w)
 }
 
-// 許可リストを小文字でマップ化
 func toLowerMap(slice []string) map[string]struct{} {
 	m := make(map[string]struct{})
 	for _, s := range slice {

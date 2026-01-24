@@ -18,16 +18,18 @@ const (
 	stateCookieMaxAgeSec      = 60 * 10
 )
 
+// Config は認証ハンドラーの初期化設定です
 type Config struct {
-	ClientID        string
-	ClientSecret    string
-	RedirectURL     string
-	SessionKey      string
-	SessionName     string
-	IsSecureCookie  bool
-	AllowedEmails   []string
-	AllowedDomains  []string
-	TaskAudienceURL string
+	ClientID          string
+	ClientSecret      string
+	RedirectURL       string
+	SessionAuthKey    string // 署名用 (HMAC)
+	SessionEncryptKey string // 暗号化用 (AES)
+	SessionName       string
+	IsSecureCookie    bool
+	AllowedEmails     []string
+	AllowedDomains    []string
+	TaskAudienceURL   string
 }
 
 type googleUserInfo struct {
@@ -35,6 +37,7 @@ type googleUserInfo struct {
 	VerifiedEmail bool   `json:"verified_email"`
 }
 
+// Handler は認証ロジックを保持する構造体です
 type Handler struct {
 	oauthConfig     *oauth2.Config
 	store           sessions.Store
@@ -45,11 +48,17 @@ type Handler struct {
 	allowedDomains  map[string]struct{}
 }
 
+// NewHandler は設定に基づき Handler を生成します
 func NewHandler(cfg Config) (*Handler, error) {
-	keyBytes := []byte(cfg.SessionKey)
-	keyLen := len(keyBytes)
-	if keyLen != 16 && keyLen != 24 && keyLen != 32 {
-		return nil, fmt.Errorf("invalid session key length: %d. Must be 16, 24, or 32 bytes", keyLen)
+	authKey := []byte(cfg.SessionAuthKey)
+	encKey := []byte(cfg.SessionEncryptKey)
+
+	// AES暗号化キーは 16, 24, 32 バイトである必要があります
+	for name, key := range map[string][]byte{"AuthKey": authKey, "EncryptKey": encKey} {
+		kl := len(key)
+		if kl != 16 && kl != 24 && kl != 32 {
+			return nil, fmt.Errorf("invalid %s length: %d. Must be 16, 24, or 32 bytes", name, kl)
+		}
 	}
 
 	oauthCfg := &oauth2.Config{
@@ -64,7 +73,8 @@ func NewHandler(cfg Config) (*Handler, error) {
 		Endpoint: google.Endpoint,
 	}
 
-	store := sessions.NewCookieStore(keyBytes, keyBytes)
+	// 認証キーと暗号化キーを個別に渡す
+	store := sessions.NewCookieStore(authKey, encKey)
 	store.Options = &sessions.Options{
 		Path:     "/",
 		MaxAge:   sessionMaxAgeSec,

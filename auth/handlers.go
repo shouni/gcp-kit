@@ -4,7 +4,6 @@ import (
 	"crypto/subtle"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"google.golang.org/api/idtoken"
@@ -21,10 +20,16 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	session, err := h.store.Get(r, h.sessionName)
 	if err == nil {
 		if redirectTo := r.URL.Query().Get("redirect_to"); redirectTo != "" {
-			parsedURL, err := url.Parse(redirectTo)
-			if err == nil && parsedURL.Host == "" && strings.HasPrefix(parsedURL.Path, "/") {
+			// redirectToが'/'で始まり、'//'で始まらないことを確認
+			if strings.HasPrefix(redirectTo, "/") && !strings.HasPrefix(redirectTo, "//") {
 				session.Values[DefaultRedirectSessionKey] = redirectTo
-				_ = session.Save(r, w)
+				if err := session.Save(r, w); err != nil {
+					slog.Error("Failed to save session for redirect", "error", err)
+					http.Error(w, "Could not save session", http.StatusInternalServerError)
+					return
+				}
+			} else {
+				slog.Warn("Invalid redirect_to parameter detected", "redirectTo", redirectTo)
 			}
 		}
 	}

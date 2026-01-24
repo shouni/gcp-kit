@@ -62,8 +62,8 @@ type Handler struct {
 func NewHandler(cfg Config) (*Handler, error) {
 	keyBytes := []byte(cfg.SessionKey)
 	keyLen := len(keyBytes)
-	if keyLen != 16 && keyLen != 24 && keyLen != 32 && keyLen != 64 {
-		return nil, fmt.Errorf("invalid session key length: %d. Must be 16, 24, 32, or 64 bytes", keyLen)
+	if keyLen != 16 && keyLen != 24 && keyLen != 32 {
+		return nil, fmt.Errorf("invalid session key length: %d. Must be 16, 24, or 32 bytes for AES encryption", keyLen)
 	}
 
 	oauthCfg := &oauth2.Config{
@@ -109,18 +109,18 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 
 	session, err := h.store.Get(r, h.sessionName)
 	if err != nil {
-		slog.Warn("セッション取得失敗（ログイン時）", "error", err)
-	} else {
-		if redirectTo := r.URL.Query().Get("redirect_to"); redirectTo != "" {
-			parsedURL, err := url.Parse(redirectTo)
-			if err == nil && parsedURL.Host == "" && strings.HasPrefix(parsedURL.Path, "/") {
-				session.Values[DefaultRedirectSessionKey] = redirectTo
-				if err := session.Save(r, w); err != nil {
-					slog.Error("リダイレクトURLの保存失敗", "error", err)
-				}
-			} else {
-				slog.Warn("無効または危険なリダイレクトURLを拒否しました", "redirect_to", redirectTo)
+		// エラーが発生しても、CSRF stateのセットとリダイレクトは続行する。
+		// ただし、リダイレクトURLの保存はスキップする。
+		slog.Warn("セッション取得失敗（ログイン時）、リダイレクトURLの保存をスキップします", "error", err)
+	} else if redirectTo := r.URL.Query().Get("redirect_to"); redirectTo != "" {
+		parsedURL, err := url.Parse(redirectTo)
+		if err == nil && parsedURL.Host == "" && strings.HasPrefix(parsedURL.Path, "/") {
+			session.Values[DefaultRedirectSessionKey] = redirectTo
+			if err := session.Save(r, w); err != nil {
+				slog.Error("リダイレクトURLの保存失敗", "error", err)
 			}
+		} else {
+			slog.Warn("無効または危険なリダイレクトURLを拒否しました", "redirect_to", redirectTo)
 		}
 	}
 
@@ -230,7 +230,8 @@ func (h *Handler) Middleware(next http.Handler) http.Handler {
 		email, ok := session.Values[DefaultUserSessionKey].(string)
 		if !ok || email == "" {
 			loginURL := "/auth/login"
-			// GETかつルート以外のパスの場合のみ、リダイレクト先をクエリに付与
+			// GETリクエスト、かつホームページ以外の特定ページへのアクセスの場合は、
+			// ログイン後にそのページに戻れるようリダイレクト先をクエリに付与する。
 			if r.Method == http.MethodGet && r.URL.Path != "/" {
 				loginURL = fmt.Sprintf("/auth/login?redirect_to=%s", url.QueryEscape(r.URL.RequestURI()))
 			}

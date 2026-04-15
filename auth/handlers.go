@@ -123,7 +123,10 @@ func extractEmailFromIDToken(r *http.Request, token *oauth2.Token, clientID stri
 }
 
 func (h *Handler) saveSessionAndRedirect(w http.ResponseWriter, r *http.Request, email string) {
-	session, _ := h.store.Get(r, h.sessionName)
+	session, err := h.store.Get(r, h.sessionName)
+	if err != nil {
+		slog.Warn("セッションの取得に失敗したため、新規セッションを作成します", "error", err)
+	}
 
 	targetURL := "/"
 	if url, ok := session.Values[DefaultRedirectSessionKey].(string); ok && url != "" {

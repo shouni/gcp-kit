@@ -30,37 +30,63 @@ func (h *Handler[T]) ProcessTask(w http.ResponseWriter, r *http.Request) {
 	// リソースリーク防止のためボディをクローズ
 	defer r.Body.Close()
 
-	// 1. メソッドチェック
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	if !isPostRequest(r) {
+		writeMethodNotAllowed(w)
 		return
 	}
 
-	// 2. ペイロードを T 型にデコード
-	var payload T
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		slog.Error("Failed to decode worker task payload", "error", err)
-		// 400系を返すと、Cloud Tasks は通常リトライを行わずタスクを破棄します。
-		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+	payload, err := decodePayload[T](r)
+	if err != nil {
+		handleDecodeError(w, err)
 		return
 	}
 
 	slog.Info("Worker received task", "type", fmt.Sprintf("%T", payload))
 
-	// 3. 注入されたエグゼキューターを実行
-	// r.Context() を渡すことで、Cloud Tasks のリクエストタイムアウト設定を伝搬させます。
-	if err := h.executor.Execute(r.Context(), payload); err != nil {
-		// セキュリティリスクを回避するため、payload そのものではなく型情報のみを記録します。
-		slog.Error("Worker task execution failed",
-			"error", err,
-			"payload_type", fmt.Sprintf("%T", payload),
-		)
-		// 500系を返すと、Cloud Tasks は設定に基づき指数バックオフリトライを行います。
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	if err := h.executeTask(r.Context(), payload); err != nil {
+		handleExecutionError(w, payload, err)
 		return
 	}
 
-	// 4. 成功を返却
+	writeSuccess(w)
+}
+
+func isPostRequest(r *http.Request) bool {
+	return r.Method == http.MethodPost
+}
+
+func decodePayload[T any](r *http.Request) (T, error) {
+	var payload T
+	err := json.NewDecoder(r.Body).Decode(&payload)
+	return payload, err
+}
+
+func handleDecodeError(w http.ResponseWriter, err error) {
+	slog.Error("Failed to decode worker task payload", "error", err)
+	// 400系を返すと、Cloud Tasks は通常リトライを行わずタスクを破棄します。
+	http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+}
+
+func (h *Handler[T]) executeTask(ctx context.Context, payload T) error {
+	// r.Context() を渡すことで、Cloud Tasks のリクエストタイムアウト設定を伝搬させます。
+	return h.executor.Execute(ctx, payload)
+}
+
+func handleExecutionError[T any](w http.ResponseWriter, payload T, err error) {
+	// セキュリティリスクを回避するため、payload そのものではなく型情報のみを記録します。
+	slog.Error("Worker task execution failed",
+		"error", err,
+		"payload_type", fmt.Sprintf("%T", payload),
+	)
+	// 500系を返すと、Cloud Tasks は設定に基づき指数バックオフリトライを行います。
+	http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+}
+
+func writeMethodNotAllowed(w http.ResponseWriter) {
+	http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+}
+
+func writeSuccess(w http.ResponseWriter) {
 	slog.Info("Worker task completed successfully")
 	w.WriteHeader(http.StatusOK)
 }

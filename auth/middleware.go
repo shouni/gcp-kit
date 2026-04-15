@@ -29,26 +29,35 @@ func (h *Handler) Middleware(next http.Handler) http.Handler {
 
 		email, ok := session.Values[DefaultUserSessionKey].(string)
 		if !ok || email == "" {
-			loginURL := "/auth/login"
-
-			// GETリクエスト時のみリダイレクト先を付与
-			if r.Method == http.MethodGet && r.URL.Path != "/" {
-				// [Security] RequestURI をパースして安全性を確認
-				requestedURI := r.URL.RequestURI()
-				parsed, err := url.Parse(requestedURI)
-
-				// ホストがなく、かつパスが "/" から始まっている場合のみ redirect_to を付与
-				if err == nil && parsed.Host == "" && strings.HasPrefix(parsed.Path, "/") {
-					loginURL = fmt.Sprintf("/auth/login?redirect_to=%s", url.QueryEscape(requestedURI))
-				}
-			}
-
-			http.Redirect(w, r, loginURL, http.StatusFound)
+			http.Redirect(w, r, buildLoginRedirectURL(r), http.StatusFound)
 			return
 		}
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+func buildLoginRedirectURL(r *http.Request) string {
+	const loginURL = "/auth/login"
+
+	// GETリクエスト時のみリダイレクト先を付与
+	if r.Method != http.MethodGet || r.URL.Path == "/" {
+		return loginURL
+	}
+
+	// [Security] RequestURI をパースして安全性を確認
+	requestedURI := r.URL.RequestURI()
+	parsed, err := url.Parse(requestedURI)
+	if err != nil {
+		return loginURL
+	}
+
+	// ホストがなく、かつパスが "/" から始まっている場合のみ redirect_to を付与
+	if parsed.Host != "" || !strings.HasPrefix(parsed.Path, "/") {
+		return loginURL
+	}
+
+	return fmt.Sprintf("/auth/login?redirect_to=%s", url.QueryEscape(requestedURI))
 }
 
 // TaskOIDCVerificationMiddleware Authorization ヘッダー内の OIDC トークンを検証するための HTTP ミドルウェアです。

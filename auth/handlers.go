@@ -100,7 +100,11 @@ func (h *Handler) resolveUserEmail(r *http.Request, token *oauth2.Token) string 
 		return email
 	}
 
-	email, _ = h.fetchUserEmail(r.Context(), token)
+	var err error
+	email, err = h.fetchUserEmail(r.Context(), token)
+	if err != nil {
+		slog.Warn("API経由でのユーザーメールアドレス取得に失敗しました", "error", err)
+	}
 	return email
 }
 
@@ -112,6 +116,7 @@ func extractEmailFromIDToken(r *http.Request, token *oauth2.Token, clientID stri
 
 	payload, err := idtoken.Validate(r.Context(), rawIDToken, clientID)
 	if err != nil {
+		slog.Debug("IDトークンの検証に失敗しました", "error", err)
 		return ""
 	}
 

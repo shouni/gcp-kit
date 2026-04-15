@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"golang.org/x/oauth2"
 	"google.golang.org/api/idtoken"
 )
 
@@ -49,38 +50,22 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 
 // Callback OAuth2 コールバックを処理し、CSRF 状態を検証し、認証コードをトークンと交換し、ユーザー セッションを処理します。
 func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
-	queryState := r.URL.Query().Get("state")
-	cookieState, err := r.Cookie(DefaultStateCookie)
-
-	if err != nil || subtle.ConstantTimeCompare([]byte(cookieState.Value), []byte(queryState)) != 1 {
-		slog.Warn("CSRF攻撃の可能性を検知", "error", err)
+	if !validateCallbackState(r) {
+		slog.Warn("CSRF攻撃の可能性を検知")
 		http.Error(w, "Invalid state", http.StatusBadRequest)
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{Name: DefaultStateCookie, Value: "", MaxAge: -1, Path: "/auth/callback"})
+	clearStateCookie(w)
 
-	code := r.URL.Query().Get("code")
-	token, err := h.oauthConfig.Exchange(r.Context(), code)
+	token, err := h.exchangeCode(r)
 	if err != nil {
 		slog.Error("トークン交換失敗", "error", err)
 		http.Error(w, "Auth failed", http.StatusInternalServerError)
 		return
 	}
 
-	var email string
-	if rawIDToken, ok := token.Extra("id_token").(string); ok && rawIDToken != "" {
-		payload, err := idtoken.Validate(r.Context(), rawIDToken, h.oauthConfig.ClientID)
-		if err == nil {
-			if emailClaim, ok := payload.Claims["email"].(string); ok {
-				email = emailClaim
-			}
-		}
-	}
-
-	if email == "" {
-		email, _ = h.fetchUserEmail(r.Context(), token)
-	}
+	email := h.resolveUserEmail(r, token)
 
 	if email == "" || !h.isAuthorized(email) {
 		slog.Warn("未許可ユーザーアクセス", "email", email)
@@ -88,7 +73,66 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session, _ := h.store.Get(r, h.sessionName)
+	h.saveSessionAndRedirect(w, r, email)
+}
+
+func validateCallbackState(r *http.Request) bool {
+	queryState := r.URL.Query().Get("state")
+	cookieState, err := r.Cookie(DefaultStateCookie)
+	if err != nil {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(cookieState.Value), []byte(queryState)) == 1
+}
+
+func clearStateCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{Name: DefaultStateCookie, Value: "", MaxAge: -1, Path: "/auth/callback"})
+}
+
+func (h *Handler) exchangeCode(r *http.Request) (*oauth2.Token, error) {
+	code := r.URL.Query().Get("code")
+	return h.oauthConfig.Exchange(r.Context(), code)
+}
+
+func (h *Handler) resolveUserEmail(r *http.Request, token *oauth2.Token) string {
+	email := extractEmailFromIDToken(r, token, h.oauthConfig.ClientID)
+	if email != "" {
+		return email
+	}
+
+	var err error
+	email, err = h.fetchUserEmail(r.Context(), token)
+	if err != nil {
+		slog.Warn("API経由でのユーザーメールアドレス取得に失敗しました", "error", err)
+	}
+	return email
+}
+
+func extractEmailFromIDToken(r *http.Request, token *oauth2.Token, clientID string) string {
+	rawIDToken, ok := token.Extra("id_token").(string)
+	if !ok || rawIDToken == "" {
+		return ""
+	}
+
+	payload, err := idtoken.Validate(r.Context(), rawIDToken, clientID)
+	if err != nil {
+		slog.Debug("IDトークンの検証に失敗しました", "error", err)
+		return ""
+	}
+
+	emailClaim, ok := payload.Claims["email"].(string)
+	if !ok {
+		return ""
+	}
+	return emailClaim
+}
+
+func (h *Handler) saveSessionAndRedirect(w http.ResponseWriter, r *http.Request, email string) {
+	session, err := h.store.Get(r, h.sessionName)
+	if err != nil {
+		slog.Warn("セッションの取得に失敗したため、新規セッションを作成します", "error", err)
+	}
+
 	targetURL := "/"
 	if url, ok := session.Values[DefaultRedirectSessionKey].(string); ok && url != "" {
 		targetURL = url

@@ -3,28 +3,30 @@
 *.iml
 *.iws
 *.ipr
+out/
 
 # macOS
 .DS_Store
 
-# Go build artifacts
+# Go Modules & Build artifacts
+/bin/
+/debug
 *.exe
+*.exe~
 *.dll
 *.so
-*.o
-*.a
-/bin/
+*.dylib
+*.test
+*.out
 
-# Environment files
-# Ignore all .env files but keep templates
-.env
-.env.*
+# Go Cache & Coverage
+.gocache/
+cover.out
+*.prof
+
+# Security / Secrets
+.env*
 !.env.example
-!.env.sample
 
-# VSCode editor
-.vscode/
-
-# Go test coverage
-/coverage.out
-/coverage.html
+# Local development
+/vendor/

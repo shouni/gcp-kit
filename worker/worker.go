@@ -30,13 +30,11 @@ func (h *Handler[T]) ProcessTask(w http.ResponseWriter, r *http.Request) {
 	// リソースリーク防止のためボディをクローズ
 	defer r.Body.Close()
 
-	// 1. メソッドチェック
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// 2. ペイロードを T 型にデコード
 	var payload T
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		slog.Error("Failed to decode worker task payload", "error", err)
@@ -47,7 +45,6 @@ func (h *Handler[T]) ProcessTask(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("Worker received task", "type", fmt.Sprintf("%T", payload))
 
-	// 3. 注入されたエグゼキューターを実行
 	// r.Context() を渡すことで、Cloud Tasks のリクエストタイムアウト設定を伝搬させます。
 	if err := h.executor.Execute(r.Context(), payload); err != nil {
 		// セキュリティリスクを回避するため、payload そのものではなく型情報のみを記録します。

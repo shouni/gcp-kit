@@ -69,9 +69,9 @@ func (h *Handler) validateCSRF(r *http.Request, session *sessions.Session) bool 
 		return false
 	}
 
-	actual := r.FormValue("csrf_token")
+	actual := r.Header.Get(HeaderXCSRFToken)
 	if actual == "" {
-		actual = r.Header.Get(HeaderXCSRFToken)
+		actual = r.FormValue("csrf_token")
 	}
 
 	if actual == "" {
@@ -81,14 +81,13 @@ func (h *Handler) validateCSRF(r *http.Request, session *sessions.Session) bool 
 	return subtle.ConstantTimeCompare([]byte(actual), []byte(expected)) == 1
 }
 
-// GenerateAndSaveCSRFToken は、新しいトークンを生成してセッションに保存します。
+// GenerateAndSaveCSRFToken は、URLセーフな新しいトークンを生成して保存します。
 func (h *Handler) GenerateAndSaveCSRFToken(w http.ResponseWriter, r *http.Request) (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("CSRFトークン生成失敗: %w", err)
 	}
-	token := base64.StdEncoding.EncodeToString(b)
-
+	token := base64.RawURLEncoding.EncodeToString(b)
 	session, err := h.store.Get(r, h.sessionName)
 	if err != nil {
 		slog.Warn("トークン保存時のセッション取得に失敗。新規作成します", "error", err)

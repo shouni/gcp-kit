@@ -68,22 +68,25 @@ func (h *Handler) validateCSRF(r *http.Request, session *sessions.Session) bool 
 		return false
 	}
 
-	headerToken := r.Header.Get(HeaderXCSRFToken)
-	if headerToken != "" && subtle.ConstantTimeCompare([]byte(headerToken), []byte(expected)) == 1 {
-		return true
+	token := r.Header.Get(HeaderXCSRFToken)
+
+	// ヘッダーにトークンがない場合のみ、フォームデータからの取得を試みる
+	if token == "" {
+		contentType := r.Header.Get("Content-Type")
+		if strings.HasPrefix(contentType, "application/x-www-form-urlencoded") || strings.HasPrefix(contentType, "multipart/form-data") {
+			if err := r.ParseForm(); err != nil {
+				slog.Warn("フォームのパースに失敗", "error", err)
+				return false
+			}
+			token = r.PostFormValue(CSRFTokenKey)
+		}
 	}
 
-	if err := r.ParseForm(); err != nil {
-		slog.Warn("フォームのパースに失敗", "error", err)
+	if token == "" {
 		return false
 	}
 
-	formToken := r.PostFormValue(CSRFTokenKey)
-	if formToken != "" && subtle.ConstantTimeCompare([]byte(formToken), []byte(expected)) == 1 {
-		return true
-	}
-
-	return false
+	return subtle.ConstantTimeCompare([]byte(token), []byte(expected)) == 1
 }
 
 // GenerateAndSaveCSRFToken は、URLセーフな新しいトークンを生成して保存します。

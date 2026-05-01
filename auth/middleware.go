@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -70,14 +71,10 @@ func (h *Handler) validateCSRF(r *http.Request, session *sessions.Session) bool 
 
 	token := r.Header.Get(HeaderXCSRFToken)
 
-	// ヘッダーにトークンがない場合のみ、フォームデータからの取得を試みる
 	if token == "" {
 		contentType := r.Header.Get("Content-Type")
-		if strings.HasPrefix(contentType, "application/x-www-form-urlencoded") || strings.HasPrefix(contentType, "multipart/form-data") {
-			if err := r.ParseForm(); err != nil {
-				slog.Warn("フォームのパースに失敗", "error", err)
-				return false
-			}
+		mediaType, _, _ := mime.ParseMediaType(contentType)
+		if mediaType == "application/x-www-form-urlencoded" || mediaType == "multipart/form-data" {
 			token = r.PostFormValue(CSRFTokenKey)
 		}
 	}

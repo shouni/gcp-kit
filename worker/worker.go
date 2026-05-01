@@ -27,14 +27,14 @@ func NewHandler[T any](executor TaskExecutor[T]) *Handler[T] {
 
 // ProcessTask は Cloud Tasks からの POST リクエストを処理する http.HandlerFunc です。
 func (h *Handler[T]) ProcessTask(w http.ResponseWriter, r *http.Request) {
-	// リソースリーク防止のためボディをクローズ
-	defer r.Body.Close()
-
 	if h == nil || h.executor == nil {
 		slog.Error("Worker task executor is not configured")
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
+
+	// リソースリーク防止のためボディをクローズ
+	defer r.Body.Close()
 
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)

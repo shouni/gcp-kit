@@ -133,6 +133,12 @@ func buildLoginRedirectURL(r *http.Request) string {
 // TaskOIDCVerificationMiddleware は Google Cloud Tasks からの OIDC トークンを検証します。
 func (h *Handler) TaskOIDCVerificationMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.TrimSpace(h.taskAudienceURL) == "" {
+			slog.Error("Task OIDC audience is not configured")
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+
 		authHeader := r.Header.Get("Authorization")
 		if !strings.HasPrefix(authHeader, "Bearer ") {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)

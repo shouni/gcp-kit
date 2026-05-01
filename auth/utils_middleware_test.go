@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,6 +23,70 @@ func TestToLowerMap(t *testing.T) {
 	}
 	if _, ok := got["admin@example.com"]; !ok {
 		t.Fatalf("expected normalized admin email to exist")
+	}
+}
+
+func TestNewHandlerValidatesConfig(t *testing.T) {
+	t.Parallel()
+
+	valid := Config{
+		ClientID:          "client-id",
+		ClientSecret:      "client-secret",
+		RedirectURL:       "https://example.com/auth/callback",
+		SessionAuthKey:    "1234567890123456",
+		SessionEncryptKey: "1234567890123456",
+		SessionName:       "session",
+	}
+
+	tests := []struct {
+		name string
+		cfg  Config
+	}{
+		{
+			name: "missing client id",
+			cfg: Config{
+				ClientSecret:      valid.ClientSecret,
+				RedirectURL:       valid.RedirectURL,
+				SessionAuthKey:    valid.SessionAuthKey,
+				SessionEncryptKey: valid.SessionEncryptKey,
+				SessionName:       valid.SessionName,
+			},
+		},
+		{
+			name: "relative redirect url",
+			cfg: Config{
+				ClientID:          valid.ClientID,
+				ClientSecret:      valid.ClientSecret,
+				RedirectURL:       "/auth/callback",
+				SessionAuthKey:    valid.SessionAuthKey,
+				SessionEncryptKey: valid.SessionEncryptKey,
+				SessionName:       valid.SessionName,
+			},
+		},
+		{
+			name: "missing session name",
+			cfg: Config{
+				ClientID:          valid.ClientID,
+				ClientSecret:      valid.ClientSecret,
+				RedirectURL:       valid.RedirectURL,
+				SessionAuthKey:    valid.SessionAuthKey,
+				SessionEncryptKey: valid.SessionEncryptKey,
+			},
+		},
+	}
+
+	if _, err := NewHandler(valid); err != nil {
+		t.Fatalf("NewHandler(valid) returned error: %v", err)
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := NewHandler(tt.cfg); err == nil {
+				t.Fatalf("NewHandler() error = nil, want error")
+			}
+		})
 	}
 }
 
@@ -158,5 +223,60 @@ func TestMiddlewareRedirectBehavior(t *testing.T) {
 				t.Fatalf("Location redirect_to presence = %v, want %v", hasParam, tt.expectParamPart)
 			}
 		})
+	}
+}
+
+func TestTaskOIDCVerificationMiddlewareMissingAudience(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{}
+	nextCalled := false
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		nextCalled = true
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/tasks", nil)
+	req.Header.Set("Authorization", "Bearer token")
+	rr := httptest.NewRecorder()
+
+	h.TaskOIDCVerificationMiddleware(next).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusInternalServerError)
+	}
+	if nextCalled {
+		t.Fatalf("next handler must not be called")
+	}
+}
+
+type failingStore struct{}
+
+func (s failingStore) Get(r *http.Request, name string) (*sessions.Session, error) {
+	return s.New(r, name)
+}
+
+func (s failingStore) New(_ *http.Request, name string) (*sessions.Session, error) {
+	session := sessions.NewSession(s, name)
+	session.Values = map[interface{}]interface{}{}
+	return session, nil
+}
+
+func (s failingStore) Save(_ *http.Request, _ http.ResponseWriter, _ *sessions.Session) error {
+	return errors.New("save failed")
+}
+
+func TestSaveSessionAndRedirectReturnsSaveError(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{
+		store:       failingStore{},
+		sessionName: "test-session",
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/callback", nil)
+	rr := httptest.NewRecorder()
+
+	if err := h.saveSessionAndRedirect(rr, req, "user@example.com"); err == nil {
+		t.Fatalf("saveSessionAndRedirect() error = nil, want error")
 	}
 }

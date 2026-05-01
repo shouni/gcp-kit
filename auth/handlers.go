@@ -2,6 +2,7 @@ package auth
 
 import (
 	"crypto/subtle"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -56,7 +57,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clearStateCookie(w)
+	h.clearStateCookie(w)
 
 	token, err := h.exchangeCode(r)
 	if err != nil {
@@ -73,7 +74,11 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.saveSessionAndRedirect(w, r, email)
+	if err := h.saveSessionAndRedirect(w, r, email); err != nil {
+		slog.Error("セッション保存失敗", "error", err)
+		http.Error(w, "Could not save session", http.StatusInternalServerError)
+		return
+	}
 }
 
 func validateCallbackState(r *http.Request) bool {
@@ -85,8 +90,16 @@ func validateCallbackState(r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(cookieState.Value), []byte(queryState)) == 1
 }
 
-func clearStateCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{Name: DefaultStateCookie, Value: "", MaxAge: -1, Path: "/auth/callback"})
+func (h *Handler) clearStateCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     DefaultStateCookie,
+		Value:    "",
+		MaxAge:   -1,
+		Path:     "/auth/callback",
+		HttpOnly: true,
+		Secure:   h.isSecureCookie,
+		SameSite: http.SameSiteLaxMode,
+	})
 }
 
 func (h *Handler) exchangeCode(r *http.Request) (*oauth2.Token, error) {
@@ -127,10 +140,13 @@ func extractEmailFromIDToken(r *http.Request, token *oauth2.Token, clientID stri
 	return emailClaim
 }
 
-func (h *Handler) saveSessionAndRedirect(w http.ResponseWriter, r *http.Request, email string) {
+func (h *Handler) saveSessionAndRedirect(w http.ResponseWriter, r *http.Request, email string) error {
 	session, err := h.store.Get(r, h.sessionName)
 	if err != nil {
 		slog.Warn("セッションの取得に失敗したため、新規セッションを作成します", "error", err)
+	}
+	if session == nil {
+		return fmt.Errorf("session store returned nil session")
 	}
 
 	targetURL := "/"
@@ -140,7 +156,10 @@ func (h *Handler) saveSessionAndRedirect(w http.ResponseWriter, r *http.Request,
 	}
 
 	session.Values[DefaultUserSessionKey] = email
-	_ = session.Save(r, w)
+	if err := session.Save(r, w); err != nil {
+		return fmt.Errorf("save session: %w", err)
+	}
 
 	http.Redirect(w, r, targetURL, http.StatusSeeOther)
+	return nil
 }

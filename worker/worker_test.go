@@ -44,6 +44,21 @@ func TestProcessTask_MethodNotAllowed(t *testing.T) {
 	}
 }
 
+func TestProcessTask_MissingExecutor(t *testing.T) {
+	t.Parallel()
+
+	h := NewHandler[samplePayload](nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/tasks", strings.NewReader(`{"name":"alice"}`))
+	rr := httptest.NewRecorder()
+
+	h.ProcessTask(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusInternalServerError)
+	}
+}
+
 func TestProcessTask_InvalidJSON(t *testing.T) {
 	t.Parallel()
 

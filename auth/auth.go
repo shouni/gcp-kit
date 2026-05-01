@@ -3,6 +3,8 @@ package auth
 import (
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/gorilla/sessions"
 	"golang.org/x/oauth2"
@@ -50,6 +52,10 @@ type Handler struct {
 
 // NewHandler は設定に基づき Handler を生成します
 func NewHandler(cfg Config) (*Handler, error) {
+	if err := validateConfig(cfg); err != nil {
+		return nil, err
+	}
+
 	authKey := []byte(cfg.SessionAuthKey)
 	encKey := []byte(cfg.SessionEncryptKey)
 
@@ -98,4 +104,28 @@ func NewHandler(cfg Config) (*Handler, error) {
 		allowedEmails:   toLowerMap(cfg.AllowedEmails),
 		allowedDomains:  toLowerMap(cfg.AllowedDomains),
 	}, nil
+}
+
+func validateConfig(cfg Config) error {
+	required := map[string]string{
+		"ClientID":          cfg.ClientID,
+		"ClientSecret":      cfg.ClientSecret,
+		"RedirectURL":       cfg.RedirectURL,
+		"SessionAuthKey":    cfg.SessionAuthKey,
+		"SessionEncryptKey": cfg.SessionEncryptKey,
+		"SessionName":       cfg.SessionName,
+	}
+
+	for name, value := range required {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("auth config %s must not be empty", name)
+		}
+	}
+
+	redirectURL, err := url.Parse(cfg.RedirectURL)
+	if err != nil || redirectURL.Scheme == "" || redirectURL.Host == "" {
+		return fmt.Errorf("auth config RedirectURL must be an absolute URL")
+	}
+
+	return nil
 }

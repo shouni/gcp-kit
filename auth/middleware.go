@@ -55,11 +55,10 @@ func (h *Handler) Middleware(next http.Handler) http.Handler {
 
 // isStateChangingMethod は CSRF 保護が必要な HTTP メソッドを判定します。
 func isStateChangingMethod(method string) bool {
-	switch method {
-	case http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
-		return true
-	}
-	return false
+	return method == http.MethodPost ||
+		method == http.MethodPut ||
+		method == http.MethodDelete ||
+		method == http.MethodPatch
 }
 
 // validateCSRF は、リクエストのトークンを検証します。
@@ -70,10 +69,6 @@ func (h *Handler) validateCSRF(r *http.Request, session *sessions.Session) bool 
 	}
 
 	actual := r.Header.Get(HeaderXCSRFToken)
-	if actual == "" {
-		actual = r.FormValue("csrf_token")
-	}
-
 	if actual == "" {
 		return false
 	}
@@ -90,7 +85,7 @@ func (h *Handler) GenerateAndSaveCSRFToken(w http.ResponseWriter, r *http.Reques
 	token := base64.RawURLEncoding.EncodeToString(b)
 	session, err := h.store.Get(r, h.sessionName)
 	if err != nil {
-		slog.Warn("トークン保存時のセッション取得に失敗。新規作成します", "error", err)
+		return "", fmt.Errorf("セッションの取得に失敗しました: %w", err)
 	}
 
 	session.Values[CSRFTokenKey] = token

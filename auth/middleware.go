@@ -1,66 +1,142 @@
 package auth
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 
+	"github.com/gorilla/sessions"
 	"google.golang.org/api/idtoken"
 )
 
-// Middleware HTTPハンドラにセッションベースの認証ミドルウェアを適用します。セッションが無効な場合はログインにリダイレクトします。
+const (
+	// CSRFTokenKey はセッション内でトークンを保持するためのキーです。
+	CSRFTokenKey = "csrf_token"
+	// HeaderXCSRFToken はフロントエンドがトークンを送信する際の標準ヘッダーです。
+	HeaderXCSRFToken = "X-CSRF-Token"
+)
+
+// Middleware は、セッションベースの認証とCSRF検証を適用します。
 func (h *Handler) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		session, err := h.store.Get(r, h.sessionName)
 		if err != nil {
-			// セッション取得失敗時の詳細ログ
-			if session != nil && session.IsNew {
-				slog.Error("セッション解析失敗（キー不一致や改竄の可能性）", "error", err)
-			} else {
-				slog.Warn("セッション取得エラー", "error", err)
-			}
-
+			// セッション解析に失敗した場合（署名キー変更時など）は詳細を記録しクッキーをクリア
+			slog.Warn("セッション取得失敗。新規セッションとして扱います", "error", err)
 			h.clearSessionCookie(w, r)
 			http.Redirect(w, r, "/auth/login", http.StatusFound)
 			return
 		}
 
+		// 1. ログイン認証チェック
 		email, ok := session.Values[DefaultUserSessionKey].(string)
 		if !ok || email == "" {
 			http.Redirect(w, r, buildLoginRedirectURL(r), http.StatusFound)
 			return
 		}
 
+		// 2. CSRFチェック (副作用のあるメソッドのみ)
+		if isStateChangingMethod(r.Method) {
+			if !h.validateCSRF(r, session) {
+				slog.Warn("CSRF検証失敗", "email", email, "method", r.Method, "path", r.URL.Path)
+				http.Error(w, "Invalid CSRF token", http.StatusForbidden)
+				return
+			}
+		}
+
 		next.ServeHTTP(w, r)
 	})
 }
 
+// isStateChangingMethod は CSRF 保護が必要な HTTP メソッドを判定します。
+func isStateChangingMethod(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
+		return true
+	}
+	return false
+}
+
+// validateCSRF は、リクエストのトークンを検証します。
+func (h *Handler) validateCSRF(r *http.Request, session *sessions.Session) bool {
+	expected, ok := session.Values[CSRFTokenKey].(string)
+	if !ok || expected == "" {
+		return false
+	}
+
+	actual := r.FormValue("csrf_token")
+	if actual == "" {
+		actual = r.Header.Get(HeaderXCSRFToken)
+	}
+
+	if actual == "" {
+		return false
+	}
+
+	return subtle.ConstantTimeCompare([]byte(actual), []byte(expected)) == 1
+}
+
+// GenerateAndSaveCSRFToken は、新しいトークンを生成してセッションに保存します。
+func (h *Handler) GenerateAndSaveCSRFToken(w http.ResponseWriter, r *http.Request) (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("CSRFトークン生成失敗: %w", err)
+	}
+	token := base64.StdEncoding.EncodeToString(b)
+
+	session, err := h.store.Get(r, h.sessionName)
+	if err != nil {
+		slog.Warn("トークン保存時のセッション取得に失敗。新規作成します", "error", err)
+	}
+
+	session.Values[CSRFTokenKey] = token
+	if err := session.Save(r, w); err != nil {
+		return "", fmt.Errorf("CSRFトークン保存失敗: %w", err)
+	}
+
+	return token, nil
+}
+
+// GetCSRFTokenFromSession は現在のセッションから CSRF トークンを抽出します（表示用）。
+func (h *Handler) GetCSRFTokenFromSession(r *http.Request) string {
+	session, err := h.store.Get(r, h.sessionName)
+	if err != nil {
+		return ""
+	}
+	token, ok := session.Values[CSRFTokenKey].(string)
+	if !ok {
+		return ""
+	}
+	return token
+}
+
+// buildLoginRedirectURL はオープンリダイレクタ脆弱性を考慮したリダイレクト先URLを構築します。
 func buildLoginRedirectURL(r *http.Request) string {
 	const loginURL = "/auth/login"
 
-	// GETリクエスト時のみリダイレクト先を付与
 	if r.Method != http.MethodGet || r.URL.Path == "/" {
 		return loginURL
 	}
 
-	// [Security] RequestURI をパースして安全性を確認
 	requestedURI := r.URL.RequestURI()
 	parsed, err := url.Parse(requestedURI)
 	if err != nil {
 		return loginURL
 	}
 
-	// ホストがなく、かつパスが "/" から始まっている場合のみ redirect_to を付与
-	if parsed.Host != "" || !strings.HasPrefix(parsed.Path, "/") {
+	if parsed.Host != "" || !strings.HasPrefix(parsed.Path, "/") || strings.HasPrefix(parsed.Path, "//") {
 		return loginURL
 	}
 
 	return fmt.Sprintf("/auth/login?redirect_to=%s", url.QueryEscape(requestedURI))
 }
 
-// TaskOIDCVerificationMiddleware Authorization ヘッダー内の OIDC トークンを検証するための HTTP ミドルウェアです。
+// TaskOIDCVerificationMiddleware は Google Cloud Tasks からの OIDC トークンを検証します。
 func (h *Handler) TaskOIDCVerificationMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")

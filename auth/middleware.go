@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -68,12 +69,21 @@ func (h *Handler) validateCSRF(r *http.Request, session *sessions.Session) bool 
 		return false
 	}
 
-	actual := r.Header.Get(HeaderXCSRFToken)
-	if actual == "" {
+	token := r.Header.Get(HeaderXCSRFToken)
+
+	if token == "" {
+		contentType := r.Header.Get("Content-Type")
+		mediaType, _, _ := mime.ParseMediaType(contentType)
+		if mediaType == "application/x-www-form-urlencoded" || mediaType == "multipart/form-data" {
+			token = r.PostFormValue(CSRFTokenKey)
+		}
+	}
+
+	if token == "" {
 		return false
 	}
 
-	return subtle.ConstantTimeCompare([]byte(actual), []byte(expected)) == 1
+	return subtle.ConstantTimeCompare([]byte(token), []byte(expected)) == 1
 }
 
 // GenerateAndSaveCSRFToken は、URLセーフな新しいトークンを生成して保存します。

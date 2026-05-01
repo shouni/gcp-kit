@@ -78,7 +78,7 @@ func (h *Handler) validateCSRF(r *http.Request, session *sessions.Session) bool 
 		return false
 	}
 
-	formToken := r.FormValue(CSRFTokenKey)
+	formToken := r.PostFormValue(CSRFTokenKey)
 	if formToken != "" && subtle.ConstantTimeCompare([]byte(formToken), []byte(expected)) == 1 {
 		return true
 	}

@@ -17,7 +17,7 @@ func stubM2MValidate(email string, err error) func(context.Context, string, stri
 		}
 		return &idtoken.Payload{
 			Subject: "sub",
-			Claims:  map[string]interface{}{"email": email},
+			Claims:  map[string]interface{}{"email": email, "email_verified": true},
 		}, nil
 	}
 }
@@ -65,6 +65,37 @@ func TestM2MVerifierAuthorized(t *testing.T) {
 			allowed:   []string{"mcp@project.iam.gserviceaccount.com"},
 			authz:     "Bearer invalid-token",
 			validate:  stubM2MValidate("", errors.New("invalid token")),
+			wantAuthz: false,
+		},
+		{
+			name:      "lowercase bearer scheme still succeeds",
+			allowed:   []string{"mcp@project.iam.gserviceaccount.com"},
+			authz:     "bearer valid-token",
+			validate:  stubM2MValidate("mcp@project.iam.gserviceaccount.com", nil),
+			wantAuthz: true,
+		},
+		{
+			name:    "missing email claim fails",
+			allowed: []string{"mcp@project.iam.gserviceaccount.com"},
+			authz:   "Bearer valid-token-no-email",
+			validate: func(context.Context, string, string) (*idtoken.Payload, error) {
+				return &idtoken.Payload{
+					Subject: "sub",
+					Claims:  map[string]interface{}{},
+				}, nil
+			},
+			wantAuthz: false,
+		},
+		{
+			name:    "unverified email claim fails",
+			allowed: []string{"mcp@project.iam.gserviceaccount.com"},
+			authz:   "Bearer valid-token-unverified-email",
+			validate: func(context.Context, string, string) (*idtoken.Payload, error) {
+				return &idtoken.Payload{
+					Subject: "sub",
+					Claims:  map[string]interface{}{"email": "mcp@project.iam.gserviceaccount.com", "email_verified": false},
+				}, nil
+			},
 			wantAuthz: false,
 		},
 	}

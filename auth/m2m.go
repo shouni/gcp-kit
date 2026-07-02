@@ -36,25 +36,27 @@ func (v *M2MVerifier) Authorized(r *http.Request) bool {
 	}
 
 	authHeader := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authHeader, "Bearer ") {
+	if len(authHeader) < 7 || !strings.EqualFold(authHeader[:7], "Bearer ") {
 		return false
 	}
-	token := strings.TrimPrefix(authHeader, "Bearer ")
+	token := authHeader[7:]
 
 	payload, err := v.validate(r.Context(), token, v.audience)
 	if err != nil {
-		slog.Warn("M2Mトークン検証失敗", "error", err)
+		// クライアント起因（未認証スキャン等）で日常的に発生しうるため Warn ではなく Info に留める。
+		slog.Info("M2Mトークン検証失敗", "error", err)
 		return false
 	}
 
 	emailClaim, ok := payload.Claims["email"].(string)
-	if !ok || emailClaim == "" {
-		slog.Warn("M2Mトークンにemailクレームがありません", "sub", payload.Subject)
+	emailVerified, _ := payload.Claims["email_verified"].(bool)
+	if !ok || emailClaim == "" || !emailVerified {
+		slog.Info("M2Mトークンに有効なemailクレームがありません", "sub", payload.Subject)
 		return false
 	}
 
 	if _, ok := v.allowed[strings.ToLower(emailClaim)]; !ok {
-		slog.Warn("M2M呼び出し元が許可リストに存在しません", "email", emailClaim)
+		slog.Info("M2M呼び出し元が許可リストに存在しません", "email", emailClaim)
 		return false
 	}
 

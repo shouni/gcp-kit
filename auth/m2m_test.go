@@ -22,57 +22,60 @@ func stubM2MValidate(email string, err error) func(context.Context, string, stri
 	}
 }
 
-func TestM2MVerifierAuthorized(t *testing.T) {
+func TestM2MVerifierVerify(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		allowed   []string
-		authz     string
-		validate  func(context.Context, string, string) (*idtoken.Payload, error)
-		wantAuthz bool
+		name             string
+		allowed          []string
+		authz            string
+		validate         func(context.Context, string, string) (*idtoken.Payload, error)
+		wantOK           bool
+		wantNotAttempted bool
 	}{
 		{
-			name:      "empty allowlist always fails",
-			allowed:   nil,
-			authz:     "Bearer valid-token",
-			validate:  stubM2MValidate("mcp@project.iam.gserviceaccount.com", nil),
-			wantAuthz: false,
+			name:             "empty allowlist is treated as not attempted",
+			allowed:          nil,
+			authz:            "Bearer valid-token",
+			validate:         stubM2MValidate("mcp@project.iam.gserviceaccount.com", nil),
+			wantOK:           false,
+			wantNotAttempted: true,
 		},
 		{
-			name:      "valid token from allowed service account succeeds",
-			allowed:   []string{"mcp@project.iam.gserviceaccount.com"},
-			authz:     "Bearer valid-token",
-			validate:  stubM2MValidate("mcp@project.iam.gserviceaccount.com", nil),
-			wantAuthz: true,
+			name:     "valid token from allowed service account succeeds",
+			allowed:  []string{"mcp@project.iam.gserviceaccount.com"},
+			authz:    "Bearer valid-token",
+			validate: stubM2MValidate("mcp@project.iam.gserviceaccount.com", nil),
+			wantOK:   true,
 		},
 		{
-			name:      "valid token from non-allowed service account fails",
-			allowed:   []string{"mcp@project.iam.gserviceaccount.com"},
-			authz:     "Bearer valid-token",
-			validate:  stubM2MValidate("someone-else@project.iam.gserviceaccount.com", nil),
-			wantAuthz: false,
+			name:     "valid token from non-allowed service account fails",
+			allowed:  []string{"mcp@project.iam.gserviceaccount.com"},
+			authz:    "Bearer valid-token",
+			validate: stubM2MValidate("someone-else@project.iam.gserviceaccount.com", nil),
+			wantOK:   false,
 		},
 		{
-			name:      "missing authorization header fails",
-			allowed:   []string{"mcp@project.iam.gserviceaccount.com"},
-			authz:     "",
-			validate:  stubM2MValidate("mcp@project.iam.gserviceaccount.com", nil),
-			wantAuthz: false,
+			name:             "missing authorization header is treated as not attempted",
+			allowed:          []string{"mcp@project.iam.gserviceaccount.com"},
+			authz:            "",
+			validate:         stubM2MValidate("mcp@project.iam.gserviceaccount.com", nil),
+			wantOK:           false,
+			wantNotAttempted: true,
 		},
 		{
-			name:      "token validation error fails",
-			allowed:   []string{"mcp@project.iam.gserviceaccount.com"},
-			authz:     "Bearer invalid-token",
-			validate:  stubM2MValidate("", errors.New("invalid token")),
-			wantAuthz: false,
+			name:     "token validation error fails",
+			allowed:  []string{"mcp@project.iam.gserviceaccount.com"},
+			authz:    "Bearer invalid-token",
+			validate: stubM2MValidate("", errors.New("invalid token")),
+			wantOK:   false,
 		},
 		{
-			name:      "lowercase bearer scheme still succeeds",
-			allowed:   []string{"mcp@project.iam.gserviceaccount.com"},
-			authz:     "bearer valid-token",
-			validate:  stubM2MValidate("mcp@project.iam.gserviceaccount.com", nil),
-			wantAuthz: true,
+			name:     "lowercase bearer scheme still succeeds",
+			allowed:  []string{"mcp@project.iam.gserviceaccount.com"},
+			authz:    "bearer valid-token",
+			validate: stubM2MValidate("mcp@project.iam.gserviceaccount.com", nil),
+			wantOK:   true,
 		},
 		{
 			name:    "missing email claim fails",
@@ -84,7 +87,7 @@ func TestM2MVerifierAuthorized(t *testing.T) {
 					Claims:  map[string]interface{}{},
 				}, nil
 			},
-			wantAuthz: false,
+			wantOK: false,
 		},
 		{
 			name:    "unverified email claim fails",
@@ -96,7 +99,7 @@ func TestM2MVerifierAuthorized(t *testing.T) {
 					Claims:  map[string]interface{}{"email": "mcp@project.iam.gserviceaccount.com", "email_verified": false},
 				}, nil
 			},
-			wantAuthz: false,
+			wantOK: false,
 		},
 	}
 
@@ -112,21 +115,43 @@ func TestM2MVerifierAuthorized(t *testing.T) {
 				req.Header.Set("Authorization", tt.authz)
 			}
 
-			if got := v.Authorized(req); got != tt.wantAuthz {
-				t.Errorf("Authorized() = %v, want %v", got, tt.wantAuthz)
+			payload, err := v.Verify(req)
+
+			if tt.wantOK {
+				if err != nil {
+					t.Fatalf("Verify() error = %v, want nil", err)
+				}
+				if payload == nil {
+					t.Fatal("Verify() payload = nil, want non-nil on success")
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatal("Verify() error = nil, want non-nil")
+			}
+			if payload != nil {
+				t.Fatalf("Verify() payload = %+v, want nil on failure", payload)
+			}
+			if got := errors.Is(err, ErrM2MNotAttempted); got != tt.wantNotAttempted {
+				t.Errorf("errors.Is(err, ErrM2MNotAttempted) = %v, want %v (err=%v)", got, tt.wantNotAttempted, err)
 			}
 		})
 	}
 }
 
-func TestM2MVerifierAuthorizedNilReceiver(t *testing.T) {
+func TestM2MVerifierVerifyNilReceiver(t *testing.T) {
 	t.Parallel()
 
 	var v *M2MVerifier
 	req := httptest.NewRequest(http.MethodGet, "/web/history", nil)
 	req.Header.Set("Authorization", "Bearer whatever")
 
-	if v.Authorized(req) {
-		t.Fatal("nil verifier should never authorize")
+	payload, err := v.Verify(req)
+	if err == nil || payload != nil {
+		t.Fatalf("Verify() = (%v, %v), want (nil, non-nil error)", payload, err)
+	}
+	if !errors.Is(err, ErrM2MNotAttempted) {
+		t.Errorf("expected ErrM2MNotAttempted, got %v", err)
 	}
 }

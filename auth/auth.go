@@ -1,3 +1,5 @@
+// Package auth は、Google OAuth2 によるセッションベース認証、CSRF検証、
+// サーバー間通信向けの OIDC トークン検証 (M2M) を提供します。
 package auth
 
 import (
@@ -12,8 +14,11 @@ import (
 )
 
 const (
-	DefaultUserSessionKey     = "user_email"
-	DefaultStateCookie        = "oauth_state"
+	// DefaultUserSessionKey は、認証済みユーザーのメールアドレスを保持するセッションキーです。
+	DefaultUserSessionKey = "user_email"
+	// DefaultStateCookie は、OAuth2の state パラメータを一時保持するクッキー名です。
+	DefaultStateCookie = "oauth_state"
+	// DefaultRedirectSessionKey は、ログイン後のリダイレクト先を保持するセッションキーです。
 	DefaultRedirectSessionKey = "redirect_after_login"
 	googleUserInfoURL         = "https://www.googleapis.com/oauth2/v2/userinfo"
 	sessionMaxAgeSec          = 60 * 60 * 24 * 7

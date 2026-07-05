@@ -19,7 +19,7 @@ func (h *Handler) fetchUserEmail(ctx context.Context, token *oauth2.Token) (stri
 	client := h.oauthConfig.Client(ctx, token)
 	resp, err := client.Get(googleUserInfoURL)
 	if err != nil {
-		return "", fmt.Errorf("Google UserInfo API へのアクセスに失敗: %w", err)
+		return "", fmt.Errorf("google UserInfo API へのアクセスに失敗: %w", err)
 	}
 	defer resp.Body.Close()
 

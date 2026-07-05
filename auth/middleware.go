@@ -29,7 +29,9 @@ func (h *Handler) Middleware(next http.Handler) http.Handler {
 		if err != nil {
 			// セッション解析に失敗した場合（署名キー変更時など）は詳細を記録しクッキーをクリア
 			slog.Warn("セッション取得失敗。新規セッションとして扱います", "error", err)
-			h.clearSessionCookie(w, r)
+			if clearErr := h.clearSessionCookie(w, r); clearErr != nil {
+				slog.Warn("セッションクッキーのクリアに失敗", "error", clearErr)
+			}
 			http.Redirect(w, r, "/auth/login", http.StatusFound)
 			return
 		}

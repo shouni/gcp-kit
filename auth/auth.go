@@ -1,3 +1,5 @@
+// Package auth は、Google OAuth2 によるセッションベース認証、CSRF検証、
+// サーバー間通信向けの OIDC トークン検証 (M2M) を提供します。
 package auth
 
 import (
@@ -12,8 +14,11 @@ import (
 )
 
 const (
-	DefaultUserSessionKey     = "user_email"
-	DefaultStateCookie        = "oauth_state"
+	// DefaultUserSessionKey は、認証済みユーザーのメールアドレスを保持するセッションキーです。
+	DefaultUserSessionKey = "user_email"
+	// DefaultStateCookie は、OAuth2の state パラメータを一時保持するクッキー名です。
+	DefaultStateCookie = "oauth_state"
+	// DefaultRedirectSessionKey は、ログイン後のリダイレクト先を保持するセッションキーです。
 	DefaultRedirectSessionKey = "redirect_after_login"
 	googleUserInfoURL         = "https://www.googleapis.com/oauth2/v2/userinfo"
 	sessionMaxAgeSec          = 60 * 60 * 24 * 7
@@ -59,18 +64,12 @@ func NewHandler(cfg Config) (*Handler, error) {
 	authKey := []byte(cfg.SessionAuthKey)
 	encKey := []byte(cfg.SessionEncryptKey)
 
-	// 1. 署名キー (HMAC) のバリデーション
+	// 署名キー (HMAC) のバリデーション。
 	// 署名用キーは十分な長さがあれば良いため、16バイト以上であることを確認します。
+	// 暗号化キー (AES) の長さ (16/24/32バイト) は validateConfig で検証済みです。
 	authLen := len(authKey)
 	if authLen < 16 {
 		return nil, fmt.Errorf("invalid AuthKey length: %d. Must be at least 16 bytes for security", authLen)
-	}
-
-	// 2. 暗号化キー (AES) のバリデーション
-	// AES暗号化を行う CookieStore の仕様上、16, 24, 32 バイトのいずれかである必要があります。
-	encLen := len(encKey)
-	if encLen != 16 && encLen != 24 && encLen != 32 {
-		return nil, fmt.Errorf("invalid EncryptKey length: %d. Must be 16, 24, or 32 bytes (AES requirement)", encLen)
 	}
 
 	oauthCfg := &oauth2.Config{

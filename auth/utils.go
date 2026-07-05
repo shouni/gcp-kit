@@ -14,12 +14,23 @@ import (
 	"golang.org/x/oauth2"
 )
 
+// extractBearerToken は Authorization ヘッダーから "Bearer " プレフィックス（大文字小文字を
+// 区別しない）を除いたトークン本体を取り出します。プレフィックスが無い場合は ok=false を返します。
+func extractBearerToken(r *http.Request) (token string, ok bool) {
+	const prefix = "Bearer "
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) < len(prefix) || !strings.EqualFold(authHeader[:len(prefix)], prefix) {
+		return "", false
+	}
+	return strings.TrimSpace(authHeader[len(prefix):]), true
+}
+
 // fetchUserEmail は Google UserInfo API を呼び出してメールアドレスを取得します。
 func (h *Handler) fetchUserEmail(ctx context.Context, token *oauth2.Token) (string, error) {
 	client := h.oauthConfig.Client(ctx, token)
 	resp, err := client.Get(googleUserInfoURL)
 	if err != nil {
-		return "", fmt.Errorf("Google UserInfo API へのアクセスに失敗: %w", err)
+		return "", fmt.Errorf("google UserInfo API へのアクセスに失敗: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -90,11 +101,17 @@ func toLowerMap(slice []string) map[string]struct{} {
 	return m
 }
 
-// generateState は CSRF 対策のためのランダムな state 文字列を生成します。
-func generateState() (string, error) {
+// randomToken は 32 バイトの暗号論的乱数を生成し、指定エンコーディングで文字列化します。
+// state パラメータや CSRF トークンなど、推測不可能なランダム文字列が必要な箇所で共通利用します。
+func randomToken(encoding *base64.Encoding) (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
-	return base64.URLEncoding.EncodeToString(b), nil
+	return encoding.EncodeToString(b), nil
+}
+
+// generateState は CSRF 対策のためのランダムな state 文字列を生成します。
+func generateState() (string, error) {
+	return randomToken(base64.URLEncoding)
 }

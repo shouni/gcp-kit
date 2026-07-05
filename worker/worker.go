@@ -1,3 +1,5 @@
+// Package worker は、Cloud Tasks / Cloud Run 等から呼び出される HTTP ハンドラーで
+// JSONペイロードをデコードし、型安全にタスク実行を行うユーティリティを提供します。
 package worker
 
 import (

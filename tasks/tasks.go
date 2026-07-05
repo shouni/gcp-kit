@@ -1,3 +1,4 @@
+// Package tasks は、Cloud Tasks へのタスク投入（Enqueue）を行うユーティリティを提供します。
 package tasks
 
 import (

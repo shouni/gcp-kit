@@ -44,11 +44,10 @@ func (v *M2MVerifier) Verify(r *http.Request) (*idtoken.Payload, error) {
 		return nil, ErrM2MNotAttempted
 	}
 
-	authHeader := r.Header.Get("Authorization")
-	if len(authHeader) < 7 || !strings.EqualFold(authHeader[:7], "Bearer ") {
+	token, ok := extractBearerToken(r)
+	if !ok {
 		return nil, ErrM2MNotAttempted
 	}
-	token := strings.TrimSpace(authHeader[7:])
 
 	payload, err := v.validate(r.Context(), token, v.audience)
 	if err != nil {

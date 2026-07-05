@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
@@ -90,11 +89,10 @@ func (h *Handler) validateCSRF(r *http.Request, session *sessions.Session) bool 
 
 // GenerateAndSaveCSRFToken は、URLセーフな新しいトークンを生成して保存します。
 func (h *Handler) GenerateAndSaveCSRFToken(w http.ResponseWriter, r *http.Request) (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
+	token, err := randomToken(base64.RawURLEncoding)
+	if err != nil {
 		return "", fmt.Errorf("CSRFトークン生成失敗: %w", err)
 	}
-	token := base64.RawURLEncoding.EncodeToString(b)
 	session, err := h.store.Get(r, h.sessionName)
 	if err != nil {
 		return "", fmt.Errorf("セッションの取得に失敗しました: %w", err)
@@ -151,13 +149,12 @@ func (h *Handler) TaskOIDCVerificationMiddleware(next http.Handler) http.Handler
 			return
 		}
 
-		authHeader := r.Header.Get("Authorization")
-		if !strings.HasPrefix(authHeader, "Bearer ") {
+		token, ok := extractBearerToken(r)
+		if !ok {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 
-		token := strings.TrimPrefix(authHeader, "Bearer ")
 		payload, err := idtoken.Validate(r.Context(), token, h.taskAudienceURL)
 		if err != nil {
 			slog.Warn("Taskトークン検証失敗", "error", err)

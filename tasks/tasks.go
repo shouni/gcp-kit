@@ -11,6 +11,8 @@ import (
 
 	cloudtasks "cloud.google.com/go/cloudtasks/apiv2"
 	"cloud.google.com/go/cloudtasks/apiv2/cloudtaskspb"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // Config は Enqueuer の初期化に必要な設定です。
@@ -81,18 +83,69 @@ func newEnqueuerWithClient[T any](cfg Config, client taskClient) (*Enqueuer[T], 
 	}, nil
 }
 
-// Enqueue はタスクを Cloud Tasks キューに投入します。
+// Enqueue はタスクを Cloud Tasks キューに投入します。名前は Cloud Tasks が自動採番するため、
+// 同じ内容で複数回呼び出すと重複したタスクが作成されます。呼び出し側の再試行等で同じ論理的な
+// タスクが二重に作られてはいけない場合は EnqueueWithName を使ってください。
 func (e *Enqueuer[T]) Enqueue(ctx context.Context, payload T) error {
-	// ペイロードを JSON に変換
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("failed to marshal payload: %w", err)
 	}
+	if err := e.createTask(ctx, "", body); err != nil {
+		slog.Error("Cloud Tasks enqueue failed",
+			"error", err,
+			"target", e.cfg.WorkerURL,
+			"queue", e.cfg.QueueID,
+		)
+		return err
+	}
+	return nil
+}
 
-	// タスクリクエストの構築
+// EnqueueWithName は、taskID から導出した決定的な名前でタスクを Cloud Tasks キューに投入します。
+// taskID には英数字とハイフン・アンダースコアのみを含む短い識別子を渡してください
+// （例: jobID + リビジョン/次カット番号）。同じ taskID で複数回呼び出しても、Cloud Tasks が
+// 2回目以降を ALREADY_EXISTS で拒否するため、実際に作られるタスクは1つだけです
+// （このメソッドはその ALREADY_EXISTS を成功として扱います）。
+//
+// 呼び出し元が「同じ論理的な続きタスクを重複して作らない」ことを保証したい場合
+// （例: Cloud Tasks の at-least-once 配信により、続きタスクを enqueue する処理自体が
+// 再実行される可能性がある場合）に使います。ただし、これは重複した「タスク作成」を防ぐだけで、
+// 既存タスクの重複「配信」（同じタスクが2回ワーカーに届くこと）までは防げません。
+// 配信重複への対策は、ワーカー側で処理済み状態を確認してから実処理を行う（冪等な処理）
+// 必要があります。
+func (e *Enqueuer[T]) EnqueueWithName(ctx context.Context, taskID string, payload T) error {
+	if strings.TrimSpace(taskID) == "" {
+		return fmt.Errorf("taskID must not be empty")
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal payload: %w", err)
+	}
+	name := fmt.Sprintf("%s/tasks/%s", e.parent, taskID)
+	err = e.createTask(ctx, name, body)
+	if status.Code(err) == codes.AlreadyExists {
+		// 期待される（異常ではない）経路: 呼び出し元の再試行等で同じ taskID が
+		// 2回目以降に来た状態。createTask 側は ERROR ログを出さずに返しているため、
+		// ここで INFO として記録するだけでよい。
+		slog.Info("Task already enqueued, treating as success", "task", name)
+		return nil
+	}
+	if err != nil {
+		slog.Error("Cloud Tasks enqueue failed",
+			"error", err,
+			"target", e.cfg.WorkerURL,
+			"queue", e.cfg.QueueID,
+		)
+	}
+	return err
+}
+
+func (e *Enqueuer[T]) createTask(ctx context.Context, name string, body []byte) error {
 	req := &cloudtaskspb.CreateTaskRequest{
 		Parent: e.parent,
 		Task: &cloudtaskspb.Task{
+			Name: name,
 			MessageType: &cloudtaskspb.Task_HttpRequest{
 				HttpRequest: &cloudtaskspb.HttpRequest{
 					HttpMethod: cloudtaskspb.HttpMethod_POST,
@@ -116,11 +169,6 @@ func (e *Enqueuer[T]) Enqueue(ctx context.Context, payload T) error {
 	// Cloud Tasks への登録を実行
 	createdTask, err := e.client.CreateTask(ctx, req)
 	if err != nil {
-		slog.Error("Cloud Tasks enqueue failed",
-			"error", err,
-			"target", e.cfg.WorkerURL,
-			"queue", e.cfg.QueueID,
-		)
 		return fmt.Errorf("failed to create task: %w", err)
 	}
 

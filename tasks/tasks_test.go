@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"cloud.google.com/go/cloudtasks/apiv2/cloudtaskspb"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type fakeTaskClient struct {
@@ -161,6 +163,67 @@ func TestEnqueueBuildsCreateTaskRequest(t *testing.T) {
 	}
 	if oidc.GetAudience() != "https://example.com/tasks" {
 		t.Fatalf("Audience = %q", oidc.GetAudience())
+	}
+}
+
+func TestEnqueueWithNameSetsDeterministicTaskName(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeTaskClient{}
+	enqueuer, err := newEnqueuerWithClient[samplePayload](validConfig(), client)
+	if err != nil {
+		t.Fatalf("newEnqueuerWithClient() returned error: %v", err)
+	}
+
+	if err := enqueuer.EnqueueWithName(context.Background(), "job-1-cut-3", samplePayload{UserID: "user-123"}); err != nil {
+		t.Fatalf("EnqueueWithName() returned error: %v", err)
+	}
+
+	wantName := "projects/project/locations/asia-northeast1/queues/queue/tasks/job-1-cut-3"
+	if got := client.req.GetTask().GetName(); got != wantName {
+		t.Fatalf("Task.Name = %q, want %q", got, wantName)
+	}
+}
+
+func TestEnqueueWithNameTreatsAlreadyExistsAsSuccess(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeTaskClient{err: status.Error(codes.AlreadyExists, "task already exists")}
+	enqueuer, err := newEnqueuerWithClient[samplePayload](validConfig(), client)
+	if err != nil {
+		t.Fatalf("newEnqueuerWithClient() returned error: %v", err)
+	}
+
+	if err := enqueuer.EnqueueWithName(context.Background(), "job-1-cut-3", samplePayload{}); err != nil {
+		t.Fatalf("EnqueueWithName() returned error: %v, want nil (ALREADY_EXISTS treated as success)", err)
+	}
+}
+
+func TestEnqueueWithNamePropagatesOtherErrors(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeTaskClient{err: status.Error(codes.Internal, "boom")}
+	enqueuer, err := newEnqueuerWithClient[samplePayload](validConfig(), client)
+	if err != nil {
+		t.Fatalf("newEnqueuerWithClient() returned error: %v", err)
+	}
+
+	if err := enqueuer.EnqueueWithName(context.Background(), "job-1-cut-3", samplePayload{}); err == nil {
+		t.Fatal("EnqueueWithName() error = nil, want error for non-ALREADY_EXISTS failure")
+	}
+}
+
+func TestEnqueueWithNameRejectsEmptyTaskID(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeTaskClient{}
+	enqueuer, err := newEnqueuerWithClient[samplePayload](validConfig(), client)
+	if err != nil {
+		t.Fatalf("newEnqueuerWithClient() returned error: %v", err)
+	}
+
+	if err := enqueuer.EnqueueWithName(context.Background(), "  ", samplePayload{}); err == nil {
+		t.Fatal("EnqueueWithName() error = nil, want error for empty taskID")
 	}
 }
 

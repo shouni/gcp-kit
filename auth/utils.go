@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -80,6 +81,9 @@ func (h *Handler) clearSessionCookie(w http.ResponseWriter, r *http.Request) err
 	session, err := h.store.Get(r, h.sessionName)
 	if err != nil {
 		slog.Warn("Failed to get session on clear, proceeding with new session", "error", err)
+	}
+	if session == nil {
+		return errors.New("session store returned nil session")
 	}
 
 	session.Options.MaxAge = -1 // クッキーを即時期限切れにする

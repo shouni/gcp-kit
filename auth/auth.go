@@ -3,6 +3,7 @@
 package auth
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -123,12 +124,12 @@ func validateConfig(cfg Config) error {
 
 	keyLen := len(cfg.SessionEncryptKey)
 	if keyLen != 16 && keyLen != 24 && keyLen != 32 {
-		return fmt.Errorf("auth config SessionEncryptKey must be 16, 24, or 32 bytes long")
+		return errors.New("auth config SessionEncryptKey must be 16, 24, or 32 bytes long")
 	}
 
 	redirectURL, err := url.Parse(cfg.RedirectURL)
 	if err != nil || redirectURL.Scheme == "" || redirectURL.Host == "" {
-		return fmt.Errorf("auth config RedirectURL must be an absolute URL")
+		return errors.New("auth config RedirectURL must be an absolute URL")
 	}
 
 	return nil

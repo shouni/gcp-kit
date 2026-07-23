@@ -4,6 +4,7 @@ package tasks
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -70,7 +71,7 @@ func newEnqueuerWithClient[T any](cfg Config, client taskClient) (*Enqueuer[T], 
 		return nil, err
 	}
 	if client == nil {
-		return nil, fmt.Errorf("tasks client must not be nil")
+		return nil, errors.New("tasks client must not be nil")
 	}
 
 	parent := fmt.Sprintf("projects/%s/locations/%s/queues/%s",
@@ -116,7 +117,7 @@ func (e *Enqueuer[T]) Enqueue(ctx context.Context, payload T) error {
 // 必要があります。
 func (e *Enqueuer[T]) EnqueueWithName(ctx context.Context, taskID string, payload T) error {
 	if strings.TrimSpace(taskID) == "" {
-		return fmt.Errorf("taskID must not be empty")
+		return errors.New("taskID must not be empty")
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -194,7 +195,7 @@ func validateConfig(cfg Config) error {
 
 	workerURL, err := url.Parse(cfg.WorkerURL)
 	if err != nil || workerURL.Scheme == "" || workerURL.Host == "" {
-		return fmt.Errorf("tasks config WorkerURL must be an absolute URL")
+		return errors.New("tasks config WorkerURL must be an absolute URL")
 	}
 
 	return nil

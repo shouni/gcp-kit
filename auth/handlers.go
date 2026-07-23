@@ -2,6 +2,7 @@ package auth
 
 import (
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -146,7 +147,7 @@ func (h *Handler) saveSessionAndRedirect(w http.ResponseWriter, r *http.Request,
 		slog.Warn("セッションの取得に失敗したため、新規セッションを作成します", "error", err)
 	}
 	if session == nil {
-		return fmt.Errorf("session store returned nil session")
+		return errors.New("session store returned nil session")
 	}
 
 	targetURL := "/"

@@ -108,7 +108,7 @@ func TestM2MVerifierVerify(t *testing.T) {
 			t.Parallel()
 
 			v := NewM2MVerifier("https://service.example.com", tt.allowed)
-			v.validate = tt.validate
+			v.verifier.validate = tt.validate
 
 			req := httptest.NewRequest(http.MethodGet, "/web/history", nil)
 			if tt.authz != "" {

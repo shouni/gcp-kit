@@ -4,65 +4,73 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
-	"strings"
 
 	"golang.org/x/oauth2"
 	"google.golang.org/api/idtoken"
 )
 
-// Login は、OAuth2 ログイン プロセスを初期化し、状態の生成とセッション管理を処理する
+// Login は、OAuth2 ログイン プロセスを初期化し、state / PKCE の生成とセッション管理を処理する
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	state, err := generateState()
 	if err != nil {
-		slog.Error("State生成失敗", "error", err)
+		h.log().ErrorContext(r.Context(), "State生成失敗", "error", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
 
+	// PKCE: 認可コードの横取りに備え、code_verifier をクライアント側に保持します。
+	verifier := oauth2.GenerateVerifier()
+
 	session, err := h.store.Get(r, h.sessionName)
-	if err == nil {
+	if err != nil {
+		h.log().WarnContext(r.Context(), "セッション取得失敗。リダイレクト先の保存をスキップします", "error", err)
+	}
+	if err == nil && session != nil {
 		if redirectTo := r.URL.Query().Get("redirect_to"); redirectTo != "" {
-			// redirectToが'/'で始まり、'//'で始まらないことを確認
-			if strings.HasPrefix(redirectTo, "/") && !strings.HasPrefix(redirectTo, "//") {
+			// 同一オリジンの相対パスのみを保存します（オープンリダイレクタ対策）。
+			if isSafeRelativePath(redirectTo) {
 				session.Values[DefaultRedirectSessionKey] = redirectTo
 				if err := session.Save(r, w); err != nil {
-					slog.Error("Failed to save session for redirect", "error", err)
+					h.log().ErrorContext(r.Context(), "Failed to save session for redirect", "error", err)
 					http.Error(w, "Could not save session", http.StatusInternalServerError)
 					return
 				}
 			} else {
-				slog.Warn("Invalid redirect_to parameter detected", "redirectTo", redirectTo)
+				h.log().WarnContext(r.Context(), "Invalid redirect_to parameter detected", "redirectTo", redirectTo)
 			}
 		}
 	}
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     DefaultStateCookie,
-		Value:    state,
-		MaxAge:   stateCookieMaxAgeSec,
-		HttpOnly: true,
-		Secure:   h.isSecureCookie,
-		Path:     "/auth/callback",
-	})
+	h.setTemporaryCookie(w, DefaultStateCookie, state)
+	h.setTemporaryCookie(w, DefaultVerifierCookie, verifier)
 
-	http.Redirect(w, r, h.oauthConfig.AuthCodeURL(state), http.StatusTemporaryRedirect)
+	authURL := h.oauthConfig.AuthCodeURL(state, oauth2.S256ChallengeOption(verifier))
+	http.Redirect(w, r, authURL, http.StatusTemporaryRedirect)
 }
 
 // Callback OAuth2 コールバックを処理し、CSRF 状態を検証し、認証コードをトークンと交換し、ユーザー セッションを処理します。
 func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	if !validateCallbackState(r) {
-		slog.Warn("CSRF攻撃の可能性を検知")
+		h.log().WarnContext(r.Context(), "CSRF攻撃の可能性を検知")
 		http.Error(w, "Invalid state", http.StatusBadRequest)
 		return
 	}
 
-	h.clearStateCookie(w)
+	verifier, err := r.Cookie(DefaultVerifierCookie)
+	if err != nil || verifier.Value == "" {
+		// Login を経由していない、あるいはクッキーが期限切れ。再ログインさせます。
+		h.log().WarnContext(r.Context(), "PKCE verifier クッキーがありません")
+		h.clearTemporaryCookies(w)
+		http.Error(w, "Invalid state", http.StatusBadRequest)
+		return
+	}
 
-	token, err := h.exchangeCode(r)
+	h.clearTemporaryCookies(w)
+
+	token, err := h.exchangeCode(r, verifier.Value)
 	if err != nil {
-		slog.Error("トークン交換失敗", "error", err)
+		h.log().ErrorContext(r.Context(), "トークン交換失敗", "error", err)
 		http.Error(w, "Auth failed", http.StatusInternalServerError)
 		return
 	}
@@ -70,16 +78,36 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	email := h.resolveUserEmail(r, token)
 
 	if email == "" || !h.isAuthorized(email) {
-		slog.Warn("未許可ユーザーアクセス", "email", email)
+		h.log().WarnContext(r.Context(), "未許可ユーザーアクセス", "email", email)
 		http.Error(w, "Unauthorized", http.StatusForbidden)
 		return
 	}
 
 	if err := h.saveSessionAndRedirect(w, r, email); err != nil {
-		slog.Error("セッション保存失敗", "error", err)
+		h.log().ErrorContext(r.Context(), "セッション保存失敗", "error", err)
 		http.Error(w, "Could not save session", http.StatusInternalServerError)
 		return
 	}
+}
+
+// Logout はセッションを破棄し、ログインページ（または redirect_to で指定された同一オリジンの
+// パス）へリダイレクトします。
+//
+// 既定の sessions.CookieStore はクッキー自体がセッションの実体であるため、
+// これはクライアントにクッキーの破棄を指示するだけで、サーバー側での失効はできません
+// （盗まれたクッキーは有効期限まで使えます）。確実な失効が必要な場合は
+// Config.Store にサーバーサイドのストアを注入してください。
+func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
+	if err := h.clearSessionCookie(w, r); err != nil {
+		h.log().WarnContext(r.Context(), "ログアウト時のセッション破棄に失敗", "error", err)
+	}
+
+	target := h.LoginPath()
+	if redirectTo := r.URL.Query().Get("redirect_to"); isSafeRelativePath(redirectTo) {
+		target = redirectTo
+	}
+	//nolint:gosec // G710: target は isSafeRelativePath で同一オリジンの相対パスに限定済み
+	http.Redirect(w, r, target, http.StatusSeeOther)
 }
 
 func validateCallbackState(r *http.Request) bool {
@@ -91,25 +119,46 @@ func validateCallbackState(r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(cookieState.Value), []byte(queryState)) == 1
 }
 
-func (h *Handler) clearStateCookie(w http.ResponseWriter) {
+// setTemporaryCookie は state / PKCE verifier のような短命のクッキーを発行します。
+// SameSite は Lax 固定です。Google からのコールバックはクロスサイトのトップレベル
+// GET ナビゲーションであるため、Strict にするとクッキーが送信されません。
+func (h *Handler) setTemporaryCookie(w http.ResponseWriter, name, value string) {
+	//nolint:gosec // G124: Secure はローカル開発(http)を許容するため設定値に従う。HttpOnly/SameSite は常に設定済み。
 	http.SetCookie(w, &http.Cookie{
-		Name:     DefaultStateCookie,
-		Value:    "",
-		MaxAge:   -1,
-		Path:     "/auth/callback",
+		Name:     name,
+		Value:    value,
+		MaxAge:   h.stateCookieMaxAge(),
+		Path:     h.CallbackPath(),
 		HttpOnly: true,
 		Secure:   h.isSecureCookie,
 		SameSite: http.SameSiteLaxMode,
 	})
 }
 
-func (h *Handler) exchangeCode(r *http.Request) (*oauth2.Token, error) {
+// clearTemporaryCookies は state / PKCE verifier クッキーを無効化します。
+// 属性（Path/SameSite など）は発行時と一致させる必要があります。
+func (h *Handler) clearTemporaryCookies(w http.ResponseWriter) {
+	for _, name := range []string{DefaultStateCookie, DefaultVerifierCookie} {
+		//nolint:gosec // G124: Secure はローカル開発(http)を許容するため設定値に従う。HttpOnly/SameSite は常に設定済み。
+		http.SetCookie(w, &http.Cookie{
+			Name:     name,
+			Value:    "",
+			MaxAge:   -1,
+			Path:     h.CallbackPath(),
+			HttpOnly: true,
+			Secure:   h.isSecureCookie,
+			SameSite: http.SameSiteLaxMode,
+		})
+	}
+}
+
+func (h *Handler) exchangeCode(r *http.Request, verifier string) (*oauth2.Token, error) {
 	code := r.URL.Query().Get("code")
-	return h.oauthConfig.Exchange(r.Context(), code)
+	return h.oauthConfig.Exchange(r.Context(), code, oauth2.VerifierOption(verifier))
 }
 
 func (h *Handler) resolveUserEmail(r *http.Request, token *oauth2.Token) string {
-	email := extractEmailFromIDToken(r, token, h.oauthConfig.ClientID)
+	email := h.extractEmailFromIDToken(r, token)
 	if email != "" {
 		return email
 	}
@@ -117,25 +166,27 @@ func (h *Handler) resolveUserEmail(r *http.Request, token *oauth2.Token) string 
 	var err error
 	email, err = h.fetchUserEmail(r.Context(), token)
 	if err != nil {
-		slog.Warn("API経由でのユーザーメールアドレス取得に失敗しました", "error", err)
+		h.log().WarnContext(r.Context(), "API経由でのユーザーメールアドレス取得に失敗しました", "error", err)
 	}
 	return email
 }
 
-func extractEmailFromIDToken(r *http.Request, token *oauth2.Token, clientID string) string {
+func (h *Handler) extractEmailFromIDToken(r *http.Request, token *oauth2.Token) string {
 	rawIDToken, ok := token.Extra("id_token").(string)
 	if !ok || rawIDToken == "" {
 		return ""
 	}
 
-	payload, err := idtoken.Validate(r.Context(), rawIDToken, clientID)
+	payload, err := idtoken.Validate(r.Context(), rawIDToken, h.oauthConfig.ClientID)
 	if err != nil {
-		slog.Debug("IDトークンの検証に失敗しました", "error", err)
+		h.log().DebugContext(r.Context(), "IDトークンの検証に失敗しました", "error", err)
 		return ""
 	}
 
-	emailClaim, ok := payload.Claims["email"].(string)
-	if !ok {
+	// UserInfo API 経由 (fetchUserEmail) や M2M 検証と同じ基準を適用します。
+	emailClaim, err := verifiedEmailFromClaims(payload.Claims)
+	if err != nil {
+		h.log().WarnContext(r.Context(), "IDトークンのメールアドレスを採用できません", "error", err)
 		return ""
 	}
 	return emailClaim
@@ -144,23 +195,31 @@ func extractEmailFromIDToken(r *http.Request, token *oauth2.Token, clientID stri
 func (h *Handler) saveSessionAndRedirect(w http.ResponseWriter, r *http.Request, email string) error {
 	session, err := h.store.Get(r, h.sessionName)
 	if err != nil {
-		slog.Warn("セッションの取得に失敗したため、新規セッションを作成します", "error", err)
+		h.log().WarnContext(r.Context(), "セッションの取得に失敗したため、新規セッションを作成します", "error", err)
 	}
 	if session == nil {
 		return errors.New("session store returned nil session")
 	}
 
 	targetURL := "/"
-	if url, ok := session.Values[DefaultRedirectSessionKey].(string); ok && url != "" {
-		targetURL = url
+	if url, ok := session.Values[DefaultRedirectSessionKey].(string); ok {
 		delete(session.Values, DefaultRedirectSessionKey)
+		// 保存時にも検証済みですが、セッションの中身を信用せず読み出し時にも確認します。
+		if isSafeRelativePath(url) {
+			targetURL = url
+		}
 	}
+
+	// ログイン前のセッションに紐づく CSRF トークンは破棄し、認証済みセッション用に
+	// 再生成させます（ログイン前に固定されたトークンを使い回させないため）。
+	delete(session.Values, CSRFTokenKey)
 
 	session.Values[DefaultUserSessionKey] = email
 	if err := session.Save(r, w); err != nil {
 		return fmt.Errorf("save session: %w", err)
 	}
 
+	//nolint:gosec // G710: targetURL は isSafeRelativePath で同一オリジンの相対パスに限定済み
 	http.Redirect(w, r, targetURL, http.StatusSeeOther)
 	return nil
 }

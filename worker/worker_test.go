@@ -3,6 +3,8 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +13,15 @@ import (
 
 type samplePayload struct {
 	Name string `json:"name"`
+}
+
+// newTaskRequest / newRecorder は、ワーカーへの POST を組み立てる共通ヘルパーです。
+func newTaskRequest(body io.Reader) *http.Request {
+	return httptest.NewRequest(http.MethodPost, "/tasks", body)
+}
+
+func newRecorder() *httptest.ResponseRecorder {
+	return httptest.NewRecorder()
 }
 
 type executorMock struct {
@@ -117,4 +128,95 @@ func TestProcessTask_Success(t *testing.T) {
 	if exec.payload.Name != "alice" {
 		t.Fatalf("payload.Name = %q, want %q", exec.payload.Name, "alice")
 	}
+}
+
+// TestProcessTask_PermanentError は、リトライしても無意味な失敗を 2xx で打ち切り、
+// Cloud Tasks が最大試行数まで再送し続けるのを防いでいることを確認します。
+func TestProcessTask_PermanentError(t *testing.T) {
+	t.Parallel()
+
+	exec := &executorMock{err: fmt.Errorf("%w: unknown command", ErrPermanent)}
+	h := NewHandler[samplePayload](exec)
+
+	rr := newRecorder()
+	h.ServeHTTP(rr, newTaskRequest(strings.NewReader(`{"name":"alice"}`)))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (permanent failures must not be retried)", rr.Code, http.StatusOK)
+	}
+	if !exec.called {
+		t.Fatal("executor should be called")
+	}
+}
+
+func TestProcessTask_BodyTooLarge(t *testing.T) {
+	t.Parallel()
+
+	exec := &executorMock{}
+	h := NewHandler[samplePayload](exec, WithMaxBodyBytes(16))
+
+	body := fmt.Sprintf(`{"name":%q}`, strings.Repeat("a", 128))
+	rr := newRecorder()
+	h.ServeHTTP(rr, newTaskRequest(strings.NewReader(body)))
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+	if exec.called {
+		t.Fatal("executor should not be called")
+	}
+}
+
+// 既定の上限は Cloud Tasks のタスクサイズ上限 (1MB) に合わせてあるため、
+// 通常のペイロードが弾かれることはありません。
+func TestProcessTask_DefaultBodyLimitAcceptsTypicalPayload(t *testing.T) {
+	t.Parallel()
+
+	exec := &executorMock{}
+	h := NewHandler[samplePayload](exec)
+
+	body := fmt.Sprintf(`{"name":%q}`, strings.Repeat("a", 256<<10))
+	rr := newRecorder()
+	h.ServeHTTP(rr, newTaskRequest(strings.NewReader(body)))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+}
+
+func TestProcessTask_StrictJSON(t *testing.T) {
+	t.Parallel()
+
+	body := `{"name":"alice","unexpected":1}`
+
+	t.Run("lenient by default", func(t *testing.T) {
+		t.Parallel()
+		h := NewHandler[samplePayload](&executorMock{})
+		rr := newRecorder()
+		h.ServeHTTP(rr, newTaskRequest(strings.NewReader(body)))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+	})
+
+	t.Run("rejects unknown fields with WithStrictJSON", func(t *testing.T) {
+		t.Parallel()
+		exec := &executorMock{}
+		h := NewHandler[samplePayload](exec, WithStrictJSON())
+		rr := newRecorder()
+		h.ServeHTTP(rr, newTaskRequest(strings.NewReader(body)))
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+		}
+		if exec.called {
+			t.Fatal("executor should not be called")
+		}
+	})
+}
+
+// TestHandlerImplementsHTTPHandler は、ルーターへ直接渡せることを保証します。
+func TestHandlerImplementsHTTPHandler(t *testing.T) {
+	t.Parallel()
+
+	var _ http.Handler = NewHandler[samplePayload](&executorMock{})
 }

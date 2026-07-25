@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"cloud.google.com/go/cloudtasks/apiv2/cloudtaskspb"
 	"google.golang.org/grpc/codes"
@@ -85,13 +87,26 @@ func TestValidateConfig(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "missing audience",
+			// Audience は省略可能で、その場合は WorkerURL が使われます。
+			name: "missing audience defaults to worker url",
 			cfg: Config{
 				ProjectID:           valid.ProjectID,
 				LocationID:          valid.LocationID,
 				QueueID:             valid.QueueID,
 				WorkerURL:           valid.WorkerURL,
 				ServiceAccountEmail: valid.ServiceAccountEmail,
+			},
+			wantErr: false,
+		},
+		{
+			name: "relative audience",
+			cfg: Config{
+				ProjectID:           valid.ProjectID,
+				LocationID:          valid.LocationID,
+				QueueID:             valid.QueueID,
+				WorkerURL:           valid.WorkerURL,
+				ServiceAccountEmail: valid.ServiceAccountEmail,
+				Audience:            "/tasks",
 			},
 			wantErr: true,
 		},
@@ -224,6 +239,156 @@ func TestEnqueueWithNameRejectsEmptyTaskID(t *testing.T) {
 
 	if err := enqueuer.EnqueueWithName(context.Background(), "  ", samplePayload{}); err == nil {
 		t.Fatal("EnqueueWithName() error = nil, want error for empty taskID")
+	}
+}
+
+// TestValidateTaskID は、Cloud Tasks に往復させる前に不正なIDを弾くことを確認します。
+func TestValidateTaskID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		taskID  string
+		wantErr bool
+	}{
+		{name: "alphanumeric with hyphen and underscore", taskID: "job-1_cut-3", wantErr: false},
+		{name: "max length", taskID: strings.Repeat("a", 500), wantErr: false},
+		{name: "empty", taskID: "", wantErr: true},
+		{name: "whitespace only", taskID: "   ", wantErr: true},
+		{name: "slash is not allowed", taskID: "job/1", wantErr: true},
+		{name: "colon is not allowed", taskID: "job:1", wantErr: true},
+		{name: "dot is not allowed", taskID: "job.1", wantErr: true},
+		{name: "too long", taskID: strings.Repeat("a", 501), wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if err := validateTaskID(tt.taskID); (err != nil) != tt.wantErr {
+				t.Fatalf("validateTaskID(%q) error = %v, wantErr %v", tt.taskID, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestEnqueueWithNameRejectsInvalidTaskIDBeforeCallingAPI(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeTaskClient{}
+	enqueuer, err := newEnqueuerWithClient[samplePayload](validConfig(), client)
+	if err != nil {
+		t.Fatalf("newEnqueuerWithClient() returned error: %v", err)
+	}
+
+	if err := enqueuer.EnqueueWithName(context.Background(), "job/1", samplePayload{}); err == nil {
+		t.Fatal("EnqueueWithName() error = nil, want error for invalid taskID")
+	}
+	if client.req != nil {
+		t.Fatal("CreateTask must not be called for an invalid taskID")
+	}
+}
+
+func TestAudienceDefaultsToWorkerURL(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfig()
+	cfg.Audience = ""
+
+	client := &fakeTaskClient{}
+	enqueuer, err := newEnqueuerWithClient[samplePayload](cfg, client)
+	if err != nil {
+		t.Fatalf("newEnqueuerWithClient() returned error: %v", err)
+	}
+
+	if err := enqueuer.Enqueue(context.Background(), samplePayload{}); err != nil {
+		t.Fatalf("Enqueue() returned error: %v", err)
+	}
+
+	got := client.req.GetTask().GetHttpRequest().GetOidcToken().GetAudience()
+	if got != cfg.WorkerURL {
+		t.Fatalf("Audience = %q, want %q", got, cfg.WorkerURL)
+	}
+}
+
+func TestEnqueueWithOptions(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeTaskClient{}
+	enqueuer, err := newEnqueuerWithClient[samplePayload](validConfig(), client)
+	if err != nil {
+		t.Fatalf("newEnqueuerWithClient() returned error: %v", err)
+	}
+
+	scheduleAt := time.Now().Add(90 * time.Second).UTC().Truncate(time.Second)
+	name, err := enqueuer.EnqueueWithOptions(context.Background(), samplePayload{UserID: "u"},
+		WithTaskID("job-1"),
+		WithScheduleTime(scheduleAt),
+		WithDispatchDeadline(10*time.Minute),
+		WithHeader("X-Trace-Id", "trace-123"),
+	)
+	if err != nil {
+		t.Fatalf("EnqueueWithOptions() returned error: %v", err)
+	}
+	if name == "" {
+		t.Fatal("EnqueueWithOptions() returned an empty task name")
+	}
+
+	task := client.req.GetTask()
+	if got := task.GetName(); got != "projects/project/locations/asia-northeast1/queues/queue/tasks/job-1" {
+		t.Fatalf("Task.Name = %q", got)
+	}
+	if got := task.GetScheduleTime().AsTime(); !got.Equal(scheduleAt) {
+		t.Fatalf("ScheduleTime = %v, want %v", got, scheduleAt)
+	}
+	if got := task.GetDispatchDeadline().AsDuration(); got != 10*time.Minute {
+		t.Fatalf("DispatchDeadline = %v, want %v", got, 10*time.Minute)
+	}
+	headers := task.GetHttpRequest().GetHeaders()
+	if headers["X-Trace-Id"] != "trace-123" {
+		t.Fatalf("X-Trace-Id = %q, want %q", headers["X-Trace-Id"], "trace-123")
+	}
+	// カスタムヘッダーを渡しても Content-Type は維持されます。
+	if headers["Content-Type"] != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", headers["Content-Type"])
+	}
+}
+
+func TestWithDelaySetsScheduleTime(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeTaskClient{}
+	enqueuer, err := newEnqueuerWithClient[samplePayload](validConfig(), client)
+	if err != nil {
+		t.Fatalf("newEnqueuerWithClient() returned error: %v", err)
+	}
+
+	before := time.Now()
+	if _, err := enqueuer.EnqueueWithOptions(context.Background(), samplePayload{}, WithDelay(time.Hour)); err != nil {
+		t.Fatalf("EnqueueWithOptions() returned error: %v", err)
+	}
+
+	got := client.req.GetTask().GetScheduleTime().AsTime()
+	if got.Before(before.Add(time.Hour)) || got.After(time.Now().Add(time.Hour)) {
+		t.Fatalf("ScheduleTime = %v, want roughly one hour from now", got)
+	}
+}
+
+func TestEnqueueWithOptionsReturnsCreatedTaskName(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeTaskClient{err: status.Error(codes.AlreadyExists, "task already exists")}
+	enqueuer, err := newEnqueuerWithClient[samplePayload](validConfig(), client)
+	if err != nil {
+		t.Fatalf("newEnqueuerWithClient() returned error: %v", err)
+	}
+
+	// ALREADY_EXISTS は成功扱いのため、要求した名前がそのまま返ります。
+	name, err := enqueuer.EnqueueWithOptions(context.Background(), samplePayload{}, WithTaskID("job-1"))
+	if err != nil {
+		t.Fatalf("EnqueueWithOptions() returned error: %v", err)
+	}
+	if want := "projects/project/locations/asia-northeast1/queues/queue/tasks/job-1"; name != want {
+		t.Fatalf("name = %q, want %q", name, want)
 	}
 }
 

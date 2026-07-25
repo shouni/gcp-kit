@@ -25,6 +25,16 @@ func newTestCookieStore() *sessions.CookieStore {
 	return sessions.NewCookieStore([]byte(testCookieKey), []byte(testCookieKey))
 }
 
+// newRecorderForCookies / newRequestForRoutes are thin wrappers used by tests
+// that only care about the response cookies or a bare request to a path.
+func newRecorderForCookies() *httptest.ResponseRecorder {
+	return httptest.NewRecorder()
+}
+
+func newRequestForRoutes(method, target string) *http.Request {
+	return httptest.NewRequest(method, target, nil)
+}
+
 // newRewriteContext returns a context whose oauth2.HTTPClient value routes
 // every outgoing request to server, regardless of the request's original
 // host. This lets code with a hardcoded external URL (e.g. Google's UserInfo

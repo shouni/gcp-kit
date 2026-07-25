@@ -12,10 +12,23 @@ linters:
     - unused
     - gocritic
     - revive
+    # セキュリティ寄りのライブラリのため、以下を追加で有効にしています。
+    - gosec # 暗号・権限・インジェクション周りの定番チェック
+    - errorlint # errors.Is/As の取りこぼし（== 比較や %v ラップ）を検出
+    - bodyclose # HTTP レスポンスボディの閉じ忘れ
+    - noctx # context 無しの HTTP リクエスト発行
   settings:
     errcheck:
       exclude-functions:
         - (io.ReadCloser).Close
+
+  exclusions:
+    rules:
+      # テストではエラーパスの再現のために意図的な組み立てを行うため、緩めます。
+      - path: _test\.go
+        linters:
+          - gosec
+          - noctx
 
 formatters:
   enable:

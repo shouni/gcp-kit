@@ -255,6 +255,93 @@ func TestValidateCSRF(t *testing.T) {
 	})
 }
 
+// TestValidateOrigin は、トークン検証に加えた多層防御としての Origin 検証を確認します。
+// Origin が無いリクエスト（ブラウザ以外のAPIクライアント等）は素通しし、
+// 提示されている場合のみ一致を要求します。
+func TestValidateOrigin(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		origin string
+		want   bool
+	}{
+		{name: "no origin header", origin: "", want: true},
+		{name: "same origin", origin: "https://app.example.com", want: true},
+		{name: "same host different scheme", origin: "http://app.example.com", want: true},
+		{name: "cross origin", origin: "https://evil.com", want: false},
+		{name: "subdomain is not the same origin", origin: "https://evil.app.example.com", want: false},
+		{name: "opaque origin", origin: "null", want: false},
+		{name: "malformed origin", origin: "://", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			req := httptest.NewRequest(http.MethodPost, "https://app.example.com/x", nil)
+			req.Host = "app.example.com"
+			if tt.origin != "" {
+				req.Header.Set("Origin", tt.origin)
+			}
+			if got := validateOrigin(req); got != tt.want {
+				t.Fatalf("validateOrigin(%q) = %v, want %v", tt.origin, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMiddlewareRejectsCrossOriginPost は、正しいCSRFトークンを持っていても
+// Origin が一致しないリクエストは拒否されることを確認します。
+func TestMiddlewareRejectsCrossOriginPost(t *testing.T) {
+	t.Parallel()
+
+	store := newTestCookieStore()
+	h := &Handler{store: store, sessionName: "test-session"}
+
+	seedReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	seedRR := httptest.NewRecorder()
+	session, err := store.Get(seedReq, h.sessionName)
+	if err != nil {
+		t.Fatalf("store.Get() error = %v", err)
+	}
+	session.Values[DefaultUserSessionKey] = "user@example.com"
+	session.Values[CSRFTokenKey] = "tok"
+	if err := session.Save(seedReq, seedRR); err != nil {
+		t.Fatalf("session.Save() error = %v", err)
+	}
+
+	newReq := func(origin string) *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "https://app.example.com/private", nil)
+		req.Host = "app.example.com"
+		req.Header.Set(HeaderXCSRFToken, "tok")
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		for _, c := range seedRR.Result().Cookies() {
+			req.AddCookie(c)
+		}
+		return req
+	}
+
+	nextCalled := false
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { nextCalled = true })
+
+	rr := httptest.NewRecorder()
+	h.Middleware(next).ServeHTTP(rr, newReq("https://evil.com"))
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin status = %d, want %d", rr.Code, http.StatusForbidden)
+	}
+	if nextCalled {
+		t.Fatal("next handler must not be called for a cross-origin POST")
+	}
+
+	rr = httptest.NewRecorder()
+	h.Middleware(next).ServeHTTP(rr, newReq("https://app.example.com"))
+	if !nextCalled {
+		t.Fatalf("same-origin POST was rejected with status %d", rr.Code)
+	}
+}
+
 func TestGenerateAndSaveCSRFToken(t *testing.T) {
 	t.Parallel()
 
@@ -345,26 +432,50 @@ func TestGetCSRFTokenFromSession(t *testing.T) {
 	})
 }
 
-func TestTaskOIDCVerificationMiddlewareMissingAudience(t *testing.T) {
+const (
+	testTaskAudience = "https://worker.example.com/tasks"
+	testTaskAccount  = "tasks@project.iam.gserviceaccount.com"
+)
+
+// TestTaskOIDCVerificationMiddlewareNotConfigured は、audience か許可リストの
+// いずれかが欠けている Handler が fail-closed に倒れることを保証します。
+func TestTaskOIDCVerificationMiddlewareNotConfigured(t *testing.T) {
 	t.Parallel()
 
-	h := &Handler{}
-	nextCalled := false
-	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		nextCalled = true
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/tasks", nil)
-	req.Header.Set("Authorization", "Bearer token")
-	rr := httptest.NewRecorder()
-
-	h.TaskOIDCVerificationMiddleware(next).ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want %d", rr.Code, http.StatusInternalServerError)
+	tests := []struct {
+		name    string
+		handler *Handler
+	}{
+		{name: "no verifier at all", handler: &Handler{}},
+		{
+			name:    "audience without allowlist",
+			handler: &Handler{taskVerifier: newOIDCVerifier(testTaskAudience, nil)},
+		},
+		{
+			name:    "allowlist without audience",
+			handler: &Handler{taskVerifier: newOIDCVerifier("", []string{testTaskAccount})},
+		},
 	}
-	if nextCalled {
-		t.Fatalf("next handler must not be called")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			nextCalled := false
+			next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { nextCalled = true })
+
+			req := httptest.NewRequest(http.MethodPost, "/tasks", nil)
+			req.Header.Set("Authorization", "Bearer token")
+			rr := httptest.NewRecorder()
+
+			tt.handler.TaskOIDCVerificationMiddleware(next).ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want %d", rr.Code, http.StatusInternalServerError)
+			}
+			if nextCalled {
+				t.Fatal("next handler must not be called")
+			}
+		})
 	}
 }
 
@@ -372,7 +483,7 @@ func TestTaskOIDCVerificationMiddleware(t *testing.T) {
 	t.Parallel()
 
 	newHandler := func() *Handler {
-		return &Handler{taskAudienceURL: "https://worker.example.com/tasks"}
+		return &Handler{taskVerifier: newOIDCVerifier(testTaskAudience, []string{testTaskAccount})}
 	}
 
 	t.Run("missing bearer token returns 401", func(t *testing.T) {
@@ -402,7 +513,7 @@ func TestTaskOIDCVerificationMiddleware(t *testing.T) {
 		// A well-formed but expired JWT fails idtoken's expiry check before
 		// any network call is made to fetch Google's signing keys.
 		jwt := makeUnsignedJWT(map[string]any{
-			"aud": h.taskAudienceURL,
+			"aud": testTaskAudience,
 			"exp": 1,
 		})
 		req := httptest.NewRequest(http.MethodPost, "/tasks", nil)
@@ -415,6 +526,53 @@ func TestTaskOIDCVerificationMiddleware(t *testing.T) {
 		}
 		if nextCalled {
 			t.Fatal("next handler must not be called")
+		}
+	})
+
+	// audience は誰でも指定できる文字列に過ぎないため、署名と audience が正しくても
+	// 許可リストに無いサービスアカウントからの呼び出しは拒否しなければなりません。
+	t.Run("valid token from non-allowed service account returns 403", func(t *testing.T) {
+		t.Parallel()
+		h := newHandler()
+		h.taskVerifier.validate = stubM2MValidate("attacker@evil.iam.gserviceaccount.com", nil)
+		nextCalled := false
+		next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { nextCalled = true })
+
+		req := httptest.NewRequest(http.MethodPost, "/tasks", nil)
+		req.Header.Set("Authorization", "Bearer valid-token")
+		rr := httptest.NewRecorder()
+		h.TaskOIDCVerificationMiddleware(next).ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusForbidden)
+		}
+		if nextCalled {
+			t.Fatal("next handler must not be called")
+		}
+	})
+
+	t.Run("allowed service account passes and exposes the payload", func(t *testing.T) {
+		t.Parallel()
+		h := newHandler()
+		h.taskVerifier.validate = stubM2MValidate(testTaskAccount, nil)
+
+		var gotSubject string
+		next := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			if payload, ok := OIDCPayloadFromContext(r.Context()); ok {
+				gotSubject = payload.Subject
+			}
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/tasks", nil)
+		req.Header.Set("Authorization", "Bearer valid-token")
+		rr := httptest.NewRecorder()
+		h.TaskOIDCVerificationMiddleware(next).ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+		if gotSubject != "sub" {
+			t.Fatalf("OIDCPayloadFromContext() subject = %q, want %q", gotSubject, "sub")
 		}
 	})
 }

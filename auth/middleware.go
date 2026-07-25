@@ -3,55 +3,62 @@ package auth
 import (
 	"crypto/subtle"
 	"encoding/base64"
+	"errors"
 	"fmt"
-	"log/slog"
 	"mime"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/gorilla/sessions"
-	"google.golang.org/api/idtoken"
 )
 
 const (
 	// CSRFTokenKey はセッション内でトークンを保持するためのキーです。
 	CSRFTokenKey = "csrf_token"
 	// HeaderXCSRFToken はフロントエンドがトークンを送信する際の標準ヘッダーです。
+	//nolint:gosec // G101: 認証情報ではなく HTTP ヘッダー名の定数
 	HeaderXCSRFToken = "X-CSRF-Token"
 )
 
 // Middleware は、セッションベースの認証とCSRF検証を適用します。
+// 認証を通過したリクエストには、下流のハンドラーが EmailFromContext で参照できるよう
+// ユーザーのメールアドレスがコンテキストに格納されます。
 func (h *Handler) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		session, err := h.store.Get(r, h.sessionName)
 		if err != nil {
 			// セッション解析に失敗した場合（署名キー変更時など）は詳細を記録しクッキーをクリア
-			slog.Warn("セッション取得失敗。新規セッションとして扱います", "error", err)
+			h.log().WarnContext(r.Context(), "セッション取得失敗。新規セッションとして扱います", "error", err)
 			if clearErr := h.clearSessionCookie(w, r); clearErr != nil {
-				slog.Warn("セッションクッキーのクリアに失敗", "error", clearErr)
+				h.log().WarnContext(r.Context(), "セッションクッキーのクリアに失敗", "error", clearErr)
 			}
-			http.Redirect(w, r, "/auth/login", http.StatusFound)
+			http.Redirect(w, r, h.buildLoginRedirectURL(r), http.StatusFound)
 			return
 		}
 
 		// 1. ログイン認証チェック
 		email, ok := session.Values[DefaultUserSessionKey].(string)
 		if !ok || email == "" {
-			http.Redirect(w, r, buildLoginRedirectURL(r), http.StatusFound)
+			http.Redirect(w, r, h.buildLoginRedirectURL(r), http.StatusFound)
 			return
 		}
 
 		// 2. CSRFチェック (副作用のあるメソッドのみ)
 		if isStateChangingMethod(r.Method) {
+			if !validateOrigin(r) {
+				h.log().WarnContext(r.Context(), "Origin検証失敗", "email", email, "origin", r.Header.Get("Origin"), "path", r.URL.Path)
+				http.Error(w, "Invalid origin", http.StatusForbidden)
+				return
+			}
 			if !h.validateCSRF(r, session) {
-				slog.Warn("CSRF検証失敗", "email", email, "method", r.Method, "path", r.URL.Path)
+				h.log().WarnContext(r.Context(), "CSRF検証失敗", "email", email, "method", r.Method, "path", r.URL.Path)
 				http.Error(w, "Invalid CSRF token", http.StatusForbidden)
 				return
 			}
 		}
 
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(WithEmail(r.Context(), email)))
 	})
 }
 
@@ -63,8 +70,27 @@ func isStateChangingMethod(method string) bool {
 		method == http.MethodPatch
 }
 
+// validateOrigin は、トークン検証に加えた多層防御として Origin ヘッダーを検証します。
+// Origin が無い場合（ブラウザ以外のクライアントなど）はトークン検証に委ねるため true を返し、
+// 提示されている場合のみリクエスト先ホストとの一致を要求します。
+func validateOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	return strings.EqualFold(parsed.Host, r.Host)
+}
+
 // validateCSRF は、リクエストのトークンを検証します。
 func (h *Handler) validateCSRF(r *http.Request, session *sessions.Session) bool {
+	if session == nil {
+		return false
+	}
+
 	expected, ok := session.Values[CSRFTokenKey].(string)
 	if !ok || expected == "" {
 		return false
@@ -97,6 +123,9 @@ func (h *Handler) GenerateAndSaveCSRFToken(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		return "", fmt.Errorf("セッションの取得に失敗しました: %w", err)
 	}
+	if session == nil {
+		return "", errors.New("session store returned nil session")
+	}
 
 	session.Values[CSRFTokenKey] = token
 	if err := session.Save(r, w); err != nil {
@@ -109,7 +138,7 @@ func (h *Handler) GenerateAndSaveCSRFToken(w http.ResponseWriter, r *http.Reques
 // GetCSRFTokenFromSession は現在のセッションから CSRF トークンを抽出します（表示用）。
 func (h *Handler) GetCSRFTokenFromSession(r *http.Request) string {
 	session, err := h.store.Get(r, h.sessionName)
-	if err != nil {
+	if err != nil || session == nil {
 		return ""
 	}
 	token, ok := session.Values[CSRFTokenKey].(string)
@@ -120,49 +149,79 @@ func (h *Handler) GetCSRFTokenFromSession(r *http.Request) string {
 }
 
 // buildLoginRedirectURL はオープンリダイレクタ脆弱性を考慮したリダイレクト先URLを構築します。
-func buildLoginRedirectURL(r *http.Request) string {
-	const loginURL = "/auth/login"
+func (h *Handler) buildLoginRedirectURL(r *http.Request) string {
+	loginURL := h.LoginPath()
 
 	if r.Method != http.MethodGet || r.URL.Path == "/" {
 		return loginURL
 	}
 
 	requestedURI := r.URL.RequestURI()
-	parsed, err := url.Parse(requestedURI)
+	if !isSafeRelativePath(requestedURI) {
+		return loginURL
+	}
+
+	return fmt.Sprintf("%s?redirect_to=%s", loginURL, url.QueryEscape(requestedURI))
+}
+
+// isSafeRelativePath は、リダイレクト先として安全な同一オリジンの相対パスかを判定します。
+// ホストを含むもの、'/' で始まらないもの、'//'（スキーマ相対 URL）で始まるものを拒否します。
+func isSafeRelativePath(target string) bool {
+	if target == "" {
+		return false
+	}
+
+	// バックスラッシュを '/' と同一視して正規化するブラウザがあるため、
+	// "/\evil.com" のような入力がスキーマ相対 URL として解釈され得ます。
+	// url.Parse はこれを相対パスとして扱ってしまうので、先に弾きます。
+	if strings.ContainsRune(target, '\\') {
+		return false
+	}
+	// 制御文字（CR/LF 等）を含むものはヘッダー分割の材料になるため拒否します。
+	if strings.ContainsFunc(target, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return false
+	}
+
+	// 判定は解析結果ではなく生の文字列で行います。"//@/" のように、
+	// url.Parse ではホストが空になるのにブラウザにはスキーマ相対 URL として
+	// 解釈され得る入力があるためです。
+	if !strings.HasPrefix(target, "/") || strings.HasPrefix(target, "//") {
+		return false
+	}
+
+	parsed, err := url.Parse(target)
 	if err != nil {
-		return loginURL
+		return false
 	}
-
-	if parsed.Host != "" || !strings.HasPrefix(parsed.Path, "/") || strings.HasPrefix(parsed.Path, "//") {
-		return loginURL
-	}
-
-	return fmt.Sprintf("/auth/login?redirect_to=%s", url.QueryEscape(requestedURI))
+	return parsed.Scheme == "" && parsed.Host == ""
 }
 
 // TaskOIDCVerificationMiddleware は Google Cloud Tasks からの OIDC トークンを検証します。
+//
+// 検証は audience だけでなく Config.AllowedTaskServiceAccounts との照合まで行います。
+// audience は誰でも指定できる文字列に過ぎず、それだけでは呼び出し元を認証できないためです。
+// 検証済みペイロードは OIDCPayloadFromContext で下流のハンドラーから参照できます。
 func (h *Handler) TaskOIDCVerificationMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.TrimSpace(h.taskAudienceURL) == "" {
-			slog.Error("Task OIDC audience is not configured")
+		if !h.taskVerifier.configured() {
+			h.log().ErrorContext(r.Context(), "Task OIDC verification is not configured: "+
+				"both TaskAudienceURL and AllowedTaskServiceAccounts are required")
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 
-		token, ok := extractBearerToken(r)
-		if !ok {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		payload, err := idtoken.Validate(r.Context(), token, h.taskAudienceURL)
+		payload, err := h.taskVerifier.verifyRequest(r)
 		if err != nil {
-			slog.Warn("Taskトークン検証失敗", "error", err)
+			if errors.Is(err, ErrOIDCNotAttempted) {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			h.log().WarnContext(r.Context(), "Taskトークン検証失敗", "error", err)
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
 
-		slog.Debug("Task認証成功", "sub", payload.Subject)
-		next.ServeHTTP(w, r)
+		h.log().DebugContext(r.Context(), "Task認証成功", "sub", payload.Subject)
+		next.ServeHTTP(w, r.WithContext(WithOIDCPayload(r.Context(), payload)))
 	})
 }

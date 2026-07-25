@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"golang.org/x/oauth2"
@@ -119,6 +120,24 @@ func TestFetchUserEmail(t *testing.T) {
 
 		if _, err := h.fetchUserEmail(ctx, &oauth2.Token{AccessToken: "tok"}); err == nil {
 			t.Fatal("fetchUserEmail() error = nil, want error")
+		}
+	})
+
+	// エラー応答をそのままデコードすると「未検証」という実態と異なるエラーに
+	// なってしまうため、ステータスコードを先に確認します。
+	t.Run("non-200 response reports the status", func(t *testing.T) {
+		t.Parallel()
+		h, ctx := newFetchUserEmailHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"invalid_token"}`))
+		})
+
+		_, err := h.fetchUserEmail(ctx, &oauth2.Token{AccessToken: "tok"})
+		if err == nil {
+			t.Fatal("fetchUserEmail() error = nil, want error")
+		}
+		if !strings.Contains(err.Error(), "401") {
+			t.Fatalf("error = %v, want it to mention the 401 status", err)
 		}
 	})
 

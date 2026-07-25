@@ -7,11 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
+	"io"
 	"net/http"
-	"net/mail"
 	"strings"
 
+	"github.com/gorilla/sessions"
 	"golang.org/x/oauth2"
 )
 
@@ -26,17 +26,32 @@ func extractBearerToken(r *http.Request) (token string, ok bool) {
 	return strings.TrimSpace(authHeader[len(prefix):]), true
 }
 
+// userInfoBodyLimit は UserInfo レスポンスとして読み込む最大バイト数です。
+// 想定される応答は数百バイトのため、異常な応答でメモリを消費しないよう制限します。
+const userInfoBodyLimit = 64 << 10
+
 // fetchUserEmail は Google UserInfo API を呼び出してメールアドレスを取得します。
 func (h *Handler) fetchUserEmail(ctx context.Context, token *oauth2.Token) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, googleUserInfoURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("UserInfo リクエストの生成に失敗: %w", err)
+	}
+
 	client := h.oauthConfig.Client(ctx, token)
-	resp, err := client.Get(googleUserInfoURL)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("google UserInfo API へのアクセスに失敗: %w", err)
 	}
 	defer resp.Body.Close()
 
+	// ステータスを先に確認します。エラー応答をそのままデコードすると
+	// 「メールアドレスが未検証」という実態と異なるエラーになってしまいます。
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("google UserInfo API returned status %d", resp.StatusCode)
+	}
+
 	var u googleUserInfo
-	if err := json.NewDecoder(resp.Body).Decode(&u); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, userInfoBodyLimit)).Decode(&u); err != nil {
 		return "", fmt.Errorf("UserInfo レスポンスの解析に失敗: %w", err)
 	}
 
@@ -62,44 +77,46 @@ func (h *Handler) isAuthorized(email string) bool {
 		return true
 	}
 
-	// ドメイン単位での許可判定
-	addr, err := mail.ParseAddress(normalizedEmail)
-	if err == nil {
-		// strings.LastIndexByte を使用して効率的にドメインを抽出
-		if i := strings.LastIndexByte(addr.Address, '@'); i != -1 {
-			domain := addr.Address[i+1:]
-			if _, ok := h.allowedDomains[domain]; ok {
-				return true
-			}
-		}
+	// ドメイン単位での許可判定。
+	// mail.ParseAddress は "Name <a@b.com>" 形式も受け付けてしまうため、
+	// 許可リスト照合に使う値と一致させる目的でここでは使いません。
+	i := strings.LastIndexByte(normalizedEmail, '@')
+	if i <= 0 || i == len(normalizedEmail)-1 {
+		return false
 	}
-	return false
+	_, ok := h.allowedDomains[normalizedEmail[i+1:]]
+	return ok
 }
 
 // clearSessionCookie はセッションクッキーを無効化（削除）します。
 func (h *Handler) clearSessionCookie(w http.ResponseWriter, r *http.Request) error {
 	session, err := h.store.Get(r, h.sessionName)
 	if err != nil {
-		slog.Warn("Failed to get session on clear, proceeding with new session", "error", err)
+		h.log().WarnContext(r.Context(), "Failed to get session on clear, proceeding with new session", "error", err)
 	}
 	if session == nil {
 		return errors.New("session store returned nil session")
 	}
+	if session.Options == nil {
+		session.Options = &sessions.Options{Path: "/"}
+	}
 
 	session.Options.MaxAge = -1 // クッキーを即時期限切れにする
 	if err := session.Save(r, w); err != nil {
-		slog.Error("Failed to save session for clearing cookie", "error", err)
+		h.log().ErrorContext(r.Context(), "Failed to save session for clearing cookie", "error", err)
 		return err // エラーを呼び出し元に返す
 	}
 	return nil
 }
 
-// toLowerMap はスライス内の文字列を小文字に変換して map に格納します。
+// toLowerMap はスライス内の文字列を正規化（トリム + 小文字化）して map に格納します。
+// 空白のみの要素は破棄します。環境変数から分割したリストに空要素が混ざっても、
+// 許可リストが「空ではないが誰も許可しない」状態にならないようにするためです。
 func toLowerMap(slice []string) map[string]struct{} {
 	m := make(map[string]struct{})
 	for _, s := range slice {
-		if s != "" {
-			m[strings.ToLower(s)] = struct{}{}
+		if trimmed := strings.TrimSpace(s); trimmed != "" {
+			m[strings.ToLower(trimmed)] = struct{}{}
 		}
 	}
 	return m

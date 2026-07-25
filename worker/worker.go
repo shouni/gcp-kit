@@ -5,26 +5,85 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 )
+
+// ErrPermanent は、リトライしても成功し得ない恒久的な失敗を示すセンチネルエラーです。
+//
+// TaskExecutor がこのエラーでラップしたエラーを返した場合、Handler は 2xx を返して
+// Cloud Tasks にタスクを完了扱いさせ、無駄なリトライを止めます（内容は ERROR ログに残ります）。
+// 一時的な失敗（外部APIのタイムアウト等）では返さないでください。
+//
+//	if errors.Is(err, domain.ErrInvalidInput) {
+//	    return fmt.Errorf("%w: %v", worker.ErrPermanent, err)
+//	}
+var ErrPermanent = errors.New("worker: permanent failure, task must not be retried")
+
+// defaultMaxBodyBytes は受け付けるリクエストボディの既定上限です。
+// Cloud Tasks の HTTP ターゲットはタスク全体で 1MB 上限のため、既定値もそれに合わせます。
+const defaultMaxBodyBytes int64 = 1 << 20
 
 // TaskExecutor は、デコードされたペイロードを受け取って実際の処理を行うインターフェースです。
 type TaskExecutor[T any] interface {
 	Execute(ctx context.Context, payload T) error
 }
 
+// Option は Handler の任意設定です。
+type Option func(*options)
+
+type options struct {
+	maxBodyBytes int64
+	strictJSON   bool
+	logger       *slog.Logger
+}
+
+// WithMaxBodyBytes はリクエストボディの上限を変更します。0 以下を指定すると無制限になります。
+func WithMaxBodyBytes(n int64) Option {
+	return func(o *options) { o.maxBodyBytes = n }
+}
+
+// WithStrictJSON は、ペイロードに未知のフィールドが含まれる場合にデコードを失敗させます。
+// 送信側と受信側の型定義のずれを早期に検知したい場合に使います。
+func WithStrictJSON() Option {
+	return func(o *options) { o.strictJSON = true }
+}
+
+// WithLogger は本パッケージが使うロガーを差し替えます。未指定の場合は slog.Default() です。
+func WithLogger(logger *slog.Logger) Option {
+	return func(o *options) { o.logger = logger }
+}
+
 // Handler は Cloud Tasks からの HTTP リクエストを受け取る汎用ハンドラーです。
 type Handler[T any] struct {
 	executor TaskExecutor[T]
+	opts     options
 }
 
 // NewHandler は新しいワーカーハンドラーを生成します。
-func NewHandler[T any](executor TaskExecutor[T]) *Handler[T] {
+func NewHandler[T any](executor TaskExecutor[T], opts ...Option) *Handler[T] {
+	cfg := options{maxBodyBytes: defaultMaxBodyBytes}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	return &Handler[T]{
 		executor: executor,
+		opts:     cfg,
 	}
+}
+
+func (h *Handler[T]) log() *slog.Logger {
+	if h != nil && h.opts.logger != nil {
+		return h.opts.logger
+	}
+	return slog.Default()
+}
+
+// ServeHTTP は Handler を http.Handler として利用可能にします。
+func (h *Handler[T]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.ProcessTask(w, r)
 }
 
 // ProcessTask は Cloud Tasks からの POST リクエストを処理する http.HandlerFunc です。
@@ -35,37 +94,53 @@ func (h *Handler[T]) ProcessTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// リソースリーク防止のためボディをクローズ
-	defer r.Body.Close()
-
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
+	ctx := WithMetadata(r.Context(), metadataFromHeader(r.Header))
+
+	body := r.Body
+	if h.opts.maxBodyBytes > 0 {
+		body = http.MaxBytesReader(w, r.Body, h.opts.maxBodyBytes)
+	}
+
+	decoder := json.NewDecoder(body)
+	if h.opts.strictJSON {
+		decoder.DisallowUnknownFields()
+	}
+
 	var payload T
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		slog.Error("Failed to decode worker task payload", "error", err)
+	if err := decoder.Decode(&payload); err != nil {
+		h.log().ErrorContext(ctx, "Failed to decode worker task payload", "error", err)
 		// 400系を返すと、Cloud Tasks は通常リトライを行わずタスクを破棄します。
 		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
 		return
 	}
 
-	slog.Info("Worker received task", "type", fmt.Sprintf("%T", payload))
+	h.log().DebugContext(ctx, "Worker received task", "type", fmt.Sprintf("%T", payload))
 
 	// r.Context() を渡すことで、Cloud Tasks のリクエストタイムアウト設定を伝搬させます。
-	if err := h.executor.Execute(r.Context(), payload); err != nil {
+	if err := h.executor.Execute(ctx, payload); err != nil {
 		// セキュリティリスクを回避するため、payload そのものではなく型情報のみを記録します。
-		slog.Error("Worker task execution failed",
+		h.log().ErrorContext(ctx, "Worker task execution failed",
 			"error", err,
 			"payload_type", fmt.Sprintf("%T", payload),
+			"permanent", errors.Is(err, ErrPermanent),
 		)
+
+		if errors.Is(err, ErrPermanent) {
+			// 恒久的な失敗をリトライさせても成功しないため、成功扱いで打ち切ります。
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
 		// 500系を返すと、Cloud Tasks は設定に基づき指数バックオフリトライを行います。
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
 
-	// 4. 成功を返却
-	slog.Info("Worker task completed successfully")
+	h.log().DebugContext(ctx, "Worker task completed successfully")
 	w.WriteHeader(http.StatusOK)
 }

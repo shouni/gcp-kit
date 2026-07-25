@@ -97,17 +97,18 @@ func TestLogin(t *testing.T) {
 			t.Fatalf("Location = %q, want AuthCodeURL prefix", loc)
 		}
 
-		found := false
-		for _, c := range rr.Result().Cookies() {
-			if c.Name == DefaultStateCookie {
-				found = true
-				if c.Value == "" {
-					t.Fatal("state cookie value is empty")
-				}
-			}
+		if !strings.Contains(loc, "code_challenge=") || !strings.Contains(loc, "code_challenge_method=S256") {
+			t.Fatalf("Location = %q, want a PKCE S256 challenge", loc)
 		}
-		if !found {
-			t.Fatal("state cookie not set")
+
+		got := map[string]string{}
+		for _, c := range rr.Result().Cookies() {
+			got[c.Name] = c.Value
+		}
+		for _, name := range []string{DefaultStateCookie, DefaultVerifierCookie} {
+			if got[name] == "" {
+				t.Fatalf("cookie %q was not set with a value", name)
+			}
 		}
 	})
 
@@ -209,24 +210,59 @@ func TestValidateCallbackState(t *testing.T) {
 	}
 }
 
-func TestClearStateCookie(t *testing.T) {
+func TestClearTemporaryCookies(t *testing.T) {
 	t.Parallel()
 
 	h := &Handler{isSecureCookie: true}
 	rr := httptest.NewRecorder()
 
-	h.clearStateCookie(rr)
+	h.clearTemporaryCookies(rr)
+
+	cookies := rr.Result().Cookies()
+	if len(cookies) != 2 {
+		t.Fatalf("got %d cookies, want 2", len(cookies))
+	}
+	for _, c := range cookies {
+		if c.Name != DefaultStateCookie && c.Name != DefaultVerifierCookie {
+			t.Fatalf("unexpected cookie %q", c.Name)
+		}
+		if c.MaxAge != -1 {
+			t.Fatalf("%s MaxAge = %d, want -1", c.Name, c.MaxAge)
+		}
+		// 削除は発行時と同じ属性で行う必要があります。
+		if c.Path != DefaultCallbackPath {
+			t.Fatalf("%s Path = %q, want %q", c.Name, c.Path, DefaultCallbackPath)
+		}
+		if c.SameSite != http.SameSiteLaxMode {
+			t.Fatalf("%s SameSite = %v, want Lax", c.Name, c.SameSite)
+		}
+	}
+}
+
+// TestSetTemporaryCookieUsesLaxSameSite は、state/PKCE クッキーが Lax であることを
+// 保証します。Google からのコールバックはクロスサイトのトップレベル GET 遷移のため、
+// Strict にするとクッキーが送信されずログインが必ず失敗します。
+func TestSetTemporaryCookieUsesLaxSameSite(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{isSecureCookie: true}
+	rr := httptest.NewRecorder()
+
+	h.setTemporaryCookie(rr, DefaultStateCookie, "value")
 
 	cookies := rr.Result().Cookies()
 	if len(cookies) != 1 {
 		t.Fatalf("got %d cookies, want 1", len(cookies))
 	}
 	c := cookies[0]
-	if c.Name != DefaultStateCookie {
-		t.Fatalf("cookie name = %q, want %q", c.Name, DefaultStateCookie)
+	if c.SameSite != http.SameSiteLaxMode {
+		t.Fatalf("SameSite = %v, want Lax", c.SameSite)
 	}
-	if c.MaxAge != -1 {
-		t.Fatalf("MaxAge = %d, want -1", c.MaxAge)
+	if !c.HttpOnly || !c.Secure {
+		t.Fatalf("HttpOnly = %v, Secure = %v, want both true", c.HttpOnly, c.Secure)
+	}
+	if c.Path != DefaultCallbackPath {
+		t.Fatalf("Path = %q, want %q", c.Path, DefaultCallbackPath)
 	}
 }
 
@@ -238,7 +274,7 @@ func TestExchangeCode(t *testing.T) {
 		h, ctx := newCallbackTestHandler(t, jsonTokenResponse(nil), nil)
 
 		req := httptest.NewRequest(http.MethodGet, "/auth/callback?code=abc", nil).WithContext(ctx)
-		token, err := h.exchangeCode(req)
+		token, err := h.exchangeCode(req, "test-verifier")
 		if err != nil {
 			t.Fatalf("exchangeCode() error = %v", err)
 		}
@@ -255,7 +291,7 @@ func TestExchangeCode(t *testing.T) {
 		}, nil)
 
 		req := httptest.NewRequest(http.MethodGet, "/auth/callback?code=bad", nil).WithContext(ctx)
-		if _, err := h.exchangeCode(req); err == nil {
+		if _, err := h.exchangeCode(req, "test-verifier"); err == nil {
 			t.Fatal("exchangeCode() error = nil, want error")
 		}
 	})
@@ -296,6 +332,8 @@ func TestExtractEmailFromIDToken(t *testing.T) {
 		},
 	}
 
+	h := &Handler{oauthConfig: &oauth2.Config{ClientID: clientID}}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -304,7 +342,7 @@ func TestExtractEmailFromIDToken(t *testing.T) {
 			if tt.extra != nil {
 				token = token.WithExtra(tt.extra)
 			}
-			if got := extractEmailFromIDToken(req, token, clientID); got != "" {
+			if got := h.extractEmailFromIDToken(req, token); got != "" {
 				t.Fatalf("extractEmailFromIDToken() = %q, want empty", got)
 			}
 		})
@@ -349,6 +387,7 @@ func TestCallback(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, target, nil).WithContext(ctx)
 		if includeState {
 			req.AddCookie(&http.Cookie{Name: DefaultStateCookie, Value: state})
+			req.AddCookie(&http.Cookie{Name: DefaultVerifierCookie, Value: "test-verifier"})
 		}
 		return req
 	}
@@ -357,6 +396,22 @@ func TestCallback(t *testing.T) {
 		t.Parallel()
 		h, ctx := newCallbackTestHandler(t, nil, nil)
 		req := newRequest(ctx, false)
+		rr := httptest.NewRecorder()
+
+		h.Callback(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+		}
+	})
+
+	// PKCE の verifier が無いリクエストは、Login を経由していないか
+	// クッキーが期限切れのため、トークン交換に進ませず再ログインさせます。
+	t.Run("missing PKCE verifier returns 400", func(t *testing.T) {
+		t.Parallel()
+		h, ctx := newCallbackTestHandler(t, nil, nil)
+		req := httptest.NewRequest(http.MethodGet, "/auth/callback?code=auth-code&state="+state, nil).WithContext(ctx)
+		req.AddCookie(&http.Cookie{Name: DefaultStateCookie, Value: state})
 		rr := httptest.NewRecorder()
 
 		h.Callback(rr, req)
@@ -488,4 +543,97 @@ func TestSaveSessionAndRedirectReturnsSaveError(t *testing.T) {
 	if err := h.saveSessionAndRedirect(rr, req, "user@example.com"); err == nil {
 		t.Fatalf("saveSessionAndRedirect() error = nil, want error")
 	}
+}
+
+func TestLogout(t *testing.T) {
+	t.Parallel()
+
+	newSeededRequest := func(t *testing.T, h *Handler, target string) *http.Request {
+		t.Helper()
+
+		seedReq := httptest.NewRequest(http.MethodGet, "/", nil)
+		seedRR := httptest.NewRecorder()
+		session, err := h.store.Get(seedReq, h.sessionName)
+		if err != nil {
+			t.Fatalf("store.Get() error = %v", err)
+		}
+		session.Values[DefaultUserSessionKey] = "user@example.com"
+		if err := session.Save(seedReq, seedRR); err != nil {
+			t.Fatalf("session.Save() error = %v", err)
+		}
+
+		req := httptest.NewRequest(http.MethodPost, target, nil)
+		for _, c := range seedRR.Result().Cookies() {
+			req.AddCookie(c)
+		}
+		return req
+	}
+
+	t.Run("expires the session cookie and redirects to login", func(t *testing.T) {
+		t.Parallel()
+		h := &Handler{store: newTestCookieStore(), sessionName: "test-session"}
+		req := newSeededRequest(t, h, "/auth/logout")
+		rr := httptest.NewRecorder()
+
+		h.Logout(rr, req)
+
+		if rr.Code != http.StatusSeeOther {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusSeeOther)
+		}
+		if loc := rr.Header().Get("Location"); loc != DefaultLoginPath {
+			t.Fatalf("Location = %q, want %q", loc, DefaultLoginPath)
+		}
+
+		cookies := rr.Result().Cookies()
+		if len(cookies) == 0 {
+			t.Fatal("expected the session cookie to be cleared")
+		}
+		if cookies[0].MaxAge != -1 {
+			t.Fatalf("MaxAge = %d, want -1", cookies[0].MaxAge)
+		}
+	})
+
+	t.Run("honours a safe redirect_to", func(t *testing.T) {
+		t.Parallel()
+		h := &Handler{store: newTestCookieStore(), sessionName: "test-session"}
+		req := newSeededRequest(t, h, "/auth/logout?redirect_to=/goodbye")
+		rr := httptest.NewRecorder()
+
+		h.Logout(rr, req)
+
+		if loc := rr.Header().Get("Location"); loc != "/goodbye" {
+			t.Fatalf("Location = %q, want %q", loc, "/goodbye")
+		}
+	})
+
+	// オープンリダイレクタを避けるため、外部URLやスキーマ相対URLは無視します。
+	t.Run("ignores unsafe redirect_to", func(t *testing.T) {
+		t.Parallel()
+
+		for _, target := range []string{"//evil.com", "https://evil.com/x", "relative"} {
+			h := &Handler{store: newTestCookieStore(), sessionName: "test-session"}
+			req := httptest.NewRequest(http.MethodGet, "/auth/logout?redirect_to="+target, nil)
+			rr := httptest.NewRecorder()
+
+			h.Logout(rr, req)
+
+			if loc := rr.Header().Get("Location"); loc != DefaultLoginPath {
+				t.Fatalf("redirect_to=%q gave Location = %q, want %q", target, loc, DefaultLoginPath)
+			}
+		}
+	})
+
+	// セッションが壊れていてもログアウト自体は成立させます。
+	t.Run("redirects even when the session cannot be cleared", func(t *testing.T) {
+		t.Parallel()
+		h := &Handler{store: nilSessionStore{}, sessionName: "test-session"}
+		req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+		rr := httptest.NewRecorder()
+
+		h.Logout(rr, req)
+
+		if rr.Code != http.StatusSeeOther {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusSeeOther)
+		}
+	})
 }

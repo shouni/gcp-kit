@@ -38,6 +38,16 @@ Cloud Run や Cloud Tasks を用いたアーキテクチャにおいて、ボイ
   * **認証のカプセル化**: サービスアカウントを利用した OIDC トークンベースの認証設定をシンプルに実装。
   * **冪等なタスク投入**: `EnqueueWithName` は決定的な名前で投入し、`ALREADY_EXISTS` を成功として扱います。
   * **柔軟なオプション**: `EnqueueWithOptions` で遅延実行・応答待ち時間・追加ヘッダーを指定できます。
+* **`cloudlog`**: **Cloud Logging 互換の構造化ログ**
+  * **severity への詰め替え**: slog 既定の `level`/`msg` は Cloud Logging に読まれず、
+    Logs Explorer 上で全エントリが INFO 扱いになります。`HandlerOptions` が
+    `severity`/`message` へ詰め替えてこの差を吸収します。
+  * **トレース相関**: `TraceMiddleware` が `X-Cloud-Trace-Context` を解析し、
+    リクエスト単位でログをまとめます（属性の引き回しは `go-utils/slogctx` を利用）。
+    context への載せ方を持たない `TraceAttrs` も公開しているため、別の仕組みで
+    属性を引き回しているアプリケーションでも利用できます。
+  * **出力先とレベルは持たない**: GCP に依存しない部分は意図的に持たず、
+    アプリケーション側で組み立てます。
 * **`worker`**: **Cloud Tasks 向け Worker ハンドラー**
   * **自動デコード**: 受信したタスクのペイロードを目的の型へ自動的にデコードし、ビジネスロジックへ渡します。
   * **リトライフレンドリー**: Cloud Tasks の標準仕様に基づき、エラー時の適切な HTTP ステータス管理を自動化。

@@ -15,12 +15,14 @@ import (
 
 type fakeTaskClient struct {
 	req    *cloudtaskspb.CreateTaskRequest
+	ctx    context.Context
 	err    error
 	closed bool
 }
 
-func (c *fakeTaskClient) CreateTask(_ context.Context, req *cloudtaskspb.CreateTaskRequest) (*cloudtaskspb.Task, error) {
+func (c *fakeTaskClient) CreateTask(ctx context.Context, req *cloudtaskspb.CreateTaskRequest) (*cloudtaskspb.Task, error) {
 	c.req = req
+	c.ctx = ctx
 	if c.err != nil {
 		return nil, c.err
 	}
@@ -122,6 +124,69 @@ func TestValidateConfig(t *testing.T) {
 				t.Fatalf("validateConfig() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// Cloud Tasks はリクエストのデッドラインが 30 秒より先だと InvalidArgument を返すため、
+// ジョブ全体の寿命を表す長い context をそのまま投入 RPC に渡してはいけません。
+func TestEnqueueShortensALongCallerDeadlineForTheRPC(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeTaskClient{}
+	enqueuer, err := newEnqueuerWithClient[samplePayload](validConfig(), client)
+	if err != nil {
+		t.Fatalf("newEnqueuerWithClient() returned error: %v", err)
+	}
+
+	// ワーカーのパイプライン上限のような長い context。
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
+	defer cancel()
+
+	if err := enqueuer.Enqueue(ctx, samplePayload{UserID: "user-123", Count: 7}); err != nil {
+		t.Fatalf("Enqueue() returned error: %v", err)
+	}
+
+	if client.ctx == nil {
+		t.Fatalf("CreateTask was not called")
+	}
+	deadline, ok := client.ctx.Deadline()
+	if !ok {
+		t.Fatalf("CreateTask context has no deadline; Cloud Tasks would receive the caller's 45m deadline")
+	}
+	if remaining := time.Until(deadline); remaining > createTaskTimeout {
+		t.Fatalf("CreateTask deadline is %s away, want at most %s", remaining, createTaskTimeout)
+	}
+	if createTaskTimeout >= 30*time.Second {
+		t.Fatalf("createTaskTimeout = %s, must stay under the 30s Cloud Tasks accepts", createTaskTimeout)
+	}
+}
+
+// 呼び出し元がすでに短い期限を切っている場合、それを延ばしてはいけません。
+func TestEnqueueKeepsAnEarlierCallerDeadline(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeTaskClient{}
+	enqueuer, err := newEnqueuerWithClient[samplePayload](validConfig(), client)
+	if err != nil {
+		t.Fatalf("newEnqueuerWithClient() returned error: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := enqueuer.Enqueue(ctx, samplePayload{UserID: "user-123", Count: 7}); err != nil {
+		t.Fatalf("Enqueue() returned error: %v", err)
+	}
+
+	if client.ctx == nil {
+		t.Fatalf("CreateTask was not called")
+	}
+	deadline, ok := client.ctx.Deadline()
+	if !ok {
+		t.Fatalf("CreateTask context has no deadline")
+	}
+	if remaining := time.Until(deadline); remaining > 2*time.Second {
+		t.Fatalf("CreateTask deadline is %s away, want the caller's 2s to be preserved", remaining)
 	}
 }
 

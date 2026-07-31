@@ -24,6 +24,11 @@ import (
 // 不正な値を API 往復させずに検出するため、投入前にローカルで検証します。
 var taskIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,500}$`)
 
+// createTaskTimeout は CreateTask 1 回分の RPC に与える上限です。
+// Cloud Tasks はリクエストのデッドラインが 30 秒より先だと InvalidArgument を返すため、
+// 30 秒より短く取る必要があります。
+const createTaskTimeout = 20 * time.Second
+
 // Config は Enqueuer の初期化に必要な設定です。
 type Config struct {
 	ProjectID           string
@@ -268,6 +273,14 @@ func (e *Enqueuer[T]) createTask(ctx context.Context, name string, body []byte, 
 	if options.dispatchDeadline > 0 {
 		task.DispatchDeadline = durationpb.New(options.dispatchDeadline)
 	}
+
+	// Cloud Tasks はリクエストのデッドラインが 30 秒より先だと、タスクの内容に関係なく
+	// InvalidArgument で拒否します。呼び出し元はジョブ全体の寿命を表す長い context
+	// （ワーカーのパイプライン上限など）をそのまま渡してくるのが自然なので、投入 RPC
+	// 用の期限はここで切り直します。元の期限のほうが早ければ WithTimeout がそちらを
+	// 残すため、短い context を渡している呼び出し元の意図は変わりません。
+	ctx, cancel := context.WithTimeout(ctx, createTaskTimeout)
+	defer cancel()
 
 	// Cloud Tasks への登録を実行
 	createdTask, err := e.client.CreateTask(ctx, &cloudtaskspb.CreateTaskRequest{

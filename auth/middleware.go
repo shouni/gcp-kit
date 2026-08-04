@@ -201,27 +201,7 @@ func isSafeRelativePath(target string) bool {
 // 検証は audience だけでなく Config.AllowedTaskServiceAccounts との照合まで行います。
 // audience は誰でも指定できる文字列に過ぎず、それだけでは呼び出し元を認証できないためです。
 // 検証済みペイロードは OIDCPayloadFromContext で下流のハンドラーから参照できます。
+// Web UI を持たないサービスは、OAuth 設定なしで同じ検証を行える TaskVerifier を使えます。
 func (h *Handler) TaskOIDCVerificationMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !h.taskVerifier.configured() {
-			h.log().ErrorContext(r.Context(), "Task OIDC verification is not configured: "+
-				"both TaskAudienceURL and AllowedTaskServiceAccounts are required")
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-			return
-		}
-
-		payload, err := h.taskVerifier.verifyRequest(r)
-		if err != nil {
-			if errors.Is(err, ErrOIDCNotAttempted) {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
-			h.log().WarnContext(r.Context(), "Taskトークン検証失敗", "error", err)
-			http.Error(w, "Forbidden", http.StatusForbidden)
-			return
-		}
-
-		h.log().DebugContext(r.Context(), "Task認証成功", "sub", payload.Subject)
-		next.ServeHTTP(w, r.WithContext(WithOIDCPayload(r.Context(), payload)))
-	})
+	return taskOIDCMiddleware(h.taskVerifier, h.log(), next)
 }

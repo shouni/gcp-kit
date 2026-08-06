@@ -1,5 +1,10 @@
-// Package auth は、Google OAuth2 によるセッションベース認証、CSRF検証、
-// サーバー間通信向けの OIDC トークン検証 (M2M) を提供します。
+// Package auth は、ブラウザ向けの Google OAuth2 セッション認証と CSRF 検証、
+// および受信側の OIDC トークン検証（他サービスからの M2M 呼び出し、Cloud Tasks からの
+// 呼び出し）を提供します。
+//
+// Handler はブラウザのログインとセッションを担い、受信 OIDC の検証は M2MVerifier と
+// TaskVerifier が担います。両者を組み合わせて 1 つのルートを守る場合は
+// Handler.ProtectedMiddleware を使ってください。
 package auth
 
 import (
@@ -59,18 +64,6 @@ type Config struct {
 	AllowedEmails     []string
 	AllowedDomains    []string
 
-	// TaskAudienceURL は、Cloud Tasks が発行する OIDC トークンの audience です。
-	// 設定した場合は AllowedTaskServiceAccounts も必須になります。
-	TaskAudienceURL string
-	// AllowedTaskServiceAccounts は、Cloud Tasks からの呼び出しを許可する
-	// サービスアカウントのメールアドレス（= tasks.Config.ServiceAccountEmail）です。
-	//
-	// audience は署名対象に含まれるだけの単なる文字列であり、任意の GCP プロジェクトの
-	// 任意のサービスアカウントが同じ audience を持つ OIDC トークンを発行できます。
-	// そのため audience の検証だけでは呼び出し元を認証したことになりません。
-	// TaskOIDCVerificationMiddleware はこのリストと email クレームを突き合わせます。
-	AllowedTaskServiceAccounts []string
-
 	// --- 以下は任意。ゼロ値の場合は既定値が使われます。 ---
 
 	// Scopes は OAuth2 の要求スコープです。未指定の場合は openid + userinfo.email です。
@@ -106,8 +99,6 @@ type Handler struct {
 	isSecureCookie bool
 	allowedEmails  map[string]struct{}
 	allowedDomains map[string]struct{}
-
-	taskVerifier *oidcVerifier
 
 	loginPath    string
 	callbackPath string
@@ -147,11 +138,6 @@ func NewHandler(cfg Config) (*Handler, error) {
 		store = cookieStore
 	}
 
-	var taskVerifier *oidcVerifier
-	if strings.TrimSpace(cfg.TaskAudienceURL) != "" {
-		taskVerifier = newOIDCVerifier(cfg.TaskAudienceURL, cfg.AllowedTaskServiceAccounts)
-	}
-
 	return &Handler{
 		oauthConfig:    oauthCfg,
 		store:          store,
@@ -159,7 +145,6 @@ func NewHandler(cfg Config) (*Handler, error) {
 		isSecureCookie: cfg.IsSecureCookie,
 		allowedEmails:  toLowerMap(cfg.AllowedEmails),
 		allowedDomains: toLowerMap(cfg.AllowedDomains),
-		taskVerifier:   taskVerifier,
 		loginPath:      cfg.LoginPath,
 		callbackPath:   cfg.CallbackPath,
 		logoutPath:     cfg.LogoutPath,
@@ -211,15 +196,6 @@ func validateConfig(cfg Config) error {
 		return errors.New("auth config RedirectURL must be an absolute URL")
 	}
 
-	// Cloud Tasks 検証を有効にする場合、許可サービスアカウントの指定は必須です。
-	// audience だけでは呼び出し元を認証できないため fail-closed に倒しますが、
-	// リクエスト時に 403 を返すと Cloud Tasks がリトライを重ねた末にタスクを
-	// 破棄してしまうため、設定漏れは起動時に失敗させます。
-	if strings.TrimSpace(cfg.TaskAudienceURL) != "" && len(toLowerMap(cfg.AllowedTaskServiceAccounts)) == 0 {
-		return errors.New("auth config AllowedTaskServiceAccounts must not be empty when TaskAudienceURL is set: " +
-			"verifying the audience alone does not authenticate the caller")
-	}
-
 	return nil
 }
 
@@ -269,4 +245,17 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET "+h.LogoutPath(), h.Logout)
 	mux.HandleFunc("POST "+h.LogoutPath(), h.Logout)
 	return mux
+}
+
+// toLowerMap はスライス内の文字列を正規化（トリム + 小文字化）して map に格納します。
+// 空白のみの要素は破棄します。環境変数から分割したリストに空要素が混ざっても、
+// 許可リストが「空ではないが誰も許可しない」状態にならないようにするためです。
+func toLowerMap(slice []string) map[string]struct{} {
+	m := make(map[string]struct{})
+	for _, s := range slice {
+		if trimmed := strings.TrimSpace(s); trimmed != "" {
+			m[strings.ToLower(trimmed)] = struct{}{}
+		}
+	}
+	return m
 }

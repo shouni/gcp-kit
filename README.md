@@ -32,7 +32,11 @@ Cloud Run や Cloud Tasks を用いたアーキテクチャにおいて、ボイ
     * **URLセーフ・エンコーディング**: `base64.RawURLEncoding` を採用し、HTML属性やURLパラメータ内での取り回しを容易にしています。
   * **呼び出し元の認証**: Cloud Tasks / 他サービスからの OIDC トークンは、署名と audience だけでなく
     **サービスアカウント許可リスト**まで照合します（audience は誰でも指定できる文字列に過ぎないため）。
-    `TaskOIDCVerificationMiddleware` と `M2MVerifier` は同一の検証実装を共有しています。
+    入口は `TaskVerifier`（Cloud Tasks 用）と `M2MVerifier`（他サービス用）の 2 つで、検証実装は共有です。
+    どちらも OAuth 設定を要求しないため、Web UI を持たない Worker でも使えます。
+  * **二経路のルート保護**: `Handler.ProtectedMiddleware` は、有効な OIDC Bearer を提示した呼び出しに
+    セッション認証と CSRF をバイパスさせ、それ以外はブラウザのログインへフォールバックさせます。
+    CSRF トークンは `CSRFTokenFromContext` でテンプレートへ渡せます。
 * **`tasks`**: **型安全な Cloud Tasks エンキュー**
   * **Generics 対応**: `[T any]` を用いて、独自の構造体を型安全にシリアライズしてキューへ投入できます。
   * **認証のカプセル化**: サービスアカウントを利用した OIDC トークンベースの認証設定をシンプルに実装。
@@ -60,7 +64,7 @@ Cloud Run や Cloud Tasks を用いたアーキテクチャにおいて、ボイ
 ## 🚦 使い方 (Usage)
 
 ```go
-// 1. 認証ハンドラー（ブラウザログイン + Cloud Tasks 検証）
+// 1. 認証ハンドラー（ブラウザのログインとセッション）
 authHandler, err := auth.NewHandler(auth.Config{
     ClientID:          os.Getenv("GOOGLE_CLIENT_ID"),
     ClientSecret:      os.Getenv("GOOGLE_CLIENT_SECRET"),
@@ -70,18 +74,21 @@ authHandler, err := auth.NewHandler(auth.Config{
     SessionName:       "app-session",
     IsSecureCookie:    true,
     AllowedDomains:    []string{"example.com"},
-
-    // Cloud Tasks からの呼び出しを検証する場合、audience と許可SAの両方が必須です
-    TaskAudienceURL:            serviceURL,
-    AllowedTaskServiceAccounts: []string{os.Getenv("SERVICE_ACCOUNT_EMAIL")},
 })
+
+// 受信 OIDC の検証器。audience と許可SAの両方が必須です（片方だけでは常に検証失敗）。
+m2mVerifier := auth.NewM2MVerifier(serviceURL, allowedCallerSAs)
+taskVerifier := auth.NewTaskVerifier(workerURL, allowedCallerSAs)
 
 // 2. ルーティング
 mux := http.NewServeMux()
 mux.Handle("/auth/", authHandler.Routes())                       // login / callback / logout
 mux.Handle("/private", authHandler.Middleware(privateHandler))   // セッション + CSRF
+// ブラウザと他サービスの両方から叩かれるルートは ProtectedMiddleware 一枚で守れます
+// （有効な OIDC Bearer はセッションと CSRF をバイパスし、それ以外はログインへ）
+mux.Handle("/api/", authHandler.ProtectedMiddleware(m2mVerifier)(apiHandler))
 mux.Handle("POST /tasks/run",
-    authHandler.TaskOIDCVerificationMiddleware(workerHandler))   // Cloud Tasks 専用
+    taskVerifier.Middleware(workerHandler))                      // Cloud Tasks 専用
 
 // 3. 保護されたハンドラー内では、セッションを開き直さずにユーザーを参照できます
 email, ok := auth.EmailFromContext(r.Context())
@@ -91,34 +98,43 @@ email, ok := auth.EmailFromContext(r.Context())
 
 ---
 
-## ⚠️ v1.3.x からの移行 (Migration)
+## ⚠️ 移行 (Migration)
 
-**`TaskAudienceURL` を設定しているサービスは、`AllowedTaskServiceAccounts` の追加が必須です。**
+### `auth.Handler` から Cloud Tasks 検証を分離しました
 
-v1.3.x までの `TaskOIDCVerificationMiddleware` は audience しか検証していませんでした。audience は
-署名対象に含まれるだけの単なる文字列であり、**任意の GCP プロジェクトの任意のサービスアカウントが
-同じ audience のトークンを発行できる**ため、これだけでは呼び出し元を認証したことになりません。
+`Config.TaskAudienceURL` / `Config.AllowedTaskServiceAccounts` と
+`Handler.TaskOIDCVerificationMiddleware` を削除し、受信 OIDC の入口を
+`TaskVerifier` に一本化しました。**検証ロジックは元から共通なので、挙動は変わりません。**
+
+分離した理由は、設定の到達範囲です。旧構成では `TaskAudienceURL` を設定すると
+`AllowedTaskServiceAccounts` が必須になるため、**Web 面しか担わないプロセスが Worker 用の設定を
+持たされていました**。`TaskVerifier` は OAuth 設定を要求しないので、逆に Worker 面しか担わない
+プロセスが OAuth シークレットを持つ必要もありません。
 
 ```go
- auth.Config{
-     TaskAudienceURL:            cfg.GCP.TaskAudienceURL,
-+    AllowedTaskServiceAccounts: []string{cfg.GCP.ServiceAccountEmail}, // tasks.Config と同じSA
- }
+-h, _ := auth.NewHandler(auth.Config{
+-    // ... OAuth 設定 ...
+-    TaskAudienceURL:            workerURL,
+-    AllowedTaskServiceAccounts: []string{callerSA},
+-})
+-mux.Handle("POST /tasks/run", h.TaskOIDCVerificationMiddleware(worker))
++v := auth.NewTaskVerifier(workerURL, []string{callerSA})
++if !v.Configured() {
++    return errors.New("task verification is not configured")
++}
++mux.Handle("POST /tasks/run", v.Middleware(worker))
 ```
 
-設定漏れは **`NewHandler` が起動時にエラーを返します**（リクエスト時に 403 を返すと、Cloud Tasks が
-リトライを重ねた末にタスクを破棄してしまうため）。
+`Configured()` を起動時に見るのは、リクエスト時に落とすと Cloud Tasks がリトライを重ねた末に
+タスクを破棄してしまうためです。
 
-その他の変更点:
+### `ProtectedMiddleware` / `CSRFContextMiddleware` を追加しました
 
-| 変更 | 影響 |
-| --- | --- |
-| ログインフローが PKCE 対応 | デプロイ中にログイン中だったユーザーは再ログインが必要 |
-| IDトークンの `email_verified` を必須化 | Google の通常アカウントでは影響なし |
-| `tasks.Config.Audience` が任意に（既定は `WorkerURL`） | 影響なし（後方互換） |
-| `worker.Handler` が `http.Handler` を実装 | `ProcessTask` は存置。影響なし |
-| リクエストボディ上限（既定 1MB） | Cloud Tasks のタスク上限と同じため影響なし |
-| CSRF検証に Origin チェックを追加 | Origin が無いリクエストは従来どおり通過 |
+「有効な OIDC Bearer ならセッションと CSRF をバイパスし、それ以外はセッション認証へ」という合成を
+各サービスが手で書いていたため、ライブラリへ引き取りました。`ErrM2MNotAttempted` はもともとこの
+フォールバックを書けるようにするために用意されていたものです。CSRF トークンをコンテキストへ載せる
+`CSRFContextMiddleware` と `CSRFTokenFromContext` も合わせて公開しています。
+
 
 ---
 

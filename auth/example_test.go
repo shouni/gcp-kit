@@ -1,7 +1,6 @@
 package auth_test
 
 import (
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -38,22 +37,20 @@ func ExampleNewHandler() {
 }
 
 // Cloud Tasks からの呼び出しを受けるワーカーエンドポイントの保護方法です。
-// AllowedTaskServiceAccounts には、tasks.Config.ServiceAccountEmail と同じ
-// サービスアカウントを指定します。audience の検証だけでは呼び出し元を
-// 認証したことにならないため、この指定は必須です。
-func ExampleHandler_TaskOIDCVerificationMiddleware() {
-	h, err := auth.NewHandler(auth.Config{
-		ClientID:                   "xxxxx.apps.googleusercontent.com",
-		ClientSecret:               "secret",
-		RedirectURL:                "https://app.example.com/auth/callback",
-		SessionAuthKey:             "0123456789abcdef0123456789abcdef",
-		SessionEncryptKey:          "0123456789abcdef",
-		SessionName:                "app-session",
-		TaskAudienceURL:            "https://app.example.com",
-		AllowedTaskServiceAccounts: []string{"tasks@my-project.iam.gserviceaccount.com"},
-	})
-	if err != nil {
-		slog.Error("failed to build auth handler", "error", err)
+//
+// 許可サービスアカウントには tasks.Config.ServiceAccountEmail と同じものを指定します。
+// audience は誰でも指定できる文字列に過ぎず、それだけでは呼び出し元を認証したことに
+// ならないため、この指定は必須です（空なら常に検証失敗＝ fail-closed）。
+//
+// TaskVerifier は OAuth 設定を要求しないため、Web UI を持たない Worker プロセスでも
+// 使えます。使いもしない OAuth シークレットへのアクセス権を配らずに済みます。
+func ExampleTaskVerifier_Middleware() {
+	verifier := auth.NewTaskVerifier(
+		"https://worker.example.com",
+		[]string{"tasks@my-project.iam.gserviceaccount.com"},
+	)
+	if !verifier.Configured() {
+		slog.Error("task verification is not configured")
 		return
 	}
 
@@ -65,32 +62,39 @@ func ExampleHandler_TaskOIDCVerificationMiddleware() {
 	})
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /tasks/run", h.TaskOIDCVerificationMiddleware(worker))
+	mux.Handle("POST /tasks/run", verifier.Middleware(worker))
 }
 
-// M2M(サーバー間通信)を許可しつつ、ブラウザからのアクセスはセッション認証に
-// フォールバックさせるミドルウェアの例です。
-func ExampleM2MVerifier_Verify() {
-	verifier := auth.NewM2MVerifier(
+// M2M(サーバー間通信)を許可しつつ、ブラウザからのアクセスはセッション認証へ
+// フォールバックさせる例です。
+//
+// 有効な OIDC Bearer トークンを提示した呼び出しはセッション認証と CSRF 検証を
+// バイパスし、それ以外はブラウザのログインへ回ります。CSRF トークンは
+// コンテキストへ載るので、テンプレートからは CSRFTokenFromContext で取り出せます。
+func ExampleHandler_ProtectedMiddleware() {
+	h, err := auth.NewHandler(auth.Config{
+		ClientID:          "xxxxx.apps.googleusercontent.com",
+		ClientSecret:      "secret",
+		RedirectURL:       "https://app.example.com/auth/callback",
+		SessionAuthKey:    "0123456789abcdef0123456789abcdef",
+		SessionEncryptKey: "0123456789abcdef",
+		SessionName:       "app-session",
+		AllowedDomains:    []string{"example.com"},
+	})
+	if err != nil {
+		slog.Error("failed to build auth handler", "error", err)
+		return
+	}
+
+	m2m := auth.NewM2MVerifier(
 		"https://app.example.com",
 		[]string{"caller@other-project.iam.gserviceaccount.com"},
 	)
 
-	protect := func(sessionChain, next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			payload, err := verifier.Verify(r)
-			if err == nil {
-				slog.Debug("m2m accepted", "caller", payload.Claims["email"])
-				next.ServeHTTP(w, r)
-				return
-			}
-			// Bearer トークンを提示していないリクエストは通常のブラウザアクセスなので、
-			// 失敗としてログに出さずセッション認証へ回します。
-			if !errors.Is(err, auth.ErrM2MNotAttempted) {
-				slog.Info("m2m verification failed", "error", err)
-			}
-			sessionChain.ServeHTTP(w, r)
-		})
-	}
-	_ = protect
+	page := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprintf(w, "<input name=%q value=%q>", "csrf_token", auth.CSRFTokenFromContext(r.Context()))
+	})
+
+	mux := http.NewServeMux()
+	mux.Handle("/private", h.ProtectedMiddleware(m2m)(page))
 }

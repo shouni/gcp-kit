@@ -15,17 +15,6 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// extractBearerToken は Authorization ヘッダーから "Bearer " プレフィックス（大文字小文字を
-// 区別しない）を除いたトークン本体を取り出します。プレフィックスが無い場合は ok=false を返します。
-func extractBearerToken(r *http.Request) (token string, ok bool) {
-	const prefix = "Bearer "
-	authHeader := r.Header.Get("Authorization")
-	if len(authHeader) < len(prefix) || !strings.EqualFold(authHeader[:len(prefix)], prefix) {
-		return "", false
-	}
-	return strings.TrimSpace(authHeader[len(prefix):]), true
-}
-
 // userInfoBodyLimit は UserInfo レスポンスとして読み込む最大バイト数です。
 // 想定される応答は数百バイトのため、異常な応答でメモリを消費しないよう制限します。
 const userInfoBodyLimit = 64 << 10
@@ -107,19 +96,6 @@ func (h *Handler) clearSessionCookie(w http.ResponseWriter, r *http.Request) err
 		return err // エラーを呼び出し元に返す
 	}
 	return nil
-}
-
-// toLowerMap はスライス内の文字列を正規化（トリム + 小文字化）して map に格納します。
-// 空白のみの要素は破棄します。環境変数から分割したリストに空要素が混ざっても、
-// 許可リストが「空ではないが誰も許可しない」状態にならないようにするためです。
-func toLowerMap(slice []string) map[string]struct{} {
-	m := make(map[string]struct{})
-	for _, s := range slice {
-		if trimmed := strings.TrimSpace(s); trimmed != "" {
-			m[strings.ToLower(trimmed)] = struct{}{}
-		}
-	}
-	return m
 }
 
 // randomToken は 32 バイトの暗号論的乱数を生成し、指定エンコーディングで文字列化します。

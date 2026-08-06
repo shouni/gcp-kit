@@ -4,9 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-GCP Kit (`github.com/shouni/gcp-kit`) is a Go library (not a service) of three independent packages for
-building Cloud Run + Cloud Tasks apps on GCP: Google OAuth2 session auth, a generic Cloud Tasks enqueuer,
-and a generic Cloud Tasks worker handler. Each package is meant to be imported independently.
+GCP Kit (`github.com/shouni/gcp-kit`) is a Go library (not a service) of four independent packages for
+building Cloud Run + Cloud Tasks apps on GCP: Google OAuth2 session auth plus inbound OIDC verification,
+a generic Cloud Tasks enqueuer, a generic Cloud Tasks worker handler, and Cloud Logging-compatible
+structured logging. Each package is meant to be imported independently.
 
 ## Commands
 
@@ -30,18 +31,38 @@ requires editing `go.mod`.
 
 ### Package boundaries and why they're separate
 
-- **`auth`**: browser-facing OAuth2 login (with PKCE) + session management, CSRF protection, and two
-  *inbound* verification paths: `TaskOIDCVerificationMiddleware` (verifies Cloud Tasks' own OIDC calls into
-  a worker) and `M2MVerifier` (verifies OIDC Bearer tokens from other services). Both check a service-account
-  allowlist through the shared `oidcVerifier`. They are deliberately decoupled from the session-based
-  `Handler` flow — a service can use M2M/task verification without ever setting up OAuth2 login.
+- **`auth`**: browser-facing OAuth2 login (with PKCE) + session management + CSRF, and two *inbound*
+  verification entry points: `TaskVerifier` (Cloud Tasks' own OIDC calls into a worker) and `M2MVerifier`
+  (OIDC Bearer tokens from other services). Both check a service-account allowlist through the shared
+  `oidcVerifier`. Neither needs OAuth2 config, so a worker-only service can verify inbound tokens without
+  ever holding OAuth client secrets — `Handler` used to offer a third entry point for the same check
+  (`Config.TaskAudienceURL` + `TaskOIDCVerificationMiddleware`), which forced web-only processes to carry
+  worker configuration; it was removed in favour of `TaskVerifier`.
+  - `Handler.ProtectedMiddleware(m2m)` composes the two worlds for a route that serves both browsers and
+    services: a valid OIDC Bearer token bypasses session auth and CSRF, anything else falls back to the
+    session chain. Every consuming app had written this same composition by hand — `ErrM2MNotAttempted`
+    exists precisely to make that fallback expressible, so the composition itself belongs here.
+  - `Handler.CSRFContextMiddleware` puts the session's CSRF token on the request context
+    (`CSRFTokenFromContext`) and mints one on GET when absent. Generation is GET-only on purpose: minting
+    on a state-changing request would hand a valid token to a request that arrived without one.
+- **`cloudlog`**: `slog.HandlerOptions` that rename `level`/`msg` to Cloud Logging's `severity`/`message`,
+  plus `TraceMiddleware` for `X-Cloud-Trace-Context` correlation. Deliberately owns nothing that is not
+  GCP-specific — the output destination and level come from the application.
 - **`tasks`**: `Enqueuer[T]` — generic, type-safe Cloud Tasks producer. Pairs with a `worker.Handler[T]` on
   the receiving service; `T` is the JSON payload contract between the two.
 - **`worker`**: `Handler[T]` — generic HTTP handler (implements `http.Handler`) that decodes a JSON body into
   `T` and calls a user-supplied `TaskExecutor[T]`. Deliberately has no dependency on `tasks` or `auth` — a
-  worker endpoint is typically wrapped in `auth.Handler.TaskOIDCVerificationMiddleware` at the router level,
-  not internally. Executor errors wrapping `worker.ErrPermanent` return 2xx so Cloud Tasks stops retrying;
+  worker endpoint is typically wrapped in `auth.TaskVerifier.Middleware` at the router level, not internally. Executor errors wrapping `worker.ErrPermanent` return 2xx so Cloud Tasks stops retrying;
   everything else returns 500 to trigger backoff.
+
+### File layout inside `auth`
+
+Files are named for the concern they hold, not for being a leftover bin: `auth.go` (Config/Handler
+construction + allowlist normalisation), `handlers.go` (OAuth login/callback/logout), `session.go`
+(session cookie, UserInfo lookup, authorization check, random tokens), `middleware.go` (session auth +
+CSRF verification), `protected.go` (the M2M/session composition and CSRF context), `oidc.go` (the single
+inbound token verifier + bearer extraction), `m2m.go` / `task.go` (the two entry points onto it),
+`context.go` (all context keys). There is no `utils.go` — put a new helper next to what it serves.
 
 ### Conventions used throughout
 
@@ -74,12 +95,13 @@ requires editing `go.mod`.
 
 - **A verified OIDC signature does not identify the caller.** `audience` is an arbitrary string, so any
   service account in any GCP project can mint a token for it. Every inbound OIDC path therefore checks the
-  `email` claim against an allowlist. Both paths (`M2MVerifier` and `Handler.TaskOIDCVerificationMiddleware`)
-  share one implementation — `oidcVerifier` in `auth/oidc.go` — specifically so one can't be hardened while
-  the other drifts. Don't reintroduce a second verification path.
-- **`AllowedTaskServiceAccounts` is validated at construction, not per request.** Returning 403 at request
-  time would make Cloud Tasks retry to exhaustion and silently drop tasks, so a missing allowlist fails in
-  `NewHandler` instead.
+  `email` claim against an allowlist. Both entry points (`M2MVerifier` and `TaskVerifier`) share one
+  implementation — `oidcVerifier` in `auth/oidc.go` — specifically so one can't be hardened while the other
+  drifts. Don't reintroduce a second verification path, and don't add a third entry point.
+- **An empty allowlist means "verify nothing successfully", not "allow everyone".** `oidcVerifier.configured()`
+  reports false without both an audience and a non-empty allowlist, and `TaskVerifier.Middleware` then answers
+  500 rather than letting the request through. Callers check `TaskVerifier.Configured()` at startup so a
+  misconfiguration surfaces before Cloud Tasks retries a task to exhaustion and drops it.
 - **`email_verified` is required everywhere** an email is accepted as an identity — ID token login, UserInfo
   API fallback, and OIDC verification. `verifiedEmailFromClaims` (`auth/oidc.go`) is the single gate.
 - **Redirect targets go through `isSafeRelativePath`** (`auth/middleware.go`) on both write and read. It

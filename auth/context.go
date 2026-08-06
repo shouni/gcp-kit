@@ -13,6 +13,7 @@ type contextKey int
 const (
 	emailContextKey contextKey = iota
 	oidcPayloadContextKey
+	csrfTokenContextKey
 )
 
 // WithEmail は認証済みユーザーのメールアドレスをコンテキストに格納します。
@@ -33,9 +34,27 @@ func WithOIDCPayload(ctx context.Context, payload *idtoken.Payload) context.Cont
 	return context.WithValue(ctx, oidcPayloadContextKey, payload)
 }
 
-// OIDCPayloadFromContext は TaskOIDCVerificationMiddleware が格納した検証済み
-// OIDC ペイロードを返します。呼び出し元サービスアカウントの特定などに使えます。
+// OIDCPayloadFromContext は TaskOIDCVerificationMiddleware または
+// ProtectedMiddleware の M2M 経路が格納した検証済み OIDC ペイロードを返します。
+// 呼び出し元サービスアカウントの特定などに使えます。
 func OIDCPayloadFromContext(ctx context.Context) (*idtoken.Payload, bool) {
 	payload, ok := ctx.Value(oidcPayloadContextKey).(*idtoken.Payload)
 	return payload, ok && payload != nil
+}
+
+// WithCSRFToken は、テンプレートへ埋め込むための CSRF トークンをコンテキストに格納します。
+// CSRFContextMiddleware が自動的に呼び出すため、通常は利用側が直接呼ぶ必要はありません。
+func WithCSRFToken(ctx context.Context, token string) context.Context {
+	return context.WithValue(ctx, csrfTokenContextKey, token)
+}
+
+// CSRFTokenFromContext は CSRFContextMiddleware が格納した CSRF トークンを返します。
+// フォームの hidden フィールドやメタタグへ埋め込む用途を想定しています。
+//
+// EmailFromContext と違い ok を返さないのは、「トークンが無い」が異常ではないためです。
+// 空文字はそのまま描画して差し支えなく、有無で分岐する呼び出し側もありません。
+// 認証の有無を表す EmailFromContext とは、空値の意味が違います。
+func CSRFTokenFromContext(ctx context.Context) string {
+	token, _ := ctx.Value(csrfTokenContextKey).(string)
+	return token
 }

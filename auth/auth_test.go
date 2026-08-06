@@ -77,64 +77,6 @@ func TestNewHandlerValidatesConfig(t *testing.T) {
 	}
 }
 
-// TestValidateConfigTaskAudienceRequiresAllowlist は、Cloud Tasks 検証の設定漏れを
-// 起動時に落とすことを保証します。リクエスト時に 403 を返すと、Cloud Tasks が
-// リトライを重ねた末にタスクを破棄してしまうためです。
-func TestValidateConfigTaskAudienceRequiresAllowlist(t *testing.T) {
-	t.Parallel()
-
-	t.Run("audience without allowlist is rejected", func(t *testing.T) {
-		t.Parallel()
-		cfg := validTestConfig()
-		cfg.TaskAudienceURL = "https://worker.example.com"
-
-		_, err := NewHandler(cfg)
-		if err == nil {
-			t.Fatal("NewHandler() error = nil, want error")
-		}
-		if !strings.Contains(err.Error(), "AllowedTaskServiceAccounts") {
-			t.Fatalf("error = %v, want it to mention AllowedTaskServiceAccounts", err)
-		}
-	})
-
-	t.Run("blank allowlist entries are rejected", func(t *testing.T) {
-		t.Parallel()
-		cfg := validTestConfig()
-		cfg.TaskAudienceURL = "https://worker.example.com"
-		cfg.AllowedTaskServiceAccounts = []string{"", "   "}
-
-		if _, err := NewHandler(cfg); err == nil {
-			t.Fatal("NewHandler() error = nil, want error")
-		}
-	})
-
-	t.Run("audience with allowlist is accepted", func(t *testing.T) {
-		t.Parallel()
-		cfg := validTestConfig()
-		cfg.TaskAudienceURL = "https://worker.example.com"
-		cfg.AllowedTaskServiceAccounts = []string{"tasks@project.iam.gserviceaccount.com"}
-
-		h, err := NewHandler(cfg)
-		if err != nil {
-			t.Fatalf("NewHandler() error = %v", err)
-		}
-		if !h.taskVerifier.configured() {
-			t.Fatal("task verifier is not configured")
-		}
-	})
-
-	t.Run("no audience means task verification is unused", func(t *testing.T) {
-		t.Parallel()
-		h, err := NewHandler(validTestConfig())
-		if err != nil {
-			t.Fatalf("NewHandler() error = %v", err)
-		}
-		if h.taskVerifier != nil {
-			t.Fatal("task verifier should be nil when TaskAudienceURL is unset")
-		}
-	})
-}
-
 // TestValidateConfigErrorIsDeterministic は、複数フィールドが空のときのエラーが
 // 実行ごとに変わらないこと（map 反復順に依存しないこと）を確認します。
 func TestValidateConfigErrorIsDeterministic(t *testing.T) {

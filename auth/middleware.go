@@ -195,13 +195,3 @@ func isSafeRelativePath(target string) bool {
 	}
 	return parsed.Scheme == "" && parsed.Host == ""
 }
-
-// TaskOIDCVerificationMiddleware は Google Cloud Tasks からの OIDC トークンを検証します。
-//
-// 検証は audience だけでなく Config.AllowedTaskServiceAccounts との照合まで行います。
-// audience は誰でも指定できる文字列に過ぎず、それだけでは呼び出し元を認証できないためです。
-// 検証済みペイロードは OIDCPayloadFromContext で下流のハンドラーから参照できます。
-// Web UI を持たないサービスは、OAuth 設定なしで同じ検証を行える TaskVerifier を使えます。
-func (h *Handler) TaskOIDCVerificationMiddleware(next http.Handler) http.Handler {
-	return taskOIDCMiddleware(h.taskVerifier, h.log(), next)
-}

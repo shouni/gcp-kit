@@ -105,3 +105,14 @@ func verifiedEmailFromClaims(claims map[string]any) (string, error) {
 	}
 	return emailClaim, nil
 }
+
+// extractBearerToken は Authorization ヘッダーから "Bearer " プレフィックス（大文字小文字を
+// 区別しない）を除いたトークン本体を取り出します。プレフィックスが無い場合は ok=false を返します。
+func extractBearerToken(r *http.Request) (token string, ok bool) {
+	const prefix = "Bearer "
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) < len(prefix) || !strings.EqualFold(authHeader[:len(prefix)], prefix) {
+		return "", false
+	}
+	return strings.TrimSpace(authHeader[len(prefix):]), true
+}

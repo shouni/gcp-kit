@@ -10,6 +10,47 @@ import (
 	"google.golang.org/api/idtoken"
 )
 
+// TestNewM2MVerifierConfigured は、M2MVerifier が audience と許可リストの両方が
+// 揃ったときだけ有効になることを確認します。TaskVerifier と違い M2M の設定漏れは
+// 401 ではなくセッション認証へのフォールバックとして現れ、気付きにくいため、
+// 起動時に検出できることが要件です。
+func TestNewM2MVerifierConfigured(t *testing.T) {
+	t.Parallel()
+
+	const (
+		audience = "https://service.example.com"
+		account  = "caller@example.iam.gserviceaccount.com"
+	)
+
+	tests := []struct {
+		name     string
+		audience string
+		allowed  []string
+		want     bool
+	}{
+		{"audience と許可リストが揃えば有効", audience, []string{account}, true},
+		{"許可リストが空なら無効", audience, nil, false},
+		{"audience が空なら無効", "", []string{account}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := NewM2MVerifier(tt.audience, tt.allowed).Configured(); got != tt.want {
+				t.Fatalf("Configured() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	t.Run("nil レシーバーは未設定として扱う", func(t *testing.T) {
+		t.Parallel()
+		var v *M2MVerifier
+		if v.Configured() {
+			t.Fatal("nil M2MVerifier must not be configured")
+		}
+	})
+}
+
 func stubM2MValidate(email string, err error) func(context.Context, string, string) (*idtoken.Payload, error) {
 	return func(context.Context, string, string) (*idtoken.Payload, error) {
 		if err != nil {
@@ -17,7 +58,7 @@ func stubM2MValidate(email string, err error) func(context.Context, string, stri
 		}
 		return &idtoken.Payload{
 			Subject: "sub",
-			Claims:  map[string]interface{}{"email": email, "email_verified": true},
+			Claims:  map[string]any{"email": email, "email_verified": true},
 		}, nil
 	}
 }
@@ -84,7 +125,7 @@ func TestM2MVerifierVerify(t *testing.T) {
 			validate: func(context.Context, string, string) (*idtoken.Payload, error) {
 				return &idtoken.Payload{
 					Subject: "sub",
-					Claims:  map[string]interface{}{},
+					Claims:  map[string]any{},
 				}, nil
 			},
 			wantOK: false,
@@ -96,7 +137,7 @@ func TestM2MVerifierVerify(t *testing.T) {
 			validate: func(context.Context, string, string) (*idtoken.Payload, error) {
 				return &idtoken.Payload{
 					Subject: "sub",
-					Claims:  map[string]interface{}{"email": "mcp@project.iam.gserviceaccount.com", "email_verified": false},
+					Claims:  map[string]any{"email": "mcp@project.iam.gserviceaccount.com", "email_verified": false},
 				}, nil
 			},
 			wantOK: false,

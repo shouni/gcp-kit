@@ -34,7 +34,7 @@ Cloud Run や Cloud Tasks を用いたアーキテクチャにおいて、ボイ
   * **呼び出し元の認証**: Cloud Tasks / 他サービスからの OIDC トークンは、署名と audience だけでなく
     **サービスアカウント許可リスト**まで照合します（audience は誰でも指定できる文字列に過ぎないため）。
     入口は `TaskVerifier`（Cloud Tasks 用）と `M2MVerifier`（他サービス用）の 2 つで、検証実装は共有です。
-    どちらも OAuth 設定を要求しないため、Web UI を持たない Worker でも使えます。
+    どちらも OAuth 設定を要求せず、`Configured()` で設定漏れを起動時に検出できます。
   * **二経路のルート保護**: `Handler.ProtectedMiddleware` は、有効な OIDC Bearer を提示した呼び出しに
     セッション認証と CSRF をバイパスさせ、それ以外はブラウザのログインへフォールバックさせます。
     CSRF トークンは `CSRFTokenFromContext` でテンプレートへ渡せます。
@@ -84,9 +84,10 @@ m2mVerifier := auth.NewM2MVerifier(serviceURL, allowedCallerSAs)
 taskVerifier := auth.NewTaskVerifier(workerURL, allowedCallerSAs)
 
 // 設定漏れは起動時に落とします。リクエスト時に落とすと、Cloud Tasks が
-// リトライを重ねた末にタスクを破棄してしまうためです。
-if !taskVerifier.Configured() {
-    return errors.New("task verification is not configured")
+// リトライを重ねた末にタスクを破棄してしまうためです。M2M 側の設定漏れは
+// 401 ではなくログイン画面へのフォールバックとして現れるので、より気付きにくい。
+if !taskVerifier.Configured() || !m2mVerifier.Configured() {
+    return errors.New("OIDC verification is not configured")
 }
 
 // 2. ルーティング

@@ -21,8 +21,8 @@ type validateFunc func(ctx context.Context, token, audience string) (*idtoken.Pa
 // oidcVerifier は Google 署名の OIDC ID トークンを、audience と
 // サービスアカウント許可リストの両方に対して検証します。
 //
-// M2MVerifier（他サービスからの呼び出し）と Handler.TaskOIDCVerificationMiddleware
-// （Cloud Tasks からの呼び出し）は、どちらもこの型を通して検証を行います。
+// M2MVerifier（他サービスからの呼び出し）と TaskVerifier（Cloud Tasks からの
+// 呼び出し）は、どちらもこの型を通して検証を行います。
 // 片方だけが強化される事故を避けるため、検証ロジックは意図的に一本化しています。
 type oidcVerifier struct {
 	audience string

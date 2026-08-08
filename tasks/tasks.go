@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/url"
 	"regexp"
 	"strings"
@@ -37,7 +38,7 @@ type Config struct {
 	WorkerURL           string // タスクの送信先エンドポイント
 	ServiceAccountEmail string // OIDCトークン生成用
 	// Audience はトークン検証用の audience です。空の場合は WorkerURL が使われます。
-	// 受信側 (auth.Config.TaskAudienceURL) と一致させてください。
+	// 受信側 (auth.NewTaskVerifier に渡す audience) と一致させてください。
 	Audience string
 	// Logger は本パッケージが使うロガーです。未指定の場合は slog.Default() です。
 	Logger *slog.Logger
@@ -245,9 +246,7 @@ func validateTaskID(taskID string) error {
 
 func (e *Enqueuer[T]) createTask(ctx context.Context, name string, body []byte, options enqueueOptions) (string, error) {
 	headers := map[string]string{"Content-Type": "application/json"}
-	for key, value := range options.headers {
-		headers[key] = value
-	}
+	maps.Copy(headers, options.headers)
 
 	task := &cloudtaskspb.Task{
 		Name: name,

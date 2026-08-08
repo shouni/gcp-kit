@@ -35,13 +35,13 @@ func (jobRunner) Execute(ctx context.Context, job Job) error {
 }
 
 func ExampleNewHandler() {
-	h := worker.NewHandler[Job](jobRunner{},
+	h := worker.NewHandler(jobRunner{},
 		worker.WithMaxBodyBytes(1<<20),
 		worker.WithStrictJSON(),
 	)
 
 	mux := http.NewServeMux()
 	// Handler は http.Handler を実装しているためそのまま登録できます。
-	// 実運用では auth.Handler.TaskOIDCVerificationMiddleware で包んでください。
+	// 実運用では auth.NewTaskVerifier(...).Middleware で包んでください。
 	mux.Handle("POST /tasks/run", h)
 }

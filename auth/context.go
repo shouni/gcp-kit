@@ -34,7 +34,7 @@ func WithOIDCPayload(ctx context.Context, payload *idtoken.Payload) context.Cont
 	return context.WithValue(ctx, oidcPayloadContextKey, payload)
 }
 
-// OIDCPayloadFromContext は TaskOIDCVerificationMiddleware または
+// OIDCPayloadFromContext は TaskVerifier.Middleware または
 // ProtectedMiddleware の M2M 経路が格納した検証済み OIDC ペイロードを返します。
 // 呼び出し元サービスアカウントの特定などに使えます。
 func OIDCPayloadFromContext(ctx context.Context) (*idtoken.Payload, bool) {

@@ -14,7 +14,7 @@ import (
 // 使いもしない認証情報へのアクセス権を配ることになります。TaskVerifier はその依存を切り、
 // audience と許可サービスアカウントだけで検証を成立させます。
 //
-// 検証ロジックは Handler.TaskOIDCVerificationMiddleware と共有しており、
+// 検証ロジックは M2MVerifier と共有しており（どちらも oidcVerifier を通します）、
 // 片方だけが強化される事故は起きません。
 type TaskVerifier struct {
 	verifier *oidcVerifier
@@ -56,12 +56,11 @@ func (v *TaskVerifier) log() *slog.Logger {
 }
 
 // taskOIDCMiddleware は Cloud Tasks 検証ミドルウェアの実体です。
-// Handler と TaskVerifier の双方から呼ばれます。
 func taskOIDCMiddleware(v *oidcVerifier, logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !v.configured() {
 			logger.ErrorContext(r.Context(), "Task OIDC verification is not configured: "+
-				"both TaskAudienceURL and AllowedTaskServiceAccounts are required")
+				"NewTaskVerifier requires both a non-empty audience and allowedServiceAccounts")
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}

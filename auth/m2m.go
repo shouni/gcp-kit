@@ -27,6 +27,16 @@ func NewM2MVerifier(audience string, allowedServiceAccounts []string) *M2MVerifi
 	return &M2MVerifier{verifier: newOIDCVerifier(audience, allowedServiceAccounts)}
 }
 
+// Configured は、検証に必要な設定（audience と許可リスト）が揃っているかを返します。
+//
+// 未設定の M2MVerifier は fail-closed で常に検証失敗となり、ProtectedMiddleware では
+// 全ての呼び出しがセッション認証へフォールバックします。設定漏れが「なぜかエージェントだけ
+// ログイン画面に飛ばされる」という形で現れるため、TaskVerifier.Configured と同様に
+// 起動時へ引き上げられるよう公開しています。
+func (v *M2MVerifier) Configured() bool {
+	return v != nil && v.verifier.configured()
+}
+
 // Verify は、リクエストが保持するOIDC Bearerトークンを検証し、許可済みサービスアカウントからの
 // 呼び出しであればそのペイロードを返します。失敗時は理由を示すエラーを返すのみで、ロギングは
 // 呼び出し側に委ねます（トークン欠損などM2Mを試みていない呼び出しは ErrM2MNotAttempted を返すため、

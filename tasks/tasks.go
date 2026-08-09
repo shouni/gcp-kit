@@ -40,9 +40,26 @@ type Config struct {
 	// Audience はトークン検証用の audience です。空の場合は WorkerURL が使われます。
 	// 受信側 (auth.NewTaskVerifier に渡す audience) と一致させてください。
 	Audience string
+	// DispatchDeadline は、このキューへ投入する全タスクに適用する応答待ち時間です。
+	// 未指定 (0) は Cloud Tasks の既定である 10 分を意味します。
+	//
+	// 「待つ時間」ではなく **ワーカーの実行時間の実効上限** である点に注意してください。
+	// これを超えるとワーカーがまだ処理中でも Cloud Tasks は待受を打ち切り、
+	// リトライ対象になります。Cloud Run の timeout をいくら長くしてもこの上限は動かないため、
+	// 長時間ジョブでは必ず明示してください。上限は HTTP ターゲットで 30 分です。
+	//
+	// タスク個別に変えたい場合は WithDispatchDeadline を使ってください（そちらが優先されます）。
+	DispatchDeadline time.Duration
 	// Logger は本パッケージが使うロガーです。未指定の場合は slog.Default() です。
 	Logger *slog.Logger
 }
+
+// maxDispatchDeadline は HTTP ターゲットのタスクに指定できる応答待ち時間の上限です。
+// 超えると Cloud Tasks が InvalidArgument を返すため、投入前にローカルで弾きます。
+const maxDispatchDeadline = 30 * time.Minute
+
+// minDispatchDeadline は同じく下限です。
+const minDispatchDeadline = 15 * time.Second
 
 // Enqueuer は任意の型 T のペイロードを Cloud Tasks に投入する汎用構造体です。
 type Enqueuer[T any] struct {
@@ -148,8 +165,9 @@ func WithDelay(d time.Duration) EnqueueOption {
 	return func(o *enqueueOptions) { o.scheduleTime = time.Now().Add(d) }
 }
 
-// WithDispatchDeadline は、ワーカーの応答を待つ時間を指定します。
-// この時間を超えるとリトライ対象になります（HTTPターゲットは最大30分）。
+// WithDispatchDeadline は、このタスクに限ってワーカーの応答を待つ時間を指定し、
+// Config.DispatchDeadline を上書きします。
+// この時間を超えるとリトライ対象になります（HTTPターゲットは15秒〜30分）。
 func WithDispatchDeadline(d time.Duration) EnqueueOption {
 	return func(o *enqueueOptions) { o.dispatchDeadline = d }
 }
@@ -199,6 +217,10 @@ func (e *Enqueuer[T]) EnqueueWithOptions(ctx context.Context, payload T, opts ..
 	var options enqueueOptions
 	for _, opt := range opts {
 		opt(&options)
+	}
+
+	if err := validateDispatchDeadline(options.dispatchDeadline); err != nil {
+		return "", fmt.Errorf("dispatch deadline is invalid: %w", err)
 	}
 
 	var name string
@@ -269,8 +291,13 @@ func (e *Enqueuer[T]) createTask(ctx context.Context, name string, body []byte, 
 	if !options.scheduleTime.IsZero() {
 		task.ScheduleTime = timestamppb.New(options.scheduleTime)
 	}
-	if options.dispatchDeadline > 0 {
-		task.DispatchDeadline = durationpb.New(options.dispatchDeadline)
+	// タスク個別の指定が無ければキュー共通の設定を使います。
+	deadline := options.dispatchDeadline
+	if deadline <= 0 {
+		deadline = e.cfg.DispatchDeadline
+	}
+	if deadline > 0 {
+		task.DispatchDeadline = durationpb.New(deadline)
 	}
 
 	// Cloud Tasks はリクエストのデッドラインが 30 秒より先だと、タスクの内容に関係なく
@@ -327,6 +354,23 @@ func validateConfig(cfg Config) error {
 		}
 	}
 
+	if err := validateDispatchDeadline(cfg.DispatchDeadline); err != nil {
+		return fmt.Errorf("tasks config DispatchDeadline is invalid: %w", err)
+	}
+
+	return nil
+}
+
+// validateDispatchDeadline は応答待ち時間が Cloud Tasks の受け付ける範囲かを検査します。
+// 0 は「指定しない」を意味するため許容します。
+func validateDispatchDeadline(d time.Duration) error {
+	if d == 0 {
+		return nil
+	}
+	if d < minDispatchDeadline || d > maxDispatchDeadline {
+		return fmt.Errorf("must be between %s and %s, got %s",
+			minDispatchDeadline, maxDispatchDeadline, d)
+	}
 	return nil
 }
 

@@ -44,6 +44,12 @@ Cloud Run や Cloud Tasks を用いたアーキテクチャにおいて、ボイ
   * **冪等なタスク投入**: `EnqueueWithName` は決定的な名前で投入し、`ALREADY_EXISTS` を成功として扱います。
   * **柔軟なオプション**: `EnqueueWithOptions` でタスク ID・実行時刻・遅延・応答待ち時間
     （`dispatch_deadline`）・追加ヘッダーを指定できます。作成されたタスク名を戻り値で受け取れます。
+  * **応答待ち時間はキュー単位でも指定できます**: `Config.DispatchDeadline` を設定すると、
+    そのエンキューアが投入する全タスクに適用されます（タスク個別の `WithDispatchDeadline` が優先）。
+    これは「待つ時間」ではなく **ワーカーの実行時間の実効上限**です。未指定だと Cloud Tasks の
+    既定 10 分が上限になり、Cloud Run 側の `timeout` をいくら長くしても超えられません。
+    長時間ジョブでは必ず明示し、アプリ側の全体タイムアウトを**これより短く**取ってください
+    （そうしないと、失敗を記録する前に context ごと打ち切られます）。
   * **後始末**: `Close()` で内部の gRPC クライアントを解放します。
 * **`cloudlog`**: **Cloud Logging 互換の構造化ログ**
   * **severity への詰め替え**: slog 既定の `level`/`msg` は Cloud Logging に読まれず、

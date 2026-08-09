@@ -418,6 +418,136 @@ func TestEnqueueWithOptions(t *testing.T) {
 	}
 }
 
+// TestConfigDispatchDeadlineAppliesToEveryTask は、キュー共通の応答待ち時間が
+// オプション無しの投入にも乗ることを確認します。長時間ジョブでは Cloud Tasks の
+// 既定 10 分が実行時間の実効上限になってしまうため、ここが効かないと
+// 呼び出し側が投入のたびにオプションを付ける運用に戻ります。
+func TestConfigDispatchDeadlineAppliesToEveryTask(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfig()
+	cfg.DispatchDeadline = 30 * time.Minute
+
+	client := &fakeTaskClient{}
+	enqueuer, err := newEnqueuerWithClient[samplePayload](cfg, client)
+	if err != nil {
+		t.Fatalf("newEnqueuerWithClient() returned error: %v", err)
+	}
+
+	if err := enqueuer.Enqueue(context.Background(), samplePayload{}); err != nil {
+		t.Fatalf("Enqueue() returned error: %v", err)
+	}
+
+	if got := client.req.GetTask().GetDispatchDeadline().AsDuration(); got != 30*time.Minute {
+		t.Fatalf("DispatchDeadline = %v, want %v", got, 30*time.Minute)
+	}
+}
+
+// TestWithDispatchDeadlineOverridesConfig は、タスク個別の指定がキュー共通の設定に
+// 優先することを確認します。
+func TestWithDispatchDeadlineOverridesConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfig()
+	cfg.DispatchDeadline = 30 * time.Minute
+
+	client := &fakeTaskClient{}
+	enqueuer, err := newEnqueuerWithClient[samplePayload](cfg, client)
+	if err != nil {
+		t.Fatalf("newEnqueuerWithClient() returned error: %v", err)
+	}
+
+	if _, err := enqueuer.EnqueueWithOptions(context.Background(), samplePayload{},
+		WithDispatchDeadline(5*time.Minute)); err != nil {
+		t.Fatalf("EnqueueWithOptions() returned error: %v", err)
+	}
+
+	if got := client.req.GetTask().GetDispatchDeadline().AsDuration(); got != 5*time.Minute {
+		t.Fatalf("DispatchDeadline = %v, want %v", got, 5*time.Minute)
+	}
+}
+
+// TestDispatchDeadlineIsUnsetByDefault は、未指定なら Cloud Tasks の既定に委ねる
+// （フィールドを立てない）ことを確認します。
+func TestDispatchDeadlineIsUnsetByDefault(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeTaskClient{}
+	enqueuer, err := newEnqueuerWithClient[samplePayload](validConfig(), client)
+	if err != nil {
+		t.Fatalf("newEnqueuerWithClient() returned error: %v", err)
+	}
+
+	if err := enqueuer.Enqueue(context.Background(), samplePayload{}); err != nil {
+		t.Fatalf("Enqueue() returned error: %v", err)
+	}
+
+	if got := client.req.GetTask().GetDispatchDeadline(); got != nil {
+		t.Fatalf("DispatchDeadline = %v, want unset", got)
+	}
+}
+
+// TestValidateDispatchDeadline は、Cloud Tasks に往復させる前に範囲外の値を弾くことを
+// 確認します。0 は「指定しない」なので許容します。
+func TestValidateDispatchDeadline(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		deadline time.Duration
+		wantErr  bool
+	}{
+		{name: "unset", deadline: 0, wantErr: false},
+		{name: "minimum", deadline: 15 * time.Second, wantErr: false},
+		{name: "maximum", deadline: 30 * time.Minute, wantErr: false},
+		{name: "below minimum", deadline: 14 * time.Second, wantErr: true},
+		{name: "above maximum", deadline: 31 * time.Minute, wantErr: true},
+		{name: "negative", deadline: -time.Second, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if err := validateDispatchDeadline(tt.deadline); (err != nil) != tt.wantErr {
+				t.Fatalf("validateDispatchDeadline(%v) error = %v, wantErr %v", tt.deadline, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestNewEnqueuerRejectsOutOfRangeDispatchDeadline は、範囲外の設定が起動時に
+// 落ちることを確認します。投入のたびに失敗させるより、構築時に気付けるほうがよいためです。
+func TestNewEnqueuerRejectsOutOfRangeDispatchDeadline(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfig()
+	cfg.DispatchDeadline = 45 * time.Minute
+
+	if _, err := newEnqueuerWithClient[samplePayload](cfg, &fakeTaskClient{}); err == nil {
+		t.Fatal("newEnqueuerWithClient() error = nil, want error for a deadline above 30m")
+	}
+}
+
+// TestEnqueueRejectsOutOfRangeDispatchDeadlineBeforeCallingAPI は、タスク個別の
+// 指定も投入前に弾かれることを確認します。
+func TestEnqueueRejectsOutOfRangeDispatchDeadlineBeforeCallingAPI(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeTaskClient{}
+	enqueuer, err := newEnqueuerWithClient[samplePayload](validConfig(), client)
+	if err != nil {
+		t.Fatalf("newEnqueuerWithClient() returned error: %v", err)
+	}
+
+	if _, err := enqueuer.EnqueueWithOptions(context.Background(), samplePayload{},
+		WithDispatchDeadline(time.Hour)); err == nil {
+		t.Fatal("EnqueueWithOptions() error = nil, want error for a deadline above 30m")
+	}
+	if client.req != nil {
+		t.Fatal("CreateTask must not be called for an out-of-range dispatch deadline")
+	}
+}
+
 func TestWithDelaySetsScheduleTime(t *testing.T) {
 	t.Parallel()
 

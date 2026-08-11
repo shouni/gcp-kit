@@ -4,10 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-GCP Kit (`github.com/shouni/gcp-kit`) is a Go library (not a service) of four independent packages for
+GCP Kit (`github.com/shouni/gcp-kit`) is a Go library (not a service) of five independent packages for
 building Cloud Run + Cloud Tasks apps on GCP: Google OAuth2 session auth plus inbound OIDC verification,
-a generic Cloud Tasks enqueuer, a generic Cloud Tasks worker handler, and Cloud Logging-compatible
-structured logging. Each package is meant to be imported independently.
+a generic Cloud Tasks enqueuer, a generic Cloud Tasks worker handler, Cloud Logging-compatible
+structured logging, and the web/worker role vocabulary those deployments split on. Each package is meant
+to be imported independently.
 
 ## Commands
 
@@ -50,6 +51,13 @@ requires editing `go.mod`.
   GCP-specific — the output destination and level come from the application.
 - **`tasks`**: `Enqueuer[T]` — generic, type-safe Cloud Tasks producer. Pairs with a `worker.Handler[T]` on
   the receiving service; `T` is the JSON payload contract between the two.
+- **`serverrole`**: the `Role` vocabulary (`web` / `worker` / `both`) for deployments that run one image as
+  two Cloud Run services. It holds the words and `Parse`'s strictness, nothing else — the kit never branches
+  on a role, so which routes each face serves stays in the consuming app's router. Three apps had a
+  byte-identical copy of this type; the reason to share it is not the duplication but the decision inside
+  it (below), which is easier to keep right in one place than in three. Because `Role` is a defined string
+  type and nothing here dispatches on it, an app that wants a fourth role declares its own constant and
+  wraps `Parse` — no kit release needed.
 - **`worker`**: `Handler[T]` — generic HTTP handler (implements `http.Handler`) that decodes a JSON body into
   `T` and calls a user-supplied `TaskExecutor[T]`. Deliberately has no dependency on `tasks` or `auth` — a
   worker endpoint is typically wrapped in `auth.TaskVerifier.Middleware` at the router level, not internally. Executor errors wrapping `worker.ErrPermanent` return 2xx so Cloud Tasks stops retrying;
@@ -92,6 +100,12 @@ inbound token verifier + bearer extraction), `m2m.go` / `task.go` (the two entry
   verification failure (log it).
 
 ### Security invariants worth preserving
+
+- **An unset server role is an error, never `both`.** `serverrole.Parse` rejects the empty string and any
+  unknown value. Defaulting to `both` would put worker routes back on a publicly reachable service the
+  moment one environment variable goes missing; accepting an unknown value deploys a service that serves
+  nothing. Both are startup failures on purpose — this is the same fail-closed stance as the empty
+  allowlists above.
 
 - **A verified OIDC signature does not identify the caller.** `audience` is an arbitrary string, so any
   service account in any GCP project can mint a token for it. Every inbound OIDC path therefore checks the

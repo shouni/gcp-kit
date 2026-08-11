@@ -96,7 +96,7 @@ func TestMiddlewareAllowsAuthenticatedRequest(t *testing.T) {
 	t.Parallel()
 
 	store := newTestCookieStore()
-	h := &Handler{store: store, sessionName: "test-session"}
+	h := &Handler{store: store, sessionName: "test-session", allowedDomains: testAllowedDomains()}
 
 	// Seed a session with a logged-in user and a matching CSRF token.
 	seedReq := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -172,6 +172,62 @@ func TestMiddlewareAllowsAuthenticatedRequest(t *testing.T) {
 			t.Fatal("next handler should be called when the CSRF token matches")
 		}
 	})
+}
+
+// TestMiddlewareRejectsRevokedSession は、許可リストから外れたアドレスのセッションが
+// 有効期限内でも通らないことを確認します。認可をログイン時に一度きりしか評価しないと、
+// 許可リストから削除してもクッキーの有効期限まで通り続けてしまいます。
+func TestMiddlewareRejectsRevokedSession(t *testing.T) {
+	t.Parallel()
+
+	store := newTestCookieStore()
+
+	// セッションを作った時点では許可されていた利用者。
+	seedReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	seedRR := httptest.NewRecorder()
+	session, err := store.Get(seedReq, "test-session")
+	if err != nil {
+		t.Fatalf("store.Get() error = %v", err)
+	}
+	session.Values[DefaultUserSessionKey] = "user@example.com"
+	if err := session.Save(seedReq, seedRR); err != nil {
+		t.Fatalf("session.Save() error = %v", err)
+	}
+
+	// 許可リストから外した後の Handler。セッションクッキー自体は有効なままです。
+	revoked := &Handler{
+		store:          store,
+		sessionName:    "test-session",
+		allowedDomains: map[string]struct{}{"elsewhere.example": {}},
+	}
+
+	nextCalled := false
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { nextCalled = true })
+
+	req := httptest.NewRequest(http.MethodGet, "/private", nil)
+	for _, c := range seedRR.Result().Cookies() {
+		req.AddCookie(c)
+	}
+	rr := httptest.NewRecorder()
+	revoked.Middleware(next).ServeHTTP(rr, req)
+
+	if nextCalled {
+		t.Fatal("next handler must not be called for an email removed from the allowlist")
+	}
+	if rr.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusFound)
+	}
+
+	// 使えないセッションを残すと、以降のリクエストごとに同じ警告を出し続けます。
+	var cleared bool
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == "test-session" && c.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Error("session cookie should be cleared once the session is no longer authorized")
+	}
 }
 
 func TestIsStateChangingMethod(t *testing.T) {
@@ -296,7 +352,7 @@ func TestMiddlewareRejectsCrossOriginPost(t *testing.T) {
 	t.Parallel()
 
 	store := newTestCookieStore()
-	h := &Handler{store: store, sessionName: "test-session"}
+	h := &Handler{store: store, sessionName: "test-session", allowedDomains: testAllowedDomains()}
 
 	seedReq := httptest.NewRequest(http.MethodGet, "/", nil)
 	seedRR := httptest.NewRecorder()

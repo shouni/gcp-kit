@@ -25,6 +25,14 @@ func newTestCookieStore() *sessions.CookieStore {
 	return sessions.NewCookieStore([]byte(testCookieKey), []byte(testCookieKey))
 }
 
+// testAllowedDomains returns an allowlist admitting the user@example.com
+// identity that session-seeded tests use. Middleware evaluates the allowlist on
+// every request, not just at login, so any Handler that must let an
+// authenticated request through needs one.
+func testAllowedDomains() map[string]struct{} {
+	return map[string]struct{}{"example.com": {}}
+}
+
 // newRecorderForCookies / newRequestForRoutes are thin wrappers used by tests
 // that only care about the response cookies or a bare request to a path.
 func newRecorderForCookies() *httptest.ResponseRecorder {

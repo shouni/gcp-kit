@@ -112,6 +112,13 @@ inbound token verifier + bearer extraction), `m2m.go` / `task.go` (the two entry
   `email` claim against an allowlist. Both entry points (`M2MVerifier` and `TaskVerifier`) share one
   implementation — `oidcVerifier` in `auth/oidc.go` — specifically so one can't be hardened while the other
   drifts. Don't reintroduce a second verification path, and don't add a third entry point.
+- **Authorization is evaluated per request, not once at login.** `Handler.Middleware` re-checks
+  `isAuthorized(email)` on every request, not just in `Callback`. The default `CookieStore` makes the cookie
+  itself the session, so there is nothing to revoke server-side; if the allowlist were only consulted at login,
+  an address removed from `AllowedEmails`/`AllowedDomains` would keep full access until the cookie expired
+  (7 days by default). Re-checking is what makes the allowlist an actual eviction mechanism, and it costs one
+  map lookup. `TestMiddlewareRejectsRevokedSession` guards it. Tests that drive an authenticated request
+  through `Middleware` must therefore give their `Handler` an allowlist (`testAllowedDomains()`).
 - **An empty allowlist means "verify nothing successfully", not "allow everyone".** `oidcVerifier.configured()`
   reports false without both an audience and a non-empty allowlist, and `TaskVerifier.Middleware` then answers
   500 rather than letting the request through. Callers check `TaskVerifier.Configured()` at startup so a

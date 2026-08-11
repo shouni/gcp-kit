@@ -49,7 +49,7 @@ func TestMiddlewareInjectsEmail(t *testing.T) {
 	t.Parallel()
 
 	store := newTestCookieStore()
-	h := &Handler{store: store, sessionName: "test-session"}
+	h := &Handler{store: store, sessionName: "test-session", allowedDomains: testAllowedDomains()}
 
 	seedReq := httptest.NewRequest(http.MethodGet, "/", nil)
 	seedRR := httptest.NewRecorder()

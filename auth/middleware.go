@@ -44,7 +44,22 @@ func (h *Handler) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// 2. CSRFチェック (副作用のあるメソッドのみ)
+		// 2. 認可チェック
+		// 許可リストはログイン時（Callback）だけでなく毎リクエスト評価します。
+		// 既定の CookieStore ではクッキー自体がセッションの実体でサーバー側から
+		// 失効させられないため、ここで見ないと許可リストから外したアドレスが
+		// クッキーの有効期限まで通り続けます。認可を認証時に一度きりではなく
+		// アクセス時に判定することで、許可リストが実際の締め出し手段になります。
+		if !h.isAuthorized(email) {
+			h.log().WarnContext(r.Context(), "許可リストにないセッション", "email", email, "path", r.URL.Path)
+			if clearErr := h.clearSessionCookie(w, r); clearErr != nil {
+				h.log().WarnContext(r.Context(), "セッションクッキーのクリアに失敗", "error", clearErr)
+			}
+			http.Redirect(w, r, h.buildLoginRedirectURL(r), http.StatusFound)
+			return
+		}
+
+		// 3. CSRFチェック (副作用のあるメソッドのみ)
 		if isStateChangingMethod(r.Method) {
 			if !validateOrigin(r) {
 				h.log().WarnContext(r.Context(), "Origin検証失敗", "email", email, "origin", r.Header.Get("Origin"), "path", r.URL.Path)

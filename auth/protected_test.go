@@ -13,7 +13,7 @@ import (
 // newProtectedTestHandler は、セッションストアだけを備えた Handler を返します。
 // OAuth 設定は経路の分岐に関係しないため設定しません。
 func newProtectedTestHandler() *Handler {
-	return &Handler{store: newTestCookieStore(), sessionName: "test-session"}
+	return &Handler{store: newTestCookieStore(), sessionName: "test-session", allowedDomains: testAllowedDomains()}
 }
 
 // newTestM2M は、検証結果を固定した M2MVerifier を返します。

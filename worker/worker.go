@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"path"
+	"runtime/pprof"
 )
 
 // ErrPermanent は、リトライしても成功し得ない恒久的な失敗を示すセンチネルエラーです。
@@ -99,7 +101,18 @@ func (h *Handler[T]) ProcessTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := WithMetadata(r.Context(), metadataFromHeader(r.Header))
+	md := metadataFromHeader(r.Header)
+	ctx := WithMetadata(r.Context(), md)
+
+	// タスク名を pprof のゴルーチンラベルに載せます。Go 1.27 以降、ラベルは
+	// **パニックのトレースバックの見出し行にも出ます。** ワーカーが落ちたときに
+	// どのタスクだったかがスタックだけで分かるようにするためで、ログの相関
+	// （slogctx）が使えない panic の経路を埋めるのがここの役目です。
+	// ラベルは executor が起こす子ゴルーチンへも継承されます。
+	if name := path.Base(md.TaskName); name != "" && name != "." && name != "/" {
+		ctx = pprof.WithLabels(ctx, pprof.Labels("cloudtask", name))
+		pprof.SetGoroutineLabels(ctx)
+	}
 
 	body := r.Body
 	if h.opts.maxBodyBytes > 0 {

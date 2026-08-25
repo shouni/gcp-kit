@@ -1,10 +1,11 @@
 module github.com/shouni/gcp-kit
 
-go 1.26
+go 1.27
 
 require (
 	cloud.google.com/go/cloudtasks v1.19.0
 	github.com/gorilla/sessions v1.4.0
+	github.com/shouni/go-utils v1.6.0
 	golang.org/x/oauth2 v0.36.0
 	google.golang.org/api v0.293.0
 	google.golang.org/grpc v1.83.1
@@ -24,7 +25,6 @@ require (
 	github.com/googleapis/enterprise-certificate-proxy v0.3.20 // indirect
 	github.com/googleapis/gax-go/v2 v2.23.0 // indirect
 	github.com/gorilla/securecookie v1.1.2 // indirect
-	github.com/shouni/go-utils v1.6.0
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.67.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.67.0 // indirect

@@ -89,7 +89,7 @@ func (h *Handler[T]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // ProcessTask は Cloud Tasks からの POST リクエストを処理する http.HandlerFunc です。
 func (h *Handler[T]) ProcessTask(w http.ResponseWriter, r *http.Request) {
 	if h == nil || h.executor == nil {
-		slog.Error("Worker task executor is not configured")
+		slog.ErrorContext(r.Context(), "Worker task executor is not configured")
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}

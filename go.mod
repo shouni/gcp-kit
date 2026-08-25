@@ -5,7 +5,7 @@ go 1.27
 require (
 	cloud.google.com/go/cloudtasks v1.19.0
 	github.com/gorilla/sessions v1.4.0
-	github.com/shouni/go-utils v1.6.0
+	github.com/shouni/go-utils v1.7.0
 	golang.org/x/oauth2 v0.36.0
 	google.golang.org/api v0.293.0
 	google.golang.org/grpc v1.83.1

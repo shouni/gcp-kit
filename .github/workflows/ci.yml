@@ -1,3 +1,4 @@
+# CI の実体は shouni/workflows。ジョブ構成とタグ運用の理由はそちらの README にある。
 name: CI
 
 on:
@@ -14,63 +15,8 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: Build & Test
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Build
-        run: go build ./...
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Gofmt check
-        run: test -z "$(gofmt -l .)"
-
-      # -shuffle=on はテスト間の暗黙の実行順序依存を検出します。
-      - name: Test (with race detector)
-        run: go test -race -shuffle=on ./...
-
-      # ファジングのシードコーパスを短時間だけ実行し、不変条件の破れを早期に検出します。
-      - name: Fuzz (smoke)
-        run: |
-          for target in FuzzBuildLoginRedirectURL FuzzIsSafeRelativePath FuzzExtractBearerToken; do
-            go test ./auth/... -run "^$" -fuzz "^${target}$" -fuzztime 20s
-          done
-
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.13.1
-
-  vulncheck:
-    name: govulncheck
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: golang/govulncheck-action@v1
-        with:
-          go-version-file: go.mod
-          repo-checkout: false
+  ci:
+    uses: shouni/workflows/.github/workflows/go-ci.yml@v1
+    with:
+      # 認証まわりは外から与えられた値を直接解釈するため、探索を毎回回す。
+      fuzz-targets: "./auth#FuzzBuildLoginRedirectURL ./auth#FuzzIsSafeRelativePath ./auth#FuzzExtractBearerToken"

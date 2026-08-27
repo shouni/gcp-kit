@@ -19,4 +19,4 @@ jobs:
     uses: shouni/workflows/.github/workflows/go-ci.yml@v1
     with:
       # 認証まわりは外から与えられた値を直接解釈するため、探索を毎回回す。
-      fuzz-targets: "./auth#FuzzBuildLoginRedirectURL ./auth#FuzzIsSafeRelativePath ./auth#FuzzExtractBearerToken"
+      fuzz-targets: "./auth/session#FuzzBuildLoginRedirectURL ./auth/session#FuzzIsSafeRelativePath ./auth/oidc#FuzzExtractBearerToken"

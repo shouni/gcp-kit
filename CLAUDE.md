@@ -20,37 +20,65 @@ go test ./...                   # test
 go test -race ./...             # test with race detector (what CI runs)
 go test ./auth/... -run TestName -v   # run a single test
 go test ./... -cover            # per-package coverage summary
-golangci-lint run ./...         # lint (config: .golangci.yml, pinned to v2.12.2 in CI)
+golangci-lint run ./...         # lint (config: .golangci.yml; CI uses the shared workflow's pin)
 govulncheck ./...               # vulnerability scan (CI runs this too)
 ```
 
-CI (`.github/workflows/ci.yml`) runs three parallel jobs on every push/PR to `main`/`develop`: build+vet+gofmt+race-tests,
-golangci-lint, and govulncheck. `go-version-file: go.mod` is used everywhere, so bumping the Go version only
-requires editing `go.mod`.
+CI (`.github/workflows/ci.yml`) is a thin caller of the shared `shouni/workflows/.github/workflows/go-ci.yml@v1`:
+build+vet+gofmt+race-tests, golangci-lint, govulncheck, and a fuzz job. **The fuzz targets are listed by
+package path in `ci.yml`** — move a fuzz test to another package and the job silently stops covering it, so
+update that list in the same commit. The Go version comes from `go.mod` (currently 1.27).
 
 ## Architecture
 
 ### Package boundaries and why they're separate
 
-- **`auth`**: browser-facing OAuth2 login (with PKCE) + session management + CSRF, and two *inbound*
-  verification entry points: `TaskVerifier` (Cloud Tasks' own OIDC calls into a worker) and `M2MVerifier`
-  (OIDC Bearer tokens from other services). Both check a service-account allowlist through the shared
-  `oidcVerifier`. Neither needs OAuth2 config, so a worker-only service can verify inbound tokens without
-  ever holding OAuth client secrets — `Handler` used to offer a third entry point for the same check
-  (`Config.TaskAudienceURL` + `TaskOIDCVerificationMiddleware`), which forced web-only processes to carry
-  worker configuration; it was removed in favour of `TaskVerifier`.
-  - `Handler.ProtectedMiddleware(m2m)` composes the two worlds for a route that serves both browsers and
-    services: a valid OIDC Bearer token bypasses session auth and CSRF, anything else falls back to the
-    session chain. Every consuming app had written this same composition by hand — `ErrM2MNotAttempted`
-    exists precisely to make that fallback expressible, so the composition itself belongs here.
-  - `Handler.CSRFContextMiddleware` puts the session's CSRF token on the request context
-    (`CSRFTokenFromContext`) and mints one on GET when absent. Generation is GET-only on purpose: minting
-    on a state-changing request would hand a valid token to a request that arrived without one.
-- **`cloudlog`**: `slog.HandlerOptions` that rename `level`/`msg` to Cloud Logging's `severity`/`message`,
-  plus `TraceMiddleware` for `X-Cloud-Trace-Context` correlation. Deliberately owns nothing that is not
-  GCP-specific — the output destination and level come from the application.
-- **`tasks`**: `Enqueuer[T]` — generic, type-safe Cloud Tasks producer. Pairs with a `worker.Handler[T]` on
-  the receiving service; `T` is the JSON payload contract between the two.
+- **`auth`**: the contract and the composition only — `Authenticator` (`Authenticate(w, r) (context.Context, error)`),
+  the optional `Challenger`, the two sentinels, and `Require` / `Protected`. **Stdlib only**; the implementations
+  live in the two child packages and depend on it, never the other way round. `VerifiedEmail` is here rather
+  than in either child because login and service verification must apply the *same* standard to the
+  `email_verified` claim — if one side loosens, that side can be used to claim someone else's address.
+  - **`ErrNotAttempted` and `ErrNotConfigured` are separate on purpose.** The first means "not my caller"
+    and lets `Protected` move on quietly. The second is a config error and must not hide inside a fallback:
+    it surfaces as 500 under `Require`, and as a logged line under `Protected` (which still falls through,
+    because stopping there would lock humans out until the service config is fixed).
+  - **`Protected` lets the authenticator that was *actually attempted* answer.** A caller that presented a
+    Bearer token and failed gets `oidc`'s RFC 6750 challenge; a browser that presented nothing falls through to the
+    session handler's login redirect. Answering with the last one instead — which is what the old
+    `ProtectedMiddleware` did — sends an HTML login page to an agent that asked for JSON.
+  - Scanning continues past a decisive failure so that a caller holding both a bad token and a valid session
+    is not locked out; the failure is only remembered, in case nothing else succeeds.
+  - **Both challenges follow the specs rather than a house style.** `oidc` sends `WWW-Authenticate` on every
+    401 (RFC 9110 §15.5.2 makes it a MUST — without it a client cannot learn the route takes Bearer) and
+    splits `invalid_token` (401, refetch and retry) from `insufficient_scope` (403, refetching won't help),
+    per RFC 6750 §3.1. `session` redirects only when the caller asked for a page; a JSON caller gets 401,
+    because an HTML login form is not something an agent can act on. Rails, Spring Security and ASP.NET Core
+    all negotiate the challenge the same way. `session`'s 401 carries no `WWW-Authenticate` — cookie auth has
+    no registered scheme, and the Bearer challenge belongs to whoever accepts Bearer.
+- **`auth/session`**: browser-facing OAuth2 login (with PKCE) + session + CSRF. `Handler` implements both
+  `Authenticator` and `Challenger`; `Authenticate` folds in what used to be three separate middlewares
+  (session auth, CSRF verification, CSRF context), and `Challenge` decides the response — a redirect when
+  the session is missing or the address fell off the allowlist, **403 when Origin or CSRF verification
+  failed**. Redirecting the latter would hide whether a forged request was rejected or waved through.
+  - Authorization is re-evaluated **every request**, not once at login: with the default `CookieStore` the
+    cookie *is* the session and cannot be revoked server-side, so an address removed from the allowlist
+    would otherwise keep working until the cookie expires.
+  - CSRF tokens are minted on GET only. Minting on a state-changing request would hand a valid token to a
+    request that arrived without one.
+  - Required settings are `Config` fields; everything optional is a `With*` option, matching how
+    `netarmor` and `go-http-kit` are configured.
+- **`auth/oidc`**: inbound OIDC Bearer verification for service-to-service calls, `Verifier`. **One type,
+  not two** — `TaskVerifier` and `M2MVerifier` were two wrappers over one verifier whose only difference
+  was how they were composed, and that difference now lives in `Require` vs `Protected`. It requires no
+  OAuth2 config, so a worker-only process verifies inbound tokens without ever holding client secrets.
+  An empty allowlist is `ErrNotConfigured`, never "allow everyone".
+- **`negotiate`**: `WantsJSON(w, r)` — picks the representation from `Accept` **and sets `Vary: Accept` on
+  the way past**. It takes the `ResponseWriter` on purpose: deciding without declaring the variance is the
+  bug this package exists to prevent, and three sibling apps had shipped exactly that (a byte-identical
+  `wantsJSON(r)` helper, no `Vary` anywhere). Matching is a substring check on `application/json`, so `*/*`
+  falls to HTML and `;q=0` is not honoured — the callers all send an explicit `Accept`, and widening it
+  would change behaviour in three apps at once. Splitting page routes from API routes is still right when
+  there is no JSON twin (input forms); this is only for one resource with two representations.
 - **`serverrole`**: the `Role` vocabulary (`web` / `worker` / `both`) for deployments that run one image as
   two Cloud Run services. It holds the words and `Parse`'s strictness, nothing else — the kit never branches
   on a role, so which routes each face serves stays in the consuming app's router. Three apps had a
@@ -60,38 +88,45 @@ requires editing `go.mod`.
   wraps `Parse` — no kit release needed.
 - **`worker`**: `Handler[T]` — generic HTTP handler (implements `http.Handler`) that decodes a JSON body into
   `T` and calls a user-supplied `TaskExecutor[T]`. Deliberately has no dependency on `tasks` or `auth` — a
-  worker endpoint is typically wrapped in `auth.TaskVerifier.Middleware` at the router level, not internally. Executor errors wrapping `worker.ErrPermanent` return 2xx so Cloud Tasks stops retrying;
+  worker endpoint is typically wrapped in `auth.Require(verifier)` at the router level, not internally. Executor errors wrapping `worker.ErrPermanent` return 2xx so Cloud Tasks stops retrying;
   everything else returns 500 to trigger backoff.
 
 ### File layout inside `auth`
 
-Files are named for the concern they hold, not for being a leftover bin: `auth.go` (Config/Handler
-construction + allowlist normalisation), `handlers.go` (OAuth login/callback/logout), `session.go`
-(session cookie, UserInfo lookup, authorization check, random tokens), `middleware.go` (session auth +
-CSRF verification), `protected.go` (the M2M/session composition and CSRF context), `oidc.go` (the single
-inbound token verifier + bearer extraction), `m2m.go` / `task.go` (the two entry points onto it),
-`context.go` (all context keys). There is no `utils.go` — put a new helper next to what it serves.
+Three packages, and the dependency runs one way only: `session` → `auth` ← `oidc`.
+
+- `auth/`: `auth.go` (the contract and both composers), `claims.go` (the shared `email_verified` gate).
+- `auth/session/`: `handler.go` (Config/Handler construction + allowlist normalisation), `options.go`
+  (every optional setting), `handlers.go` (OAuth login/callback/logout), `session.go` (session cookie,
+  UserInfo lookup, authorization check, random tokens), `authenticate.go` (`Authenticate` / `Challenge`
+  and what they need: origin check, CSRF verification, login redirect), `context.go` (context keys).
+- `auth/oidc/`: `oidc.go` (the verifier and bearer extraction), `context.go` (the payload key).
+
+There is no `utils.go` and no `internal/` — put a new helper next to what it serves. `internal/` would be
+the right tool if the public packages shared something they wanted hidden, and they do not: what `session`
+and `oidc` share is `auth`, which callers legitimately use to plug in their own methods.
 
 ### Conventions used throughout
 
-- **Fail-closed by default**: empty allowlists (`auth.Handler.allowedEmails`/`allowedDomains`,
-  `oidcVerifier.allowed`) deny everything rather than allow everything. Preserve this when touching
+- **Fail-closed by default**: empty allowlists (`session.Handler.allowedEmails`/`allowedDomains`,
+  `oidc.Verifier.allowed`) deny everything rather than allow everything. Preserve this when touching
   authorization logic. `toLowerMap` drops whitespace-only entries so a list can't be "non-empty but allows
   nobody".
 - **Optional config gets defaults, not errors**: `Config` fields like `LoginPath`, `SessionMaxAge`, `Store`,
   and `Logger` are zero-value-safe. Tests build `Handler{}` struct literals directly, so read these through
-  the accessors (`h.LoginPath()`, `h.log()`) rather than the raw fields.
-- **Config structs + `validateConfig`**: every package entry point (`auth.NewHandler`, `tasks.NewEnqueuer`)
+  the accessors (`h.loginPath()`, `h.log()`) rather than the raw `cfg*` fields.
+- **Config structs + `validateConfig`**: every package entry point (`session.New`, `tasks.NewEnqueuer`)
   takes a `Config` struct and validates required fields / URL shape eagerly at construction time, not at
   first use.
 - **Client interfaces for testability**: `tasks.Enqueuer` depends on an internal `taskClient` interface
   (not the concrete `*cloudtasks.Client`) specifically so tests can inject a fake via the unexported
-  `newEnqueuerWithClient` constructor. `M2MVerifier.validate` is a swappable func field for the same reason.
+  `newEnqueuerWithClient` constructor. `oidc.Verifier.validate` is a swappable func field for the same reason.
   Follow this pattern (interface/func-field seam + unexported constructor) rather than adding mocking
   frameworks.
-- **Tests live in-package** (`package auth`, not `auth_test`) and build structs like `Handler{}` or
-  `M2MVerifier{}` directly via struct literals to reach unexported fields — there's no test-only exported
-  constructor. Do the same for new tests rather than exporting fields just for testability.
+- **Tests live in-package** and build structs like `session.Handler{}` directly via struct literals to reach
+  unexported fields — there's no test-only exported constructor. Do the same for new tests rather than
+  exporting fields just for testability. This is also why the path accessors resolve defaults lazily: a
+  struct-literal `Handler` must still behave, matching the nil/zero-value tolerance the rest of the kit has.
 - **`google.golang.org/grpc/status`/`codes`**: Cloud Tasks errors are matched by gRPC status code (see
   `tasks.EnqueueWithName`'s `codes.AlreadyExists` handling), not by string matching or sentinel errors from
   the client library.
@@ -109,8 +144,8 @@ inbound token verifier + bearer extraction), `m2m.go` / `task.go` (the two entry
 
 - **A verified OIDC signature does not identify the caller.** `audience` is an arbitrary string, so any
   service account in any GCP project can mint a token for it. Every inbound OIDC path therefore checks the
-  `email` claim against an allowlist. Both entry points (`M2MVerifier` and `TaskVerifier`) share one
-  implementation — `oidcVerifier` in `auth/oidc.go` — specifically so one can't be hardened while the other
+  `email` claim against an allowlist. There is one
+  implementation — `oidc.Verifier` — specifically so one caller shape can't be hardened while the other
   drifts. Don't reintroduce a second verification path, and don't add a third entry point.
 - **Authorization is evaluated per request, not once at login.** `Handler.Middleware` re-checks
   `isAuthorized(email)` on every request, not just in `Callback`. The default `CookieStore` makes the cookie
@@ -119,13 +154,13 @@ inbound token verifier + bearer extraction), `m2m.go` / `task.go` (the two entry
   (7 days by default). Re-checking is what makes the allowlist an actual eviction mechanism, and it costs one
   map lookup. `TestMiddlewareRejectsRevokedSession` guards it. Tests that drive an authenticated request
   through `Middleware` must therefore give their `Handler` an allowlist (`testAllowedDomains()`).
-- **An empty allowlist means "verify nothing successfully", not "allow everyone".** `oidcVerifier.configured()`
-  reports false without both an audience and a non-empty allowlist, and `TaskVerifier.Middleware` then answers
-  500 rather than letting the request through. Callers check `TaskVerifier.Configured()` at startup so a
+- **An empty allowlist means "verify nothing successfully", not "allow everyone".** `Verifier.Configured()`
+  reports false without both an audience and a non-empty allowlist, and `auth.Require` then answers
+  500 rather than letting the request through. Callers check `Verifier.Configured()` at startup so a
   misconfiguration surfaces before Cloud Tasks retries a task to exhaustion and drops it.
 - **`email_verified` is required everywhere** an email is accepted as an identity — ID token login, UserInfo
-  API fallback, and OIDC verification. `verifiedEmailFromClaims` (`auth/oidc.go`) is the single gate.
-- **Redirect targets go through `isSafeRelativePath`** (`auth/middleware.go`) on both write and read. It
+  API fallback, and OIDC verification. `auth.VerifiedEmail` is the single gate.
+- **Redirect targets go through `isSafeRelativePath`** (`auth/session/authenticate.go`) on both write and read. It
   rejects raw `//`-prefixed strings rather than trusting `url.Parse` (`//@/` parses to an empty host but is
   protocol-relative to browsers), plus backslashes and control characters. `FuzzIsSafeRelativePath` and
   `FuzzBuildLoginRedirectURL` guard the invariant; `auth/testdata/fuzz/` holds regression seeds.

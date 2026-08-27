@@ -105,7 +105,7 @@ func (h *Handler[T]) ProcessTask(w http.ResponseWriter, r *http.Request) {
 	ctx := WithMetadata(r.Context(), md)
 
 	// タスク名を pprof のゴルーチンラベルに載せます。Go 1.27 以降、ラベルは
-	// **パニックのトレースバックの見出し行にも出ます。** ワーカーが落ちたときに
+	// パニックのトレースバックの見出し行にも出ます。ワーカーが落ちたときに
 	// どのタスクだったかがスタックだけで分かるようにするためで、ログの相関
 	// （slogctx）が使えない panic の経路を埋めるのがここの役目です。
 	// ラベルは executor が起こす子ゴルーチンへも継承されます。

@@ -43,7 +43,7 @@ update that list in the same commit. The Go version comes from `go.mod` (current
     it surfaces as 500 under `Require`, and as a logged line under `Protected` (which still falls through,
     because stopping there would lock humans out until the service config is fixed).
   - **`Protected` lets the authenticator that was *actually attempted* answer.** A caller that presented a
-    Bearer token and failed gets 401/403 from `oidc`; a browser that presented nothing falls through to the
+    Bearer token and failed gets 403 from `oidc` (401 means *no* credentials, which a decisive failure never is); a browser that presented nothing falls through to the
     session handler's login redirect. Answering with the last one instead — which is what the old
     `ProtectedMiddleware` did — sends an HTML login page to an agent that asked for JSON.
   - Scanning continues past a decisive failure so that a caller holding both a bad token and a valid session

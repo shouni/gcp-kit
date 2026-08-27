@@ -43,11 +43,18 @@ update that list in the same commit. The Go version comes from `go.mod` (current
     it surfaces as 500 under `Require`, and as a logged line under `Protected` (which still falls through,
     because stopping there would lock humans out until the service config is fixed).
   - **`Protected` lets the authenticator that was *actually attempted* answer.** A caller that presented a
-    Bearer token and failed gets 403 from `oidc` (401 means *no* credentials, which a decisive failure never is); a browser that presented nothing falls through to the
+    Bearer token and failed gets `oidc`'s RFC 6750 challenge; a browser that presented nothing falls through to the
     session handler's login redirect. Answering with the last one instead — which is what the old
     `ProtectedMiddleware` did — sends an HTML login page to an agent that asked for JSON.
   - Scanning continues past a decisive failure so that a caller holding both a bad token and a valid session
     is not locked out; the failure is only remembered, in case nothing else succeeds.
+  - **Both challenges follow the specs rather than a house style.** `oidc` sends `WWW-Authenticate` on every
+    401 (RFC 9110 §15.5.2 makes it a MUST — without it a client cannot learn the route takes Bearer) and
+    splits `invalid_token` (401, refetch and retry) from `insufficient_scope` (403, refetching won't help),
+    per RFC 6750 §3.1. `session` redirects only when the caller asked for a page; a JSON caller gets 401,
+    because an HTML login form is not something an agent can act on. Rails, Spring Security and ASP.NET Core
+    all negotiate the challenge the same way. `session`'s 401 carries no `WWW-Authenticate` — cookie auth has
+    no registered scheme, and the Bearer challenge belongs to whoever accepts Bearer.
 - **`auth/session`**: browser-facing OAuth2 login (with PKCE) + session + CSRF. `Handler` implements both
   `Authenticator` and `Challenger`; `Authenticate` folds in what used to be three separate middlewares
   (session auth, CSRF verification, CSRF context), and `Challenge` decides the response — a redirect when

@@ -12,6 +12,8 @@ import (
 	"strings"
 
 	"github.com/gorilla/sessions"
+
+	"github.com/shouni/gcp-kit/negotiate"
 )
 
 const (
@@ -96,6 +98,16 @@ func (h *Handler) Authenticate(w http.ResponseWriter, r *http.Request) (context.
 // 認証が足りないだけならログイン画面へ送り、CSRF や Origin の検証に落ちた場合は
 // 403 で止めます。後者をリダイレクトにすると、攻撃者の仕掛けたリクエストが
 // 素通りしたのか拒否されたのかを利用者も運用も区別できません。
+//
+// ログイン画面へ送るのは、相手がページを求めている場合だけです。JSON を求めて
+// いる相手には 401 を返します。同じルートに人とエージェントが来る構成で
+// リダイレクト一択にすると、JSON を求めたエージェントに HTML のログイン画面が
+// 返り、相手はそれを解釈できません。Rails・Spring Security・ASP.NET Core など、
+// 混在ルートを扱う実装はいずれも同じ出し分けをしています。
+//
+// なお 401 に WWW-Authenticate を添えないのは、クッキーによる認証に対応する
+// 認証スキームが登録されていないためです。Bearer のチャレンジは、それを
+// 受け付ける auth/oidc の側が返します。
 func (h *Handler) Challenge(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, errBadOrigin):
@@ -103,6 +115,12 @@ func (h *Handler) Challenge(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, errInvalidCSRF):
 		http.Error(w, "Invalid CSRF token", http.StatusForbidden)
 	case errors.Is(err, errNoSession), errors.Is(err, errUnauthMail):
+		// WantsJSON は Vary: Accept も立てます。この応答は実際に Accept で
+		// 変わるため、キャッシュへ伝える必要があります。
+		if negotiate.WantsJSON(w, r) {
+			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+			return
+		}
 		http.Redirect(w, r, h.buildLoginRedirectURL(r), http.StatusFound)
 	default:
 		h.log().ErrorContext(r.Context(), "セッション認証で予期しない失敗", "error", err, "path", r.URL.Path)

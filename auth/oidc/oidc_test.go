@@ -206,3 +206,69 @@ func TestVerifierNilReceiver(t *testing.T) {
 		t.Fatalf("Authenticate() error = %v, want auth.ErrNotConfigured", err)
 	}
 }
+
+// Challenge は RFC 6750 §3.1 に沿って、トークンの不正（取り直せば直る）と
+// 呼び出し元の不許可（取り直しても直らない）を別の応答で伝えます。
+// 実際の Authenticate の失敗をそのまま渡して確認します。
+func TestVerifierChallenge(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		allowed    []string
+		authz      string
+		validate   validateFunc
+		wantStatus int
+		wantWWW    string
+	}{
+		{
+			name: "資格情報なし", allowed: []string{testAccount}, authz: "",
+			validate:   stubValidate(testAccount, nil),
+			wantStatus: http.StatusUnauthorized, wantWWW: "Bearer",
+		},
+		{
+			name: "トークンが不正", allowed: []string{testAccount}, authz: "Bearer bogus",
+			validate:   stubValidate("", errors.New("bad signature")),
+			wantStatus: http.StatusUnauthorized, wantWWW: `Bearer error="invalid_token"`,
+		},
+		{
+			name: "許可リストに無い呼び出し元", allowed: []string{testAccount}, authz: "Bearer valid",
+			validate:   stubValidate("stranger@evil.iam.gserviceaccount.com", nil),
+			wantStatus: http.StatusForbidden, wantWWW: `Bearer error="insufficient_scope"`,
+		},
+		{
+			// 設定漏れはサーバー側の落ち度なので、チャレンジは返しません。
+			name: "検証器が未設定", allowed: nil, authz: "Bearer valid",
+			validate:   stubValidate(testAccount, nil),
+			wantStatus: http.StatusInternalServerError, wantWWW: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			v := New(testAudience, tt.allowed)
+			v.validate = tt.validate
+
+			req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+			if tt.authz != "" {
+				req.Header.Set("Authorization", tt.authz)
+			}
+			rec := httptest.NewRecorder()
+
+			_, err := v.Authenticate(rec, req)
+			if err == nil {
+				t.Fatal("Authenticate() error = nil, want a failure")
+			}
+			v.Challenge(rec, req, err)
+
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", rec.Code, tt.wantStatus)
+			}
+			if got := rec.Header().Get("WWW-Authenticate"); got != tt.wantWWW {
+				t.Errorf("WWW-Authenticate = %q, want %q", got, tt.wantWWW)
+			}
+		})
+	}
+}

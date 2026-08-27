@@ -36,6 +36,14 @@ type Verifier struct {
 // テストで差し替えるために関数フィールドとして保持します。
 type validateFunc func(ctx context.Context, token, audience string) (*idtoken.Payload, error)
 
+// 検証失敗の種類。RFC 6750 §3.1 の error コードと状態コードに対応させるために分けています。
+// トークンが壊れている（401・取り直せば直る）のと、呼び出し元が許可されていない
+// （403・取り直しても直らない）のとでは、クライアントが次に取るべき行動が違います。
+var (
+	errInvalidToken = errors.New("oidc: invalid token")
+	errNotAllowed   = errors.New("oidc: caller is not allowed")
+)
+
 // New は Verifier を初期化します。
 //
 // allowedServiceAccounts が空の場合、検証は安全側に倒して常に失敗します（fail-closed）。
@@ -91,21 +99,21 @@ func (v *Verifier) verifyToken(ctx context.Context, token string) (*idtoken.Payl
 
 	payload, err := validate(ctx, token, v.audience)
 	if err != nil {
-		return nil, fmt.Errorf("oidc: token validation failed: %w", err)
+		return nil, fmt.Errorf("%w: %w", errInvalidToken, err)
 	}
 	if payload == nil {
-		return nil, errors.New("oidc: token validation returned no payload")
+		return nil, fmt.Errorf("%w: validation returned no payload", errInvalidToken)
 	}
 
 	// audience は誰でも指定できる文字列に過ぎないため、署名検証だけでは
 	// 呼び出し元を特定できません。必ず email クレームで発行者を確認します。
 	emailClaim, err := auth.VerifiedEmail(payload.Claims)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", errInvalidToken, err)
 	}
 
 	if _, ok := v.allowed[strings.ToLower(emailClaim)]; !ok {
-		return nil, fmt.Errorf("oidc: service account %q is not in the allowlist", emailClaim)
+		return nil, fmt.Errorf("%w: service account %q", errNotAllowed, emailClaim)
 	}
 
 	return payload, nil
@@ -133,4 +141,30 @@ func toLowerMap(slice []string) map[string]struct{} {
 		}
 	}
 	return m
+}
+
+// Challenge は auth.Challenger を実装し、RFC 6750 に沿った応答を返します。
+//
+// RFC 9110 §15.5.2 は、401 を返すサーバーが WWW-Authenticate を送ることを要求します。
+// これが無いと、クライアントは「このリソースが Bearer を受け付ける」ことを知る手段が
+// ありません。状態コードは RFC 6750 §3.1 の対応に従います。
+//
+//   - 資格情報なし:       401 Bearer
+//   - トークンが不正:     401 error="invalid_token"（取り直せば直る）
+//   - 呼び出し元が不許可: 403 error="insufficient_scope"（取り直しても直らない）
+//   - 検証器が未設定:     500。サーバー側の落ち度なのでチャレンジは返しません
+func (v *Verifier) Challenge(w http.ResponseWriter, _ *http.Request, err error) {
+	switch {
+	case errors.Is(err, auth.ErrNotConfigured):
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+	case errors.Is(err, auth.ErrNotAttempted):
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+	case errors.Is(err, errNotAllowed):
+		w.Header().Set("WWW-Authenticate", `Bearer error="insufficient_scope"`)
+		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+	default:
+		w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
+		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+	}
 }

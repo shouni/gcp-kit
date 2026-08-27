@@ -13,8 +13,7 @@ import (
 // Cloud Tasks からの呼び出しだけを受けるワーカーエンドポイントの保護です。
 //
 // 許可サービスアカウントには tasks.Config.ServiceAccountEmail と同じものを指定します。
-// audience は誰でも指定できる文字列に過ぎず、それだけでは呼び出し元を認証したことに
-// ならないため、この指定は必須です（空なら常に検証失敗＝ fail-closed）。
+// 空にすると常に検証失敗になります（理由は oidc.New を参照）。
 //
 // oidc は OAuth 設定を要求しないため、Web UI を持たない Worker プロセスでも使えます。
 // 使いもしない OAuth シークレットへのアクセス権を配らずに済みます。
@@ -43,8 +42,8 @@ func ExampleRequire() {
 // 人（ブラウザ）とサービス（エージェント）が同じルートを使う場合の構成です。
 //
 // 有効な OIDC Bearer トークンを提示した呼び出しはセッション認証と CSRF 検証を
-// バイパスし、それ以外はブラウザのログインへ回ります。**人向けの方式を最後に
-// 置く**と、どれも成立しなかったときログイン画面へ送られます。
+// バイパスし、それ以外はブラウザのログインへ回ります。人向けの方式を最後に
+// 置くと、どれも成立しなかったときログイン画面へ送られます。
 func ExampleProtected() {
 	handler, err := session.New(session.Config{
 		ClientID:          "xxxxx.apps.googleusercontent.com",

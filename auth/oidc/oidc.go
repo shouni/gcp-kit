@@ -2,7 +2,7 @@
 //
 // Cloud Tasks からの呼び出しも、他サービスからの M2M 呼び出しも、Google 署名付きの
 // OIDC ID トークンを Authorization: Bearer で提示する点は同じです。違うのは
-// **合成のされ方**（拒否して止めるか、ブラウザセッションへ譲るか）だけなので、
+// 合成のされ方（拒否して止めるか、ブラウザセッションへ譲るか）だけなので、
 // 検証器は 1 つにまとめ、その使い分けは auth.Require / auth.Protected が持ちます。
 //
 // このパッケージは OAuth2 の設定を要求しません。Web UI を持たない Worker が、
@@ -51,10 +51,8 @@ func New(audience string, allowedServiceAccounts []string) *Verifier {
 
 // Configured は、検証に必要な設定（audience と許可リスト）が揃っているかを返します。
 //
-// 未設定の Verifier は常に検証失敗となり、auth.Protected では全ての呼び出しが
-// セッション認証へフォールバックします。設定漏れが「なぜかエージェントだけ
-// ログイン画面に飛ばされる」という分かりにくい形で現れるため、
-// 起動時に落とせるよう公開しています。
+// 起動時に落とせるよう公開しています。未設定のまま動かすと全ての呼び出しが
+// セッション認証へフォールバックし、設定漏れが分かりにくい形で現れます。
 func (v *Verifier) Configured() bool {
 	return v != nil && strings.TrimSpace(v.audience) != "" && len(v.allowed) > 0
 }

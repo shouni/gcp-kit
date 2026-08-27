@@ -53,9 +53,9 @@ var (
 
 	// ErrNotConfigured は、方式そのものが設定されていないことを示します。
 	//
-	// ErrNotAttempted と区別するのは、**設定漏れをフォールバックで隠さない**ためです。
+	// ErrNotAttempted と区別するのは、設定漏れをフォールバックで隠さないためです。
 	// 混ぜると「なぜかエージェントだけログイン画面に飛ばされる」という分かりにくい
-	// 形で現れます。Require はこれを 500 として扱います。
+	// 形で現れます。
 	ErrNotConfigured = errors.New("auth: authenticator is not configured")
 )
 
@@ -92,15 +92,13 @@ func Require(a Authenticator, opts ...Option) func(http.Handler) http.Handler {
 // Protected は、方式を順に試して最初に成立したもので通すミドルウェアを返します。
 // 人もサービスも来るルートに使います。
 //
-// どれも成立しなかった場合、応答を決めるのは**資格情報を提示したうえで落ちた方式**です。
+// どれも成立しなかった場合、応答を決めるのは資格情報を提示したうえで落ちた方式です。
 // 「Bearer を出したが通らなかった」は確定的な失敗で、次の方式に望みはありません。
-// ここを最後の方式に答えさせると、**JSON を求めたエージェントに HTML のログイン画面が
-// 返ります**。提示すらしていない方式しか無ければ、最後の方式が答えます（人向けを
-// 最後に置けば、ブラウザはログイン画面へ送られます）。
+// 最後の方式に答えさせると、JSON を求めたエージェントに HTML のログイン画面が返ります。
+// 提示すらしていない方式しか無ければ、最後の方式が答えます。
 //
-// ErrNotConfigured は確定的な失敗として扱いません。設定漏れでフォールバックを
-// 止めると、サービス側の設定を直すまで人までログインできなくなります。
-// 代わりにログへ残します。
+// ErrNotConfigured だけは確定的な失敗に数えません。設定漏れでフォールバックを止めると、
+// サービス側の設定を直すまで人までログインできなくなります。
 func Protected(first Authenticator, rest ...Authenticator) func(http.Handler) http.Handler {
 	return ProtectedWith(nil, append([]Authenticator{first}, rest...)...)
 }

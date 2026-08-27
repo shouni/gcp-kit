@@ -20,13 +20,14 @@ go test ./...                   # test
 go test -race ./...             # test with race detector (what CI runs)
 go test ./auth/... -run TestName -v   # run a single test
 go test ./... -cover            # per-package coverage summary
-golangci-lint run ./...         # lint (config: .golangci.yml, pinned to v2.12.2 in CI)
+golangci-lint run ./...         # lint (config: .golangci.yml; CI uses the shared workflow's pin)
 govulncheck ./...               # vulnerability scan (CI runs this too)
 ```
 
-CI (`.github/workflows/ci.yml`) runs three parallel jobs on every push/PR to `main`/`develop`: build+vet+gofmt+race-tests,
-golangci-lint, and govulncheck. `go-version-file: go.mod` is used everywhere, so bumping the Go version only
-requires editing `go.mod`.
+CI (`.github/workflows/ci.yml`) is a thin caller of the shared `shouni/workflows/.github/workflows/go-ci.yml@v1`:
+build+vet+gofmt+race-tests, golangci-lint, govulncheck, and a fuzz job. **The fuzz targets are listed by
+package path in `ci.yml`** — move a fuzz test to another package and the job silently stops covering it, so
+update that list in the same commit. The Go version comes from `go.mod` (currently 1.27).
 
 ## Architecture
 

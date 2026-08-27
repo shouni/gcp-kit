@@ -53,8 +53,8 @@ func WithScopes(scopes ...string) Option {
 // 空文字の項目は既定値のままです。
 //
 // callbackPath は state / PKCE クッキーの Path 属性としても使われます。
-// **実際のルーティングと一致していないと、コールバック時にクッキーが送信されず
-// 認証が必ず失敗します。**
+// 実際のルーティングと一致していないと、コールバック時にクッキーが送信されず
+// 認証が必ず失敗します。
 func WithPaths(loginPath, callbackPath, logoutPath string) Option {
 	return func(o *options) {
 		if p := strings.TrimSpace(loginPath); p != "" {
@@ -92,7 +92,7 @@ func WithStateMaxAge(d time.Duration) Option {
 // WithStore はセッションストアを注入します。
 //
 // 未指定の場合は Config のキーから sessions.CookieStore が生成されます。
-// クッキー自体がセッションの実体になるため、**サーバー側から失効させられません**。
+// クッキー自体がセッションの実体になるため、サーバー側から失効させられません。
 // ログアウトを確実に反映したい場合は Redis 等のストアを渡してください。
 func WithStore(store sessions.Store) Option {
 	return func(o *options) {

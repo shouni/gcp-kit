@@ -38,7 +38,7 @@ var (
 // 通過したリクエストには、下流が参照するメールアドレスと CSRF トークンを載せた
 // コンテキストを返します。
 //
-// **認可は毎リクエスト評価します。** 既定の CookieStore ではクッキー自体が
+// 認可は毎リクエスト評価します。既定の CookieStore ではクッキー自体が
 // セッションの実体でサーバー側から失効させられないため、ここで見ないと
 // 許可リストから外したアドレスがクッキーの有効期限まで通り続けます。
 //
@@ -94,8 +94,8 @@ func (h *Handler) Authenticate(w http.ResponseWriter, r *http.Request) (context.
 // Challenge は auth.Challenger を実装します。
 //
 // 認証が足りないだけならログイン画面へ送り、CSRF や Origin の検証に落ちた場合は
-// 403 で止めます。**後者をリダイレクトにすると、攻撃者の仕掛けたリクエストが
-// 素通りしたのか拒否されたのかを利用者も運用も区別できません。**
+// 403 で止めます。後者をリダイレクトにすると、攻撃者の仕掛けたリクエストが
+// 素通りしたのか拒否されたのかを利用者も運用も区別できません。
 func (h *Handler) Challenge(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, errBadOrigin):

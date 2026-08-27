@@ -90,7 +90,7 @@ func (h *Handler) Authenticate(w http.ResponseWriter, r *http.Request) (context.
 	}
 
 	ctx := withEmail(r.Context(), email)
-	return withCSRFToken(ctx, token), nil
+	return WithCSRFToken(ctx, token), nil
 }
 
 // Challenge は auth.Challenger を実装します。

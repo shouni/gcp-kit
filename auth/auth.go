@@ -1,261 +1,186 @@
-// Package auth は、ブラウザ向けの Google OAuth2 セッション認証と CSRF 検証、
-// および受信側の OIDC トークン検証（他サービスからの M2M 呼び出し、Cloud Tasks からの
-// 呼び出し）を提供します。
+// Package auth は、「誰として通すか」の契約と、その合成だけを持ちます。
 //
-// Handler はブラウザのログインとセッションを担い、受信 OIDC の検証は M2MVerifier と
-// TaskVerifier が担います。両者を組み合わせて 1 つのルートを守る場合は
-// Handler.ProtectedMiddleware を使ってください。
+// 実装は 2 つの子パッケージにあります。人（ブラウザ）は auth/session、
+// サービス間呼び出しは auth/oidc です。どちらも Authenticator を満たすため、
+// 合成はこのパッケージの Require / Protected が引き受けます。
+//
+//	// Worker 用: サービスしか来ないルート
+//	r.Use(auth.Require(verifier))
+//
+//	// Web 用: 人もエージェントも来るルート
+//	r.Use(auth.Protected(verifier, handler))
+//
+// 依存の向きは session → auth ← oidc の一方向で、このパッケージ自身は
+// 標準ライブラリしか使いません。合成の判断を 1 か所に集めるためであって、
+// 各アプリが同じ組み立てを手で書くと、認証経路が散らばって片方だけが
+// 強化される事故が起きます。
 package auth
 
 import (
+	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
-	"strings"
-	"time"
-
-	"github.com/gorilla/sessions"
-	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
 )
 
-const (
-	// DefaultUserSessionKey は、認証済みユーザーのメールアドレスを保持するセッションキーです。
-	DefaultUserSessionKey = "user_email"
-	// DefaultStateCookie は、OAuth2の state パラメータを一時保持するクッキー名です。
-	DefaultStateCookie = "oauth_state"
-	// DefaultVerifierCookie は、PKCE の code_verifier を一時保持するクッキー名です。
-	DefaultVerifierCookie = "oauth_verifier"
-	// DefaultRedirectSessionKey は、ログイン後のリダイレクト先を保持するセッションキーです。
-	DefaultRedirectSessionKey = "redirect_after_login"
+// Authenticator は、リクエストの主体を 1 つの方式で確認します。
+//
+// 自分宛ての資格情報が無い場合は ErrNotAttempted を返し、合成側に次の方式を
+// 試させます。確認できた場合は、下流が参照する値を載せたコンテキストを返します。
+//
+// w を受け取るのは、確認の過程で応答へ書き込む必要がある方式があるためです
+// （壊れたセッションクッキーの破棄など）。ただし応答本体
+// （リダイレクトや 401）は書きません。それは Challenge の仕事です。
+type Authenticator interface {
+	Authenticate(w http.ResponseWriter, r *http.Request) (context.Context, error)
+}
 
-	// DefaultLoginPath は Login ハンドラーを配置する既定パスです。
-	DefaultLoginPath = "/auth/login"
-	// DefaultCallbackPath は Callback ハンドラーを配置する既定パスです。
-	// state / PKCE クッキーの Path 属性にも使われるため、実際のマウント先と
-	// 一致していない場合、コールバック時にクッキーが送信されず認証に失敗します。
-	DefaultCallbackPath = "/auth/callback"
-	// DefaultLogoutPath は Logout ハンドラーを配置する既定パスです。
-	DefaultLogoutPath = "/auth/logout"
+// Challenger は、認証が成立しなかったときの応答を自分で決められる Authenticator です。
+//
+// セッション方式がログイン画面へリダイレクトするように、失敗時に何を返すかは
+// 方式ごとに違います。実装しない場合、Require / Protected が既定の応答を返します。
+type Challenger interface {
+	Challenge(w http.ResponseWriter, r *http.Request, err error)
+}
 
-	googleUserInfoURL = "https://www.googleapis.com/oauth2/v2/userinfo"
+var (
+	// ErrNotAttempted は、リクエストがその方式を試してすらいないことを示します
+	// （Bearer トークンが無い、セッションクッキーが無い、など）。
+	//
+	// 失敗ではなく「自分の担当ではない」の意味なので、Protected は次の方式へ進み、
+	// 呼び出し側もログを出す必要はありません。
+	ErrNotAttempted = errors.New("auth: no credentials for this method")
 
-	defaultSessionMaxAge = 7 * 24 * time.Hour
-	defaultStateMaxAge   = 10 * time.Minute
+	// ErrNotConfigured は、方式そのものが設定されていないことを示します。
+	//
+	// ErrNotAttempted と区別するのは、**設定漏れをフォールバックで隠さない**ためです。
+	// 混ぜると「なぜかエージェントだけログイン画面に飛ばされる」という分かりにくい
+	// 形で現れます。Require はこれを 500 として扱います。
+	ErrNotConfigured = errors.New("auth: authenticator is not configured")
 )
 
-// defaultScopes は、メールアドレスによる認可判定に必要な最小のスコープ集合です。
-var defaultScopes = []string{
-	"openid",
-	"https://www.googleapis.com/auth/userinfo.email",
+// Require は、a で確認できなければ止めるミドルウェアを返します。
+// サービスしか来ないルート（Cloud Tasks の Worker など）に使います。
+//
+// a が Challenger なら失敗時の応答を委ね、そうでなければ次を返します。
+//
+//   - ErrNotConfigured: 500。設定漏れは呼び出し元の落ち度ではありません
+//   - ErrNotAttempted:  401。資格情報が無い
+//   - それ以外:          403。提示されたが通らなかった
+func Require(a Authenticator, opts ...Option) func(http.Handler) http.Handler {
+	o := newOptions(opts)
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx, err := a.Authenticate(w, r)
+			if err == nil {
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+
+			if errors.Is(err, ErrNotConfigured) {
+				o.logger().ErrorContext(r.Context(), "認証方式が未設定です", "error", err, "path", r.URL.Path)
+			} else if !errors.Is(err, ErrNotAttempted) {
+				o.logger().WarnContext(r.Context(), "認証失敗", "error", err, "path", r.URL.Path)
+			}
+
+			challenge(w, r, a, err)
+		})
+	}
 }
 
-// Config は認証ハンドラーの初期化設定です
-type Config struct {
-	ClientID          string
-	ClientSecret      string
-	RedirectURL       string
-	SessionAuthKey    string // 署名用 (HMAC)
-	SessionEncryptKey string // 暗号化用 (AES)
-	SessionName       string
-	IsSecureCookie    bool
-	AllowedEmails     []string
-	AllowedDomains    []string
-
-	// --- 以下は任意。ゼロ値の場合は既定値が使われます。 ---
-
-	// Scopes は OAuth2 の要求スコープです。未指定の場合は openid + userinfo.email です。
-	Scopes []string
-	// LoginPath / CallbackPath / LogoutPath は各ハンドラーのマウント先パスです。
-	// CallbackPath は state / PKCE クッキーの Path 属性としても使われるため、
-	// 実際のルーティングと一致させてください。
-	LoginPath    string
-	CallbackPath string
-	LogoutPath   string
-	// SessionMaxAge はセッションクッキーの有効期間です（既定: 7日）。
-	SessionMaxAge time.Duration
-	// StateMaxAge は state / PKCE クッキーの有効期間です（既定: 10分）。
-	StateMaxAge time.Duration
-	// Store はセッションストアです。未指定の場合は SessionAuthKey / SessionEncryptKey を
-	// 用いた sessions.CookieStore が生成されます。サーバー側でセッションを失効させたい
-	// 場合（ログアウトを確実に反映したい場合など）は Redis 等のストアを注入してください。
-	Store sessions.Store
-	// Logger は本パッケージが使うロガーです。未指定の場合は slog.Default() です。
-	Logger *slog.Logger
+// Protected は、方式を順に試して最初に成立したもので通すミドルウェアを返します。
+// 人もサービスも来るルートに使います。
+//
+// どれも成立しなかった場合は、**最後に渡した方式**が応答を決めます。
+// 人向けの方式を最後に置くと、ブラウザはログイン画面へ、資格情報を間違えた
+// サービスは自分のエラーを受け取れます。
+//
+// ErrNotAttempted 以外の失敗はログに残します。「Bearer を付けたのに通らなかった」
+// と「そもそもブラウザだった」は、運用時に区別できる必要があるためです。
+func Protected(first Authenticator, rest ...Authenticator) func(http.Handler) http.Handler {
+	return ProtectedWith(nil, append([]Authenticator{first}, rest...)...)
 }
 
-type googleUserInfo struct {
-	Email         string `json:"email"`
-	VerifiedEmail bool   `json:"verified_email"`
+// ProtectedWith は、オプションを指定できる Protected です。
+func ProtectedWith(opts []Option, authenticators ...Authenticator) func(http.Handler) http.Handler {
+	o := newOptions(opts)
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var lastAuth Authenticator
+			var lastErr error
+
+			for _, a := range authenticators {
+				if a == nil {
+					continue
+				}
+				ctx, err := a.Authenticate(w, r)
+				if err == nil {
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
+
+				// そもそも試していない呼び出しはノイズになるためログしない。
+				if !errors.Is(err, ErrNotAttempted) {
+					o.logger().InfoContext(r.Context(), "認証方式が成立せず、次の方式へフォールバック",
+						"error", err, "path", r.URL.Path)
+				}
+				lastAuth, lastErr = a, err
+			}
+
+			if lastAuth == nil {
+				http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+				return
+			}
+			challenge(w, r, lastAuth, lastErr)
+		})
+	}
 }
 
-// Handler は認証ロジックを保持する構造体です
-type Handler struct {
-	oauthConfig    *oauth2.Config
-	store          sessions.Store
-	sessionName    string
-	isSecureCookie bool
-	allowedEmails  map[string]struct{}
-	allowedDomains map[string]struct{}
+// challenge は、方式が応答を決められるならそれに委ね、そうでなければ既定を返します。
+func challenge(w http.ResponseWriter, r *http.Request, a Authenticator, err error) {
+	if c, ok := a.(Challenger); ok {
+		c.Challenge(w, r, err)
+		return
+	}
 
-	loginPath    string
-	callbackPath string
-	logoutPath   string
-	stateMaxAge  time.Duration
-	logger       *slog.Logger
+	switch {
+	case errors.Is(err, ErrNotConfigured):
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+	case errors.Is(err, ErrNotAttempted):
+		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+	default:
+		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+	}
 }
 
-// NewHandler は設定に基づき Handler を生成します
-func NewHandler(cfg Config) (*Handler, error) {
-	if err := validateConfig(cfg); err != nil {
-		return nil, err
-	}
+// Option は Require / ProtectedWith の挙動を調整します。
+type Option func(*options)
 
-	oauthCfg := &oauth2.Config{
-		ClientID:     cfg.ClientID,
-		ClientSecret: cfg.ClientSecret,
-		RedirectURL:  cfg.RedirectURL,
-		Scopes:       cfg.Scopes,
-		Endpoint:     google.Endpoint,
-	}
-	if len(oauthCfg.Scopes) == 0 {
-		oauthCfg.Scopes = defaultScopes
-	}
-
-	store := cfg.Store
-	if store == nil {
-		// 認証キーと暗号化キーを個別に渡す
-		cookieStore := sessions.NewCookieStore([]byte(cfg.SessionAuthKey), []byte(cfg.SessionEncryptKey))
-		cookieStore.Options = &sessions.Options{
-			Path:     "/",
-			MaxAge:   int(sessionMaxAge(cfg).Seconds()),
-			HttpOnly: true,
-			Secure:   cfg.IsSecureCookie,
-			SameSite: http.SameSiteLaxMode,
-		}
-		store = cookieStore
-	}
-
-	return &Handler{
-		oauthConfig:    oauthCfg,
-		store:          store,
-		sessionName:    cfg.SessionName,
-		isSecureCookie: cfg.IsSecureCookie,
-		allowedEmails:  toLowerMap(cfg.AllowedEmails),
-		allowedDomains: toLowerMap(cfg.AllowedDomains),
-		loginPath:      cfg.LoginPath,
-		callbackPath:   cfg.CallbackPath,
-		logoutPath:     cfg.LogoutPath,
-		stateMaxAge:    cfg.StateMaxAge,
-		logger:         cfg.Logger,
-	}, nil
+type options struct {
+	log *slog.Logger
 }
 
-func sessionMaxAge(cfg Config) time.Duration {
-	if cfg.SessionMaxAge > 0 {
-		return cfg.SessionMaxAge
-	}
-	return defaultSessionMaxAge
-}
-
-func validateConfig(cfg Config) error {
-	// エラーメッセージを再現可能にするため、map ではなく順序の定まったスライスで検証します。
-	required := []struct {
-		name  string
-		value string
-	}{
-		{"ClientID", cfg.ClientID},
-		{"ClientSecret", cfg.ClientSecret},
-		{"RedirectURL", cfg.RedirectURL},
-		{"SessionAuthKey", cfg.SessionAuthKey},
-		{"SessionEncryptKey", cfg.SessionEncryptKey},
-		{"SessionName", cfg.SessionName},
-	}
-
-	for _, field := range required {
-		if strings.TrimSpace(field.value) == "" {
-			return fmt.Errorf("auth config %s must not be empty", field.name)
+func newOptions(opts []Option) *options {
+	o := &options{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(o)
 		}
 	}
-
-	// 署名キー (HMAC) は十分な長さがあれば良いため、16バイト以上であることを確認します。
-	if authLen := len(cfg.SessionAuthKey); authLen < 16 {
-		return fmt.Errorf("auth config SessionAuthKey length is %d: must be at least 16 bytes for security", authLen)
-	}
-
-	// 暗号化キー (AES) は 16/24/32 バイトのいずれかである必要があります。
-	keyLen := len(cfg.SessionEncryptKey)
-	if keyLen != 16 && keyLen != 24 && keyLen != 32 {
-		return errors.New("auth config SessionEncryptKey must be 16, 24, or 32 bytes long")
-	}
-
-	redirectURL, err := url.Parse(cfg.RedirectURL)
-	if err != nil || redirectURL.Scheme == "" || redirectURL.Host == "" {
-		return errors.New("auth config RedirectURL must be an absolute URL")
-	}
-
-	return nil
+	return o
 }
 
-// log は設定されたロガー、未設定なら slog.Default() を返します。
-func (h *Handler) log() *slog.Logger {
-	if h != nil && h.logger != nil {
-		return h.logger
+func (o *options) logger() *slog.Logger {
+	if o != nil && o.log != nil {
+		return o.log
 	}
 	return slog.Default()
 }
 
-// LoginPath は Login ハンドラーのマウント先パスを返します。
-func (h *Handler) LoginPath() string {
-	return pathOrDefault(h.loginPath, DefaultLoginPath)
-}
-
-// CallbackPath は Callback ハンドラーのマウント先パスを返します。
-func (h *Handler) CallbackPath() string {
-	return pathOrDefault(h.callbackPath, DefaultCallbackPath)
-}
-
-// LogoutPath は Logout ハンドラーのマウント先パスを返します。
-func (h *Handler) LogoutPath() string {
-	return pathOrDefault(h.logoutPath, DefaultLogoutPath)
-}
-
-func pathOrDefault(path, fallback string) string {
-	if strings.TrimSpace(path) == "" {
-		return fallback
-	}
-	return path
-}
-
-func (h *Handler) stateCookieMaxAge() int {
-	if h.stateMaxAge > 0 {
-		return int(h.stateMaxAge.Seconds())
-	}
-	return int(defaultStateMaxAge.Seconds())
-}
-
-// Routes は Login / Callback / Logout を設定済みパスに登録した http.Handler を返します。
-// 既存のルーターに各ハンドラーを個別登録している場合は使う必要はありません。
-func (h *Handler) Routes() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET "+h.LoginPath(), h.Login)
-	mux.HandleFunc("GET "+h.CallbackPath(), h.Callback)
-	mux.HandleFunc("GET "+h.LogoutPath(), h.Logout)
-	mux.HandleFunc("POST "+h.LogoutPath(), h.Logout)
-	return mux
-}
-
-// toLowerMap はスライス内の文字列を正規化（トリム + 小文字化）して map に格納します。
-// 空白のみの要素は破棄します。環境変数から分割したリストに空要素が混ざっても、
-// 許可リストが「空ではないが誰も許可しない」状態にならないようにするためです。
-func toLowerMap(slice []string) map[string]struct{} {
-	m := make(map[string]struct{})
-	for _, s := range slice {
-		if trimmed := strings.TrimSpace(s); trimmed != "" {
-			m[strings.ToLower(trimmed)] = struct{}{}
-		}
-	}
-	return m
+// WithLogger は合成の判断を記録するロガーを指定します。
+// 未指定の場合は slog.Default() です。
+func WithLogger(logger *slog.Logger) Option {
+	return func(o *options) { o.log = logger }
 }

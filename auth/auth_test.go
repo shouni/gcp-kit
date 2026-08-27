@@ -1,221 +1,206 @@
 package auth
 
 import (
+	"context"
+	"errors"
 	"net/http"
-	"strings"
+	"net/http/httptest"
 	"testing"
-	"time"
-
-	"github.com/gorilla/sessions"
 )
 
-// validTestConfig は、必須項目だけを埋めた最小の有効な Config を返します。
-func validTestConfig() Config {
-	return Config{
-		ClientID:          "client-id",
-		ClientSecret:      "client-secret",
-		RedirectURL:       "https://example.com/auth/callback",
-		SessionAuthKey:    "1234567890123456",
-		SessionEncryptKey: "1234567890123456",
-		SessionName:       "session",
-	}
+// fakeAuth は、結果を固定した Authenticator です。
+type fakeAuth struct {
+	err       error
+	challenge func(w http.ResponseWriter, r *http.Request, err error)
+	calls     int
 }
 
-func TestNewHandlerValidatesConfig(t *testing.T) {
-	t.Parallel()
-
-	// 必須項目を1つだけ欠いた Config を作ります。
-	without := func(invalidate func(*Config)) Config {
-		cfg := validTestConfig()
-		invalidate(&cfg)
-		return cfg
+func (f *fakeAuth) Authenticate(_ http.ResponseWriter, r *http.Request) (context.Context, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
 	}
+	return context.WithValue(r.Context(), testCtxKey, "ok"), nil
+}
+
+// challenger は Challenger も満たす fakeAuth です。
+type challenger struct{ fakeAuth }
+
+func (c *challenger) Challenge(w http.ResponseWriter, r *http.Request, err error) {
+	c.challenge(w, r, err)
+}
+
+type ctxKey int
+
+const testCtxKey ctxKey = 0
+
+func okHandler(reached *bool) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		*reached = true
+		w.WriteHeader(http.StatusOK)
+	})
+}
+
+// Require は、方式が Challenger でない場合に失敗の種類を状態コードへ写します。
+// 設定漏れを 401/403 に混ぜると、呼び出し元の落ち度に見えて調査が逸れます。
+func TestRequireStatusMapping(t *testing.T) {
+	t.Parallel()
 
 	tests := []struct {
 		name string
-		cfg  Config
+		err  error
+		want int
 	}{
-		{
-			name: "missing client id",
-			cfg:  without(func(c *Config) { c.ClientID = "" }),
-		},
-		{
-			name: "missing client secret",
-			cfg:  without(func(c *Config) { c.ClientSecret = "" }),
-		},
-		{
-			name: "relative redirect url",
-			cfg:  without(func(c *Config) { c.RedirectURL = "/auth/callback" }),
-		},
-		{
-			name: "missing session name",
-			cfg:  without(func(c *Config) { c.SessionName = "" }),
-		},
-		{
-			// 署名キーは16バイト以上が必要です。
-			name: "short auth key",
-			cfg:  without(func(c *Config) { c.SessionAuthKey = "too-short" }),
-		},
-		{
-			// 暗号化キーは 16/24/32 バイトのいずれかである必要があります。
-			name: "invalid encrypt key length",
-			cfg:  without(func(c *Config) { c.SessionEncryptKey = "12345678901234567" }),
-		},
-	}
-
-	if _, err := NewHandler(validTestConfig()); err != nil {
-		t.Fatalf("NewHandler(valid) returned error: %v", err)
+		{"成功", nil, http.StatusOK},
+		{"資格情報が無い", ErrNotAttempted, http.StatusUnauthorized},
+		{"検証に失敗", errors.New("bad signature"), http.StatusForbidden},
+		{"方式が未設定", ErrNotConfigured, http.StatusInternalServerError},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if _, err := NewHandler(tt.cfg); err == nil {
-				t.Fatalf("NewHandler() error = nil, want error")
+
+			reached := false
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+
+			Require(&fakeAuth{err: tt.err})(okHandler(&reached)).ServeHTTP(rec, req)
+
+			if rec.Code != tt.want {
+				t.Fatalf("status = %d, want %d", rec.Code, tt.want)
+			}
+			if reached != (tt.err == nil) {
+				t.Fatalf("次のハンドラー到達 = %v, want %v", reached, tt.err == nil)
 			}
 		})
 	}
 }
 
-// TestValidateConfigErrorIsDeterministic は、複数フィールドが空のときのエラーが
-// 実行ごとに変わらないこと（map 反復順に依存しないこと）を確認します。
-func TestValidateConfigErrorIsDeterministic(t *testing.T) {
+// 方式が Challenger なら、失敗時の応答はその方式が決めます。
+func TestRequireDelegatesToChallenger(t *testing.T) {
 	t.Parallel()
 
-	cfg := Config{}
-	first := validateConfig(cfg).Error()
-	for range 50 {
-		if got := validateConfig(cfg).Error(); got != first {
-			t.Fatalf("validateConfig() error = %q, want the stable %q", got, first)
+	var gotErr error
+	c := &challenger{fakeAuth{err: errors.New("nope")}}
+	c.challenge = func(w http.ResponseWriter, _ *http.Request, err error) {
+		gotErr = err
+		w.WriteHeader(http.StatusTeapot)
+	}
+
+	rec := httptest.NewRecorder()
+	reached := false
+	Require(c)(okHandler(&reached)).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if rec.Code != http.StatusTeapot {
+		t.Fatalf("status = %d, want %d（Challenge に委ねていない）", rec.Code, http.StatusTeapot)
+	}
+	if gotErr == nil {
+		t.Fatal("Challenge に失敗理由が渡っていない")
+	}
+}
+
+func TestProtected(t *testing.T) {
+	t.Parallel()
+
+	t.Run("最初に成立した方式で通す", func(t *testing.T) {
+		t.Parallel()
+
+		first := &fakeAuth{}
+		second := &fakeAuth{}
+		reached := false
+
+		rec := httptest.NewRecorder()
+		Protected(first, second)(okHandler(&reached)).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+		if !reached {
+			t.Fatal("成立した方式があるのに次へ進んでいない")
 		}
-	}
-	if !strings.Contains(first, "ClientID") {
-		t.Fatalf("error = %q, want the first declared field (ClientID)", first)
-	}
-}
+		if second.calls != 0 {
+			t.Fatalf("後続の方式が %d 回呼ばれた, want 0", second.calls)
+		}
+	})
 
-func TestConfigDefaults(t *testing.T) {
-	t.Parallel()
+	t.Run("未着手なら次の方式を試す", func(t *testing.T) {
+		t.Parallel()
 
-	h, err := NewHandler(validTestConfig())
-	if err != nil {
-		t.Fatalf("NewHandler() error = %v", err)
-	}
+		first := &fakeAuth{err: ErrNotAttempted}
+		second := &fakeAuth{}
+		reached := false
 
-	if h.LoginPath() != DefaultLoginPath {
-		t.Fatalf("LoginPath() = %q, want %q", h.LoginPath(), DefaultLoginPath)
-	}
-	if h.CallbackPath() != DefaultCallbackPath {
-		t.Fatalf("CallbackPath() = %q, want %q", h.CallbackPath(), DefaultCallbackPath)
-	}
-	if h.LogoutPath() != DefaultLogoutPath {
-		t.Fatalf("LogoutPath() = %q, want %q", h.LogoutPath(), DefaultLogoutPath)
-	}
-	if h.stateCookieMaxAge() != int(defaultStateMaxAge.Seconds()) {
-		t.Fatalf("stateCookieMaxAge() = %d, want %d", h.stateCookieMaxAge(), int(defaultStateMaxAge.Seconds()))
-	}
+		rec := httptest.NewRecorder()
+		Protected(first, second)(okHandler(&reached)).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 
-	store, ok := h.store.(*sessions.CookieStore)
-	if !ok {
-		t.Fatalf("store type = %T, want *sessions.CookieStore", h.store)
-	}
-	if store.Options.MaxAge != int(defaultSessionMaxAge.Seconds()) {
-		t.Fatalf("session MaxAge = %d, want %d", store.Options.MaxAge, int(defaultSessionMaxAge.Seconds()))
-	}
-	if len(h.oauthConfig.Scopes) != len(defaultScopes) {
-		t.Fatalf("Scopes = %v, want %v", h.oauthConfig.Scopes, defaultScopes)
-	}
-}
+		if !reached {
+			t.Fatalf("2 番目の方式で通るはずが status = %d", rec.Code)
+		}
+		if second.calls != 1 {
+			t.Fatalf("2 番目の方式の呼び出し = %d, want 1", second.calls)
+		}
+	})
 
-func TestConfigOverrides(t *testing.T) {
-	t.Parallel()
+	// 設定漏れはフォールバックを止めません。止めると、片方の設定を直すまで
+	// 人までログインできなくなります。ただしログには残ります。
+	t.Run("未設定でも次の方式へ進む", func(t *testing.T) {
+		t.Parallel()
 
-	cfg := validTestConfig()
-	cfg.LoginPath = "/signin"
-	cfg.CallbackPath = "/signin/callback"
-	cfg.LogoutPath = "/signout"
-	cfg.SessionMaxAge = time.Hour
-	cfg.StateMaxAge = 5 * time.Minute
-	cfg.Scopes = []string{"openid"}
+		reached := false
+		rec := httptest.NewRecorder()
+		Protected(&fakeAuth{err: ErrNotConfigured}, &fakeAuth{})(okHandler(&reached)).
+			ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 
-	h, err := NewHandler(cfg)
-	if err != nil {
-		t.Fatalf("NewHandler() error = %v", err)
-	}
+		if !reached {
+			t.Fatalf("未設定の方式がフォールバックを止めている status = %d", rec.Code)
+		}
+	})
 
-	if h.LoginPath() != "/signin" || h.CallbackPath() != "/signin/callback" || h.LogoutPath() != "/signout" {
-		t.Fatalf("paths = %q/%q/%q", h.LoginPath(), h.CallbackPath(), h.LogoutPath())
-	}
-	if h.stateCookieMaxAge() != 300 {
-		t.Fatalf("stateCookieMaxAge() = %d, want 300", h.stateCookieMaxAge())
-	}
-	store := h.store.(*sessions.CookieStore)
-	if store.Options.MaxAge != 3600 {
-		t.Fatalf("session MaxAge = %d, want 3600", store.Options.MaxAge)
-	}
-	if len(h.oauthConfig.Scopes) != 1 {
-		t.Fatalf("Scopes = %v, want [openid]", h.oauthConfig.Scopes)
-	}
-}
+	// どれも成立しなければ、最後の方式が応答を決めます。人向けの方式を最後に
+	// 置くと、ブラウザはログイン画面へ送られます。
+	t.Run("全て失敗したら最後の方式が応答を決める", func(t *testing.T) {
+		t.Parallel()
 
-// TestCallbackPathDrivesStateCookiePath は、CallbackPath を変えると state/PKCE
-// クッキーの Path も追随することを確認します（一致していないとコールバック時に
-// クッキーが送信されず、ログインが必ず失敗します）。
-func TestCallbackPathDrivesStateCookiePath(t *testing.T) {
-	t.Parallel()
+		last := &challenger{fakeAuth{err: errors.New("no session")}}
+		last.challenge = func(w http.ResponseWriter, _ *http.Request, _ error) {
+			w.WriteHeader(http.StatusFound)
+		}
 
-	cfg := validTestConfig()
-	cfg.CallbackPath = "/signin/callback"
+		reached := false
+		rec := httptest.NewRecorder()
+		Protected(&fakeAuth{err: ErrNotAttempted}, last)(okHandler(&reached)).
+			ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 
-	h, err := NewHandler(cfg)
-	if err != nil {
-		t.Fatalf("NewHandler() error = %v", err)
-	}
+		if reached {
+			t.Fatal("どの方式も成立していないのに保護ルートへ到達している")
+		}
+		if rec.Code != http.StatusFound {
+			t.Fatalf("status = %d, want %d（最後の方式の Challenge）", rec.Code, http.StatusFound)
+		}
+	})
 
-	rr := newRecorderForCookies()
-	h.setTemporaryCookie(rr, DefaultStateCookie, "value")
+	t.Run("nil の方式は読み飛ばす", func(t *testing.T) {
+		t.Parallel()
 
-	cookies := rr.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Path != "/signin/callback" {
-		t.Fatalf("state cookie path = %+v, want /signin/callback", cookies)
-	}
-}
+		reached := false
+		rec := httptest.NewRecorder()
+		Protected(nil, &fakeAuth{})(okHandler(&reached)).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 
-func TestConfigStoreInjection(t *testing.T) {
-	t.Parallel()
+		if !reached {
+			t.Fatalf("nil を挟んだだけで通らなくなっている status = %d", rec.Code)
+		}
+	})
 
-	cfg := validTestConfig()
-	injected := newTestCookieStore()
-	cfg.Store = injected
+	t.Run("方式が1つも無ければ 401", func(t *testing.T) {
+		t.Parallel()
 
-	h, err := NewHandler(cfg)
-	if err != nil {
-		t.Fatalf("NewHandler() error = %v", err)
-	}
-	if h.store != sessions.Store(injected) {
-		t.Fatal("NewHandler() did not use the injected store")
-	}
-}
+		reached := false
+		rec := httptest.NewRecorder()
+		Protected(nil)(okHandler(&reached)).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 
-func TestRoutes(t *testing.T) {
-	t.Parallel()
-
-	h, err := NewHandler(validTestConfig())
-	if err != nil {
-		t.Fatalf("NewHandler() error = %v", err)
-	}
-
-	routes := h.Routes()
-
-	// ログアウトはセッションを破棄してログインページへ 303 を返します。
-	req := newRequestForRoutes(http.MethodGet, DefaultLogoutPath)
-	rr := newRecorderForCookies()
-	routes.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusSeeOther {
-		t.Fatalf("status = %d, want %d", rr.Code, http.StatusSeeOther)
-	}
-	if loc := rr.Header().Get("Location"); loc != DefaultLoginPath {
-		t.Fatalf("Location = %q, want %q", loc, DefaultLoginPath)
-	}
+		if reached {
+			t.Fatal("方式が無いのに保護ルートへ到達している")
+		}
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+		}
+	})
 }

@@ -1,4 +1,4 @@
-package auth
+package session
 
 import (
 	"crypto/subtle"
@@ -8,6 +8,8 @@ import (
 
 	"golang.org/x/oauth2"
 	"google.golang.org/api/idtoken"
+
+	"github.com/shouni/gcp-kit/auth"
 )
 
 // Login は、OAuth2 ログイン プロセスを初期化し、state / PKCE の生成とセッション管理を処理する
@@ -102,7 +104,7 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 		h.log().WarnContext(r.Context(), "ログアウト時のセッション破棄に失敗", "error", err)
 	}
 
-	target := h.LoginPath()
+	target := h.loginPath()
 	if redirectTo := r.URL.Query().Get("redirect_to"); isSafeRelativePath(redirectTo) {
 		target = redirectTo
 	}
@@ -128,7 +130,7 @@ func (h *Handler) setTemporaryCookie(w http.ResponseWriter, name, value string) 
 		Name:     name,
 		Value:    value,
 		MaxAge:   h.stateCookieMaxAge(),
-		Path:     h.CallbackPath(),
+		Path:     h.callbackPath(),
 		HttpOnly: true,
 		Secure:   h.isSecureCookie,
 		SameSite: http.SameSiteLaxMode,
@@ -144,7 +146,7 @@ func (h *Handler) clearTemporaryCookies(w http.ResponseWriter) {
 			Name:     name,
 			Value:    "",
 			MaxAge:   -1,
-			Path:     h.CallbackPath(),
+			Path:     h.callbackPath(),
 			HttpOnly: true,
 			Secure:   h.isSecureCookie,
 			SameSite: http.SameSiteLaxMode,
@@ -183,8 +185,8 @@ func (h *Handler) extractEmailFromIDToken(r *http.Request, token *oauth2.Token) 
 		return ""
 	}
 
-	// UserInfo API 経由 (fetchUserEmail) や M2M 検証と同じ基準を適用します。
-	emailClaim, err := verifiedEmailFromClaims(payload.Claims)
+	// UserInfo API 経由 (fetchUserEmail) やサービス間検証と同じ基準を適用します。
+	emailClaim, err := auth.VerifiedEmail(payload.Claims)
 	if err != nil {
 		h.log().WarnContext(r.Context(), "IDトークンのメールアドレスを採用できません", "error", err)
 		return ""

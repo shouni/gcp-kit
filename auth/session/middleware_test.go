@@ -1,4 +1,4 @@
-package auth
+package session
 
 import (
 	"net/http"
@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/gorilla/sessions"
+
+	"github.com/shouni/gcp-kit/auth"
 )
 
 func TestMiddlewareRedirectBehavior(t *testing.T) {
@@ -66,7 +68,7 @@ func TestMiddlewareRedirectBehavior(t *testing.T) {
 			next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 				nextCalled = true
 			})
-			handler := h.Middleware(next)
+			handler := auth.Require(h)(next)
 
 			req := httptest.NewRequest(tt.method, tt.target, nil)
 			rr := httptest.NewRecorder()
@@ -126,7 +128,7 @@ func TestMiddlewareAllowsAuthenticatedRequest(t *testing.T) {
 			req.AddCookie(c)
 		}
 		rr := httptest.NewRecorder()
-		h.Middleware(next).ServeHTTP(rr, req)
+		auth.Require(h)(next).ServeHTTP(rr, req)
 
 		if !nextCalled {
 			t.Fatal("next handler should be called for an authenticated GET request")
@@ -144,7 +146,7 @@ func TestMiddlewareAllowsAuthenticatedRequest(t *testing.T) {
 			req.AddCookie(c)
 		}
 		rr := httptest.NewRecorder()
-		h.Middleware(next).ServeHTTP(rr, req)
+		auth.Require(h)(next).ServeHTTP(rr, req)
 
 		if rr.Code != http.StatusForbidden {
 			t.Fatalf("status = %d, want %d", rr.Code, http.StatusForbidden)
@@ -166,7 +168,7 @@ func TestMiddlewareAllowsAuthenticatedRequest(t *testing.T) {
 			req.AddCookie(c)
 		}
 		rr := httptest.NewRecorder()
-		h.Middleware(next).ServeHTTP(rr, req)
+		auth.Require(h)(next).ServeHTTP(rr, req)
 
 		if !nextCalled {
 			t.Fatal("next handler should be called when the CSRF token matches")
@@ -209,7 +211,7 @@ func TestMiddlewareRejectsRevokedSession(t *testing.T) {
 		req.AddCookie(c)
 	}
 	rr := httptest.NewRecorder()
-	revoked.Middleware(next).ServeHTTP(rr, req)
+	auth.Require(revoked)(next).ServeHTTP(rr, req)
 
 	if nextCalled {
 		t.Fatal("next handler must not be called for an email removed from the allowlist")
@@ -383,7 +385,7 @@ func TestMiddlewareRejectsCrossOriginPost(t *testing.T) {
 	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { nextCalled = true })
 
 	rr := httptest.NewRecorder()
-	h.Middleware(next).ServeHTTP(rr, newReq("https://evil.com"))
+	auth.Require(h)(next).ServeHTTP(rr, newReq("https://evil.com"))
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("cross-origin status = %d, want %d", rr.Code, http.StatusForbidden)
 	}
@@ -392,7 +394,7 @@ func TestMiddlewareRejectsCrossOriginPost(t *testing.T) {
 	}
 
 	rr = httptest.NewRecorder()
-	h.Middleware(next).ServeHTTP(rr, newReq("https://app.example.com"))
+	auth.Require(h)(next).ServeHTTP(rr, newReq("https://app.example.com"))
 	if !nextCalled {
 		t.Fatalf("same-origin POST was rejected with status %d", rr.Code)
 	}
@@ -408,7 +410,7 @@ func TestGenerateAndSaveCSRFToken(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/x", nil)
 		rr := httptest.NewRecorder()
 
-		token, err := h.GenerateAndSaveCSRFToken(rr, req)
+		token, err := h.generateAndSaveCSRFToken(rr, req)
 		if err != nil {
 			t.Fatalf("GenerateAndSaveCSRFToken() error = %v", err)
 		}
@@ -426,7 +428,7 @@ func TestGenerateAndSaveCSRFToken(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/x", nil)
 		rr := httptest.NewRecorder()
 
-		if _, err := h.GenerateAndSaveCSRFToken(rr, req); err == nil {
+		if _, err := h.generateAndSaveCSRFToken(rr, req); err == nil {
 			t.Fatal("GenerateAndSaveCSRFToken() error = nil, want error")
 		}
 	})
@@ -437,7 +439,7 @@ func TestGenerateAndSaveCSRFToken(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/x", nil)
 		rr := httptest.NewRecorder()
 
-		if _, err := h.GenerateAndSaveCSRFToken(rr, req); err == nil {
+		if _, err := h.generateAndSaveCSRFToken(rr, req); err == nil {
 			t.Fatal("GenerateAndSaveCSRFToken() error = nil, want error")
 		}
 	})
@@ -453,7 +455,7 @@ func TestGetCSRFTokenFromSession(t *testing.T) {
 
 		saveReq := httptest.NewRequest(http.MethodGet, "/x", nil)
 		saveRR := httptest.NewRecorder()
-		token, err := h.GenerateAndSaveCSRFToken(saveRR, saveReq)
+		token, err := h.generateAndSaveCSRFToken(saveRR, saveReq)
 		if err != nil {
 			t.Fatalf("GenerateAndSaveCSRFToken() error = %v", err)
 		}
@@ -463,7 +465,7 @@ func TestGetCSRFTokenFromSession(t *testing.T) {
 			req.AddCookie(c)
 		}
 
-		if got := h.GetCSRFTokenFromSession(req); got != token {
+		if got := h.csrfTokenFromSession(req); got != token {
 			t.Fatalf("GetCSRFTokenFromSession() = %q, want %q", got, token)
 		}
 	})
@@ -472,7 +474,7 @@ func TestGetCSRFTokenFromSession(t *testing.T) {
 		t.Parallel()
 		h := &Handler{store: nilSessionStore{}, sessionName: "test-session"}
 		req := httptest.NewRequest(http.MethodGet, "/x", nil)
-		if got := h.GetCSRFTokenFromSession(req); got != "" {
+		if got := h.csrfTokenFromSession(req); got != "" {
 			t.Fatalf("GetCSRFTokenFromSession() = %q, want empty", got)
 		}
 	})
@@ -482,13 +484,8 @@ func TestGetCSRFTokenFromSession(t *testing.T) {
 		store := newTestCookieStore()
 		h := &Handler{store: store, sessionName: "test-session"}
 		req := httptest.NewRequest(http.MethodGet, "/x", nil)
-		if got := h.GetCSRFTokenFromSession(req); got != "" {
+		if got := h.csrfTokenFromSession(req); got != "" {
 			t.Fatalf("GetCSRFTokenFromSession() = %q, want empty", got)
 		}
 	})
 }
-
-const (
-	testTaskAudience = "https://worker.example.com/tasks"
-	testTaskAccount  = "tasks@project.iam.gserviceaccount.com"
-)

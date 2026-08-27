@@ -53,10 +53,12 @@ Cloud Run や Cloud Tasks を用いたアーキテクチャにおいて、ボイ
   * **トレース相関**: `TraceMiddleware` が `X-Cloud-Trace-Context` を解析し、リクエスト単位で
     ログをまとめます。context への載せ方を持たない `TraceAttrs` も公開しています。
   * **出力先とレベルは持たない**: GCP に依存しない部分は意図的にアプリケーション側へ残します。
-* **`negotiate`**: **1本のルートで人とエージェントの両方へ応答する**
+* **`negotiate`**: **通した相手に合わせて表現を選ぶ**（`auth` と対になります）
   * `WantsJSON` が `Accept` を見て表現を選び、**同時に `Vary: Accept` を立てます**。
     判定と宣言を1つの関数にまとめてあるのは、同じ URL が `Accept` で中身を変えるのに
     それをキャッシュへ伝えない、という取りこぼしを塞ぐためです。
+  * **`auth` が「誰として通すか」を決め、`negotiate` が「何を返すか」を決めます。** 片方だけでは
+    足りません。`auth.Protected` でエージェントを通しても、応答が HTML のままでは意味がありません。
   * 画面用と API 用にルートを分けると同じ取得処理を2本持つことになり、片方だけ直したときに
     表示と機械可読な結果が食い違います。ただし**入力フォームのように JSON の対応物が無いもの**は
     別のリソースなので、分けたままにします。
@@ -122,14 +124,30 @@ mux.Handle("GET /auth/callback", http.HandlerFunc(sessionHandler.Callback))
 mux.Handle("/private", auth.Protected(sessionHandler)(privateHandler))
 // 人もエージェントも来るルート。有効な Bearer はセッションと CSRF をバイパスし、
 // それ以外はログインへ回ります（人向けの方式が最後だから）。
-mux.Handle("/api/", auth.Protected(apiVerifier, sessionHandler)(apiHandler))
+mux.Handle("/api/", auth.Protected(apiVerifier, sessionHandler)(http.HandlerFunc(apiHandler)))
 if role.ServesWorker() {
     // サービスしか来ないルート。失敗はフォールバックせず 401/403 で止まります。
     mux.Handle("POST /tasks/run", auth.Require(taskVerifier)(workerHandler))
 }
+```
 
-// 4. 保護されたハンドラー内では、セッションを開き直さずにユーザーを参照できます
-email, ok := session.EmailFromContext(r.Context())
+**誰を通すかは `auth` が決め、その相手に何を返すかは `negotiate` が決めます。** 通したエージェントに
+HTML を返しては意味がないので、保護したハンドラーの中では対で使います。
+
+```go
+func apiHandler(w http.ResponseWriter, r *http.Request) {
+    // セッションを開き直さずに、認証済みユーザーを参照できます。
+    email, _ := session.EmailFromContext(r.Context())
+    comics := store.List(r.Context(), email)
+
+    if negotiate.WantsJSON(w, r) { // Vary: Accept もここで立ちます
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(comics)
+        return
+    }
+    // 人にはページを返します。CSRF トークンはセッション経路でのみ載ります。
+    _ = tmpl.Execute(w, page{Comics: comics, CSRFToken: session.CSRFTokenFromContext(r.Context())})
+}
 ```
 
 より詳しい例は [pkg.go.dev の Example](https://pkg.go.dev/github.com/shouni/gcp-kit) を参照してください。

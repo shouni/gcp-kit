@@ -67,6 +67,9 @@ update that list in the same commit. The Go version comes from `go.mod` (current
     request that arrived without one.
   - Required settings are `Config` fields; everything optional is a `With*` option, matching how
     `netarmor` and `go-http-kit` are configured.
+  - `WithCSRFToken` is exported for tests that render a template without running a full authentication
+    round-trip. It looked unused when the surface was trimmed because that count excluded `_test.go`;
+    six sibling test files use it. **Count test files too before unexporting something.**
 - **`auth/oidc`**: inbound OIDC Bearer verification for service-to-service calls, `Verifier`. **One type,
   not two** — `TaskVerifier` and `M2MVerifier` were two wrappers over one verifier whose only difference
   was how they were composed, and that difference now lives in `Require` vs `Protected`. It requires no

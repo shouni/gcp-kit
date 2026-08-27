@@ -23,8 +23,12 @@ func EmailFromContext(ctx context.Context) (string, bool) {
 	return email, ok && email != ""
 }
 
-// withCSRFToken は、テンプレートへ埋め込むための CSRF トークンをコンテキストに格納します。
-func withCSRFToken(ctx context.Context, token string) context.Context {
+// WithCSRFToken は、テンプレートへ埋め込むための CSRF トークンをコンテキストに格納します。
+//
+// 通常は Authenticate が呼ぶため、利用側が直接使う必要はありません。公開しているのは、
+// テンプレートの描画だけを確かめるテストが、認証を一往復させずにトークンを載せられる
+// ようにするためです（実際に姉妹アプリのテストがそう使っています）。
+func WithCSRFToken(ctx context.Context, token string) context.Context {
 	return context.WithValue(ctx, csrfTokenContextKey, token)
 }
 

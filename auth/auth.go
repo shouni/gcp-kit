@@ -92,12 +92,15 @@ func Require(a Authenticator, opts ...Option) func(http.Handler) http.Handler {
 // Protected は、方式を順に試して最初に成立したもので通すミドルウェアを返します。
 // 人もサービスも来るルートに使います。
 //
-// どれも成立しなかった場合は、**最後に渡した方式**が応答を決めます。
-// 人向けの方式を最後に置くと、ブラウザはログイン画面へ、資格情報を間違えた
-// サービスは自分のエラーを受け取れます。
+// どれも成立しなかった場合、応答を決めるのは**資格情報を提示したうえで落ちた方式**です。
+// 「Bearer を出したが通らなかった」は確定的な失敗で、次の方式に望みはありません。
+// ここを最後の方式に答えさせると、**JSON を求めたエージェントに HTML のログイン画面が
+// 返ります**。提示すらしていない方式しか無ければ、最後の方式が答えます（人向けを
+// 最後に置けば、ブラウザはログイン画面へ送られます）。
 //
-// ErrNotAttempted 以外の失敗はログに残します。「Bearer を付けたのに通らなかった」
-// と「そもそもブラウザだった」は、運用時に区別できる必要があるためです。
+// ErrNotConfigured は確定的な失敗として扱いません。設定漏れでフォールバックを
+// 止めると、サービス側の設定を直すまで人までログインできなくなります。
+// 代わりにログへ残します。
 func Protected(first Authenticator, rest ...Authenticator) func(http.Handler) http.Handler {
 	return ProtectedWith(nil, append([]Authenticator{first}, rest...)...)
 }
@@ -108,8 +111,10 @@ func ProtectedWith(opts []Option, authenticators ...Authenticator) func(http.Han
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			var lastAuth Authenticator
-			var lastErr error
+			// decisive は「資格情報を提示したうえで落ちた」最初の方式です。
+			// last は、どの方式も提示されなかった場合の応答役です。
+			var decisiveAuth, lastAuth Authenticator
+			var decisiveErr, lastErr error
 
 			for _, a := range authenticators {
 				if a == nil {
@@ -126,14 +131,22 @@ func ProtectedWith(opts []Option, authenticators ...Authenticator) func(http.Han
 					o.logger().InfoContext(r.Context(), "認証方式が成立せず、次の方式へフォールバック",
 						"error", err, "path", r.URL.Path)
 				}
+				// 提示して落ちた方式を覚えつつ、走査は続けます。不正な Bearer と
+				// 有効なセッションを同時に持つ呼び出しを、締め出さないためです。
+				if decisiveAuth == nil && !errors.Is(err, ErrNotAttempted) && !errors.Is(err, ErrNotConfigured) {
+					decisiveAuth, decisiveErr = a, err
+				}
 				lastAuth, lastErr = a, err
 			}
 
-			if lastAuth == nil {
+			switch {
+			case decisiveAuth != nil:
+				challenge(w, r, decisiveAuth, decisiveErr)
+			case lastAuth != nil:
+				challenge(w, r, lastAuth, lastErr)
+			default:
 				http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
-				return
 			}
-			challenge(w, r, lastAuth, lastErr)
 		})
 	}
 }

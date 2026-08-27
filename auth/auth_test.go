@@ -154,9 +154,9 @@ func TestProtected(t *testing.T) {
 		}
 	})
 
-	// どれも成立しなければ、最後の方式が応答を決めます。人向けの方式を最後に
-	// 置くと、ブラウザはログイン画面へ送られます。
-	t.Run("全て失敗したら最後の方式が応答を決める", func(t *testing.T) {
+	// 資格情報を提示していない方式しか無ければ、最後の方式が応答を決めます。
+	// 人向けの方式を最後に置くと、ブラウザはログイン画面へ送られます。
+	t.Run("誰も提示していなければ最後の方式が応答を決める", func(t *testing.T) {
 		t.Parallel()
 
 		last := &challenger{fakeAuth{err: errors.New("no session")}}
@@ -175,6 +175,66 @@ func TestProtected(t *testing.T) {
 		if rec.Code != http.StatusFound {
 			t.Fatalf("status = %d, want %d（最後の方式の Challenge）", rec.Code, http.StatusFound)
 		}
+	})
+
+	// 提示したうえで落ちた方式が応答します。ここを最後の方式に答えさせると、
+	// JSON を求めたエージェントに HTML のログイン画面が返ります。
+	t.Run("提示して落ちた方式が応答を決める", func(t *testing.T) {
+		t.Parallel()
+
+		presented := &fakeAuth{err: errors.New("bad signature")}
+		last := &challenger{fakeAuth{err: errors.New("no session")}}
+		last.challenge = func(w http.ResponseWriter, _ *http.Request, _ error) {
+			w.WriteHeader(http.StatusFound)
+		}
+
+		reached := false
+		rec := httptest.NewRecorder()
+		Protected(presented, last)(okHandler(&reached)).
+			ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+		if reached {
+			t.Fatal("どの方式も成立していないのに保護ルートへ到達している")
+		}
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want %d（提示して落ちた方式の応答）", rec.Code, http.StatusForbidden)
+		}
+	})
+
+	// 不正な資格情報と有効なセッションを同時に持つ呼び出しを締め出さないため、
+	// 確定的な失敗があっても走査は続けます。
+	t.Run("提示して落ちても、後続が成立すれば通す", func(t *testing.T) {
+		t.Parallel()
+
+		reached := false
+		rec := httptest.NewRecorder()
+		Protected(&fakeAuth{err: errors.New("bad signature")}, &fakeAuth{})(okHandler(&reached)).
+			ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+		if !reached {
+			t.Fatalf("後続の方式が成立しているのに拒否されている status = %d", rec.Code)
+		}
+	})
+
+	// 設定漏れは確定的な失敗として扱いません。止めると、サービス側の設定を
+	// 直すまで人までログインできなくなります。
+	t.Run("未設定は応答役にならない", func(t *testing.T) {
+		t.Parallel()
+
+		last := &challenger{fakeAuth{err: errors.New("no session")}}
+		last.challenge = func(w http.ResponseWriter, _ *http.Request, _ error) {
+			w.WriteHeader(http.StatusFound)
+		}
+
+		reached := false
+		rec := httptest.NewRecorder()
+		Protected(&fakeAuth{err: ErrNotConfigured}, last)(okHandler(&reached)).
+			ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+		if rec.Code != http.StatusFound {
+			t.Fatalf("status = %d, want %d（人向けの方式が応答すべき）", rec.Code, http.StatusFound)
+		}
+		_ = reached
 	})
 
 	t.Run("nil の方式は読み飛ばす", func(t *testing.T) {

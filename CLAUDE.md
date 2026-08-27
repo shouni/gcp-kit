@@ -41,8 +41,12 @@ requires editing `go.mod`.
     and lets `Protected` move on quietly. The second is a config error and must not hide inside a fallback:
     it surfaces as 500 under `Require`, and as a logged line under `Protected` (which still falls through,
     because stopping there would lock humans out until the service config is fixed).
-  - **`Protected` lets the *last* authenticator answer.** Put the human-facing one last and browsers get the
-    login redirect while a service that presented a bad token gets its own error.
+  - **`Protected` lets the authenticator that was *actually attempted* answer.** A caller that presented a
+    Bearer token and failed gets 401/403 from `oidc`; a browser that presented nothing falls through to the
+    session handler's login redirect. Answering with the last one instead — which is what the old
+    `ProtectedMiddleware` did — sends an HTML login page to an agent that asked for JSON.
+  - Scanning continues past a decisive failure so that a caller holding both a bad token and a valid session
+    is not locked out; the failure is only remembered, in case nothing else succeeds.
 - **`auth/session`**: browser-facing OAuth2 login (with PKCE) + session + CSRF. `Handler` implements both
   `Authenticator` and `Challenger`; `Authenticate` folds in what used to be three separate middlewares
   (session auth, CSRF verification, CSRF context), and `Challenge` decides the response — a redirect when

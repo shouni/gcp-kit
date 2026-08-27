@@ -40,6 +40,13 @@ Cloud Run や Cloud Tasks を用いたアーキテクチャにおいて、ボイ
   * **トレース相関**: `TraceMiddleware` が `X-Cloud-Trace-Context` を解析し、リクエスト単位で
     ログをまとめます。context への載せ方を持たない `TraceAttrs` も公開しています。
   * **出力先とレベルは持たない**: GCP に依存しない部分は意図的にアプリケーション側へ残します。
+* **`negotiate`**: **1本のルートで人とエージェントの両方へ応答する**
+  * `WantsJSON` が `Accept` を見て表現を選び、**同時に `Vary: Accept` を立てます**。
+    判定と宣言を1つの関数にまとめてあるのは、同じ URL が `Accept` で中身を変えるのに
+    それをキャッシュへ伝えない、という取りこぼしを塞ぐためです。
+  * 画面用と API 用にルートを分けると同じ取得処理を2本持つことになり、片方だけ直したときに
+    表示と機械可読な結果が食い違います。ただし**入力フォームのように JSON の対応物が無いもの**は
+    別のリソースなので、分けたままにします。
 * **`serverrole`**: **Web / Worker の役割判定**
   * 1つのイメージを2つの Cloud Run サービス（公開 web / 非公開 worker）としてデプロイする構成向けに、
     `web` / `worker` / `both` の語彙と `Parse` を提供します。
@@ -119,6 +126,7 @@ email, ok := auth.EmailFromContext(r.Context())
 gcp-kit/
 ├── auth/           # OAuth2 ログイン・セッション・CSRF と受信 OIDC の検証
 ├── cloudlog/       # Cloud Logging 互換の slog 設定とトレース相関
+├── negotiate/      # Accept による表現の選択と Vary: Accept
 ├── serverrole/     # web / worker / both の語彙と Parse
 ├── tasks/          # Cloud Tasks への型安全な投入（Generics）
 └── worker/         # Cloud Tasks からの受信ハンドラー（Generics）

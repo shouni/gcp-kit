@@ -51,6 +51,13 @@ requires editing `go.mod`.
   GCP-specific — the output destination and level come from the application.
 - **`tasks`**: `Enqueuer[T]` — generic, type-safe Cloud Tasks producer. Pairs with a `worker.Handler[T]` on
   the receiving service; `T` is the JSON payload contract between the two.
+- **`negotiate`**: `WantsJSON(w, r)` — picks the representation from `Accept` **and sets `Vary: Accept` on
+  the way past**. It takes the `ResponseWriter` on purpose: deciding without declaring the variance is the
+  bug this package exists to prevent, and three sibling apps had shipped exactly that (a byte-identical
+  `wantsJSON(r)` helper, no `Vary` anywhere). Matching is a substring check on `application/json`, so `*/*`
+  falls to HTML and `;q=0` is not honoured — the callers all send an explicit `Accept`, and widening it
+  would change behaviour in three apps at once. Splitting page routes from API routes is still right when
+  there is no JSON twin (input forms); this is only for one resource with two representations.
 - **`serverrole`**: the `Role` vocabulary (`web` / `worker` / `both`) for deployments that run one image as
   two Cloud Run services. It holds the words and `Parse`'s strictness, nothing else — the kit never branches
   on a role, so which routes each face serves stays in the consuming app's router. Three apps had a

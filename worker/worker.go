@@ -109,11 +109,28 @@ func (h *Handler[T]) ProcessTask(w http.ResponseWriter, r *http.Request) {
 	// どのタスクだったかがスタックだけで分かるようにするためで、ログの相関
 	// （slogctx）が使えない panic の経路を埋めるのがここの役目です。
 	// ラベルは executor が起こす子ゴルーチンへも継承されます。
-	if name := path.Base(md.TaskName); name != "" && name != "." && name != "/" {
-		ctx = pprof.WithLabels(ctx, pprof.Labels("cloudtask", name))
-		pprof.SetGoroutineLabels(ctx)
+	//
+	// pprof.SetGoroutineLabels ではなく pprof.Do を使います。前者は復帰時に
+	// ラベルを戻さないため、net/http が 1 本の接続ゴルーチンで keep-alive の
+	// 複数リクエストを順に捌く構成では、次のリクエストが前のタスク名を背負った
+	// ままになります。トレースバックが無関係のタスクを指すのは、名前が
+	// 載っていないより悪い状態です。
+	name := path.Base(md.TaskName)
+	if name == "" || name == "." || name == "/" {
+		h.process(ctx, w, r)
+		return
 	}
+	pprof.Do(ctx, pprof.Labels("cloudtask", name), func(ctx context.Context) {
+		h.process(ctx, w, r)
+	})
+}
 
+// process はボディをデコードして executor を呼び、その結果を Cloud Tasks の
+// リトライ仕様に沿った状態コードへ写します。
+//
+// ProcessTask から切り出しているのは、pprof.Do がラベルを関数の実行中だけに
+// 限るためです（ラベルの復元はこの関数からの復帰と対応します）。
+func (h *Handler[T]) process(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	body := r.Body
 	if h.opts.maxBodyBytes > 0 {
 		body = http.MaxBytesReader(w, r.Body, h.opts.maxBodyBytes)

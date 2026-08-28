@@ -51,7 +51,7 @@ func JSON(w http.ResponseWriter, r *http.Request, status int, payload any) {
 // Error は、呼び出し元が JSON を求めていれば JSON で、そうでなければ
 // text/plain でエラーを返します。
 //
-// **画面と API が同じ URL を共有するルート用です。** JSON 固定にしないのは、画面側の
+// 画面と API が同じ URL を共有するルート用です。JSON 固定にしないのは、画面側の
 // JS がエラー本文を resp.text() で読んでいるためで、逆に text/plain 固定にすると、
 // 通したエージェントが本文を構造化して読めません。どちらを返すかの判定は WantsJSON に
 // 委ねるので、Vary: Accept もそこで立ちます。
@@ -67,7 +67,7 @@ func Error(w http.ResponseWriter, r *http.Request, status int, message string) {
 
 // ErrorJSON は、相手が何を求めていても JSON でエラーを返します。
 //
-// **JSON しか返さないルート用です。** そういうルートは成功時も無条件に JSON を返すので、
+// JSON しか返さないルート用です。そういうルートは成功時も無条件に JSON を返すので、
 // エラーだけ Accept で形が変わると、呼び出し側は成功と失敗で本文の読み方を変えることに
 // なります。実際、Accept を送らないブラウザの fetch がエラー本文を JSON として読んでおり、
 // text/plain へ倒した結果サーバーの文言が届かなくなった、ということが起きました。

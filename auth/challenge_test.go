@@ -32,7 +32,7 @@ func newTestSession(t *testing.T) *session.Handler {
 
 // 人とエージェントが同じルートに来たとき、それぞれが解釈できる応答を受け取ること。
 //
-// RFC 9110 §15.5.2 は 401 に WWW-Authenticate を要求し、RFC 6750 §3.1 は
+// RFC 9110, Section 15.5.2 は 401 に WWW-Authenticate を要求し、RFC 6750, Section 3.1 は
 // トークン不正を 401、許可されない呼び出し元を 403 と定めています。
 func TestChallengeMatrix(t *testing.T) {
 	t.Parallel()

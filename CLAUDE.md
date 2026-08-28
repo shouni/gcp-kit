@@ -50,9 +50,9 @@ update that list in the same commit. The Go version comes from `go.mod` (current
   - Scanning continues past a decisive failure so that a caller holding both a bad token and a valid session
     is not locked out; the failure is only remembered, in case nothing else succeeds.
   - **Both challenges follow the specs rather than a house style.** `oidc` sends `WWW-Authenticate` on every
-    401 (RFC 9110 §15.5.2 makes it a MUST — without it a client cannot learn the route takes Bearer) and
+    401 (RFC 9110, Section 15.5.2 makes it a MUST — without it a client cannot learn the route takes Bearer) and
     splits `invalid_token` (401, refetch and retry) from `insufficient_scope` (403, refetching won't help),
-    per RFC 6750 §3.1. `session` redirects only when the caller asked for a page; a JSON caller gets 401,
+    per RFC 6750, Section 3.1. `session` redirects only when the caller asked for a page; a JSON caller gets 401,
     because an HTML login form is not something an agent can act on. Rails, Spring Security and ASP.NET Core
     all negotiate the challenge the same way. `session`'s 401 carries no `WWW-Authenticate` — cookie auth has
     no registered scheme, and the Bearer challenge belongs to whoever accepts Bearer.

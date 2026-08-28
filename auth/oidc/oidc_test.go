@@ -207,7 +207,7 @@ func TestVerifierNilReceiver(t *testing.T) {
 	}
 }
 
-// Challenge は RFC 6750 §3.1 に沿って、トークンの不正（取り直せば直る）と
+// Challenge は RFC 6750, Section 3.1 に沿って、トークンの不正（取り直せば直る）と
 // 呼び出し元の不許可（取り直しても直らない）を別の応答で伝えます。
 // 実際の Authenticate の失敗をそのまま渡して確認します。
 func TestVerifierChallenge(t *testing.T) {

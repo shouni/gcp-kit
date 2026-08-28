@@ -151,7 +151,8 @@ func (h *Handler[T]) process(ctx context.Context, w http.ResponseWriter, r *http
 
 	h.log().DebugContext(ctx, "Worker received task", "type", fmt.Sprintf("%T", payload))
 
-	// r.Context() を渡すことで、Cloud Tasks のリクエストタイムアウト設定を伝搬させます。
+	// ctx はリクエストのものを土台にしているため、Cloud Tasks の応答待ち上限が
+	// そのまま executor まで伝わります（配信メタデータとラベルを足してあります）。
 	if err := h.executor.Execute(ctx, payload); err != nil {
 		// セキュリティリスクを回避するため、payload そのものではなく型情報のみを記録します。
 		h.log().ErrorContext(ctx, "Worker task execution failed",

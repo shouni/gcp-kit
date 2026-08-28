@@ -105,7 +105,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 // 既定の sessions.CookieStore はクッキー自体がセッションの実体であるため、
 // これはクライアントにクッキーの破棄を指示するだけで、サーバー側での失効はできません
 // （盗まれたクッキーは有効期限まで使えます）。確実な失効が必要な場合は
-// Config.Store にサーバーサイドのストアを注入してください。
+// WithStore にサーバーサイドのストアを渡してください。
 func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	if err := h.clearSessionCookie(w, r); err != nil {
 		h.log().WarnContext(r.Context(), "ログアウト時のセッション破棄に失敗", "error", err)

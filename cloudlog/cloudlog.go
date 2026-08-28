@@ -34,12 +34,9 @@ const (
 // slogctx.NewHandler で包み忘れてもエラーは出ず、job_id やトレース ID がログから
 // 消えるだけなので、6 つの兄弟アプリが同じ 3 行を逐語で写していました。
 //
-//	level := slogctx.ParseLevel(os.Getenv("LOG_LEVEL"))
-//	slog.SetDefault(slog.New(cloudlog.NewHandler(os.Stdout, level)))
-//
-// slog.SetDefault をこの中でやらないのは、既定ロガーの差し替えがプロセス全体に
-// 効くためです。呼び出し側から見える場所に残します。別の組み立てをしたい場合は
-// HandlerOptions を直接 slog.NewJSONHandler へ渡してください。
+// 使い方はパッケージのドキュメントにあります。slog.SetDefault をこの中でやらないのは、
+// 既定ロガーの差し替えがプロセス全体に効くためです。呼び出し側から見える場所に残します。
+// 別の組み立てをしたい場合は HandlerOptions を直接 slog.NewJSONHandler へ渡してください。
 func NewHandler(w io.Writer, level slog.Level) slog.Handler {
 	return slogctx.NewHandler(slog.NewJSONHandler(w, HandlerOptions(level)))
 }

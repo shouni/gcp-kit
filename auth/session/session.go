@@ -44,7 +44,7 @@ func (h *Handler) fetchUserEmail(ctx context.Context, token *oauth2.Token) (stri
 		return "", fmt.Errorf("UserInfo レスポンスの解析に失敗: %w", err)
 	}
 
-	// [Minor] 修正: 検証済みでない場合は明示的なエラーを返す
+	// ID トークン経路（auth.VerifiedEmail）と同じ基準を、UserInfo 経路にも当てます。
 	if !u.VerifiedEmail {
 		return "", fmt.Errorf("email %q is not verified", u.Email)
 	}
@@ -53,22 +53,19 @@ func (h *Handler) fetchUserEmail(ctx context.Context, token *oauth2.Token) (stri
 
 // isAuthorized はメールアドレスが許可リストまたは許可ドメインに含まれるか判定します。
 func (h *Handler) isAuthorized(email string) bool {
-	// 比較のために小文字に正規化
 	normalizedEmail := strings.ToLower(email)
 
-	// 許可リストが空の場合は、安全のために全員拒否する (fail-closed)
+	// 許可リストが空なら全員拒否します (fail-closed)。
 	if len(h.allowedEmails) == 0 && len(h.allowedDomains) == 0 {
 		return false
 	}
 
-	// メールアドレスそのものが許可されているか
 	if _, ok := h.allowedEmails[normalizedEmail]; ok {
 		return true
 	}
 
-	// ドメイン単位での許可判定。
-	// mail.ParseAddress は "Name <a@b.com>" 形式も受け付けてしまうため、
-	// 許可リスト照合に使う値と一致させる目的でここでは使いません。
+	// ドメイン単位の判定に mail.ParseAddress を使いません。"Name <a@b.com>" 形式まで
+	// 受け付けてしまい、許可リストと照合する値がずれるためです。
 	i := strings.LastIndexByte(normalizedEmail, '@')
 	if i <= 0 || i == len(normalizedEmail)-1 {
 		return false

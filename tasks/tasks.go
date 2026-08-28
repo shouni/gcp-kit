@@ -311,7 +311,6 @@ func (e *Enqueuer[T]) createTask(ctx context.Context, name string, body []byte, 
 	ctx, cancel := context.WithTimeout(ctx, createTaskTimeout)
 	defer cancel()
 
-	// Cloud Tasks への登録を実行
 	createdTask, err := e.client.CreateTask(ctx, &cloudtaskspb.CreateTaskRequest{
 		Parent: e.parent,
 		Task:   task,

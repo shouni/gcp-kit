@@ -61,9 +61,8 @@ update that list in the same commit. The Go version comes from `go.mod` (current
   (session auth, CSRF verification, CSRF context), and `Challenge` decides the response — a redirect when
   the session is missing or the address fell off the allowlist, **403 when Origin or CSRF verification
   failed**. Redirecting the latter would hide whether a forged request was rejected or waved through.
-  - Authorization is re-evaluated **every request**, not once at login: with the default `CookieStore` the
-    cookie *is* the session and cannot be revoked server-side, so an address removed from the allowlist
-    would otherwise keep working until the cookie expires.
+  - Authorization is re-evaluated on **every** request, not once at login (see the security invariants below
+    for why the default `CookieStore` forces this).
   - CSRF tokens are minted on GET only. Minting on a state-changing request would hand a valid token to a
     request that arrived without one.
   - Required settings are `Config` fields; everything optional is a `With*` option, matching how
@@ -173,9 +172,9 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
   `oidc.Verifier.allowed`) deny everything rather than allow everything. Preserve this when touching
   authorization logic. `toLowerMap` drops whitespace-only entries so a list can't be "non-empty but allows
   nobody".
-- **Optional config gets defaults, not errors**: `Config` fields like `LoginPath`, `SessionMaxAge`, `Store`,
-  and `Logger` are zero-value-safe. Tests build `Handler{}` struct literals directly, so read these through
-  the accessors (`h.loginPath()`, `h.log()`) rather than the raw `cfg*` fields.
+- **Optional settings get defaults, not errors**: what `WithPaths`, `WithSessionMaxAge`, `WithStore` and
+  `WithLogger` set is zero-value-safe. Tests build `Handler{}` struct literals directly, so read these
+  through the accessors (`h.loginPath()`, `h.log()`) rather than the raw `cfg*` fields.
 - **Config structs + `validateConfig`**: every package entry point (`session.New`, `tasks.NewEnqueuer`)
   takes a `Config` struct and validates required fields / URL shape eagerly at construction time, not at
   first use.

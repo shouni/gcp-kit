@@ -211,11 +211,11 @@ func (h *Handler) stateCookieMaxAge() int {
 	return int(defaultStateMaxAge.Seconds())
 }
 
-// toLowerMap はスライス内の文字列を正規化（トリム + 小文字化）して map に格納します。
-// 空白のみの要素は破棄します。環境変数から分割したリストに空要素が混ざっても、
-// 許可リストが「空ではないが誰も許可しない」状態にならないようにするためです。
+// toLowerMap は許可リストを正規化（トリム + 小文字化）して map にします。
+// 空白のみの要素を捨てるのは、環境変数を分割した値に空要素が混ざっても、
+// 「空ではないが誰も許可しない」リストにならないようにするためです。
 func toLowerMap(slice []string) map[string]struct{} {
-	m := make(map[string]struct{})
+	m := make(map[string]struct{}, len(slice))
 	for _, s := range slice {
 		if trimmed := strings.TrimSpace(s); trimmed != "" {
 			m[strings.ToLower(trimmed)] = struct{}{}

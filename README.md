@@ -12,7 +12,9 @@
 
 **GCP Kit** は、Google Cloud Platform (GCP) を活用したWebアプリケーションや非同期ワーカーの開発をシンプルかつ堅牢にするためのGo言語向けツールキットです。
 
-Cloud Run や Cloud Tasks を用いたアーキテクチャにおいて、ボイラープレートになりがちな **「Google OAuth2 認証とセッション管理」「Cloud Logging 互換の構造化ログ」「Web / Worker の役割判定」「型安全なタスク投入と受信」** を抽象化し、ビジネスロジックに集中できる環境を提供します。
+Cloud Run や Cloud Tasks を用いたアーキテクチャで毎回同じ答えになる部分——**認証（人とサービス）・型安全なタスク投入と受信・Cloud Logging 互換のログ・ヘルスチェックと正常停止・防御的な HTTP ヘッダー・表現の出し分け・Web / Worker の役割判定**——を引き受け、ビジネスロジックに集中できるようにします。
+
+**判断の理由をコードとドキュメントに残すことを重視しています。** 「なぜその既定値なのか」「なぜそちらを選ばなかったのか」が分からないと、次に触る人が同じ失敗をやり直すためです。
 
 ---
 
@@ -183,6 +185,7 @@ if !taskVerifier.Configured() || !apiVerifier.Configured() {
 // 3. ルーティング（役割は明示が必須。未設定を both に落とすと、公開側に worker のルートが復活します）
 role, err := serverrole.Parse(os.Getenv("SERVER_ROLE"))
 mux := http.NewServeMux()
+mux.HandleFunc(cloudrun.HealthPath, cloudrun.Health) // "/healthz" は Cloud Run に横取りされます
 mux.Handle("GET /auth/login", http.HandlerFunc(sessionHandler.Login))
 mux.Handle("GET /auth/callback", http.HandlerFunc(sessionHandler.Callback))
 
@@ -195,6 +198,16 @@ if role.ServesWorker() {
     // サービスしか来ないルート。失敗はフォールバックせず 401/403 で止まります。
     mux.Handle("POST /tasks/run", auth.Require(taskVerifier)(workerHandler))
 }
+
+// 4. 起動。ctx が終わるまで動かし、猶予内に止まらなければ強制的に閉じます。
+ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+defer stop()
+
+handler := secureheaders.New(secureheaders.Config{
+    MediaSources: []string{"https://storage.googleapis.com"}, // 署名付き URL へ 302 する場合
+})(mux)
+
+return cloudrun.Serve(ctx, cloudrun.Config{Port: os.Getenv("PORT"), Handler: handler})
 ```
 
 **誰を通すかは `auth` が決め、その相手に何を返すかは `negotiate` が決めます。** 通したエージェントに
@@ -207,8 +220,7 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
     comics := store.List(r.Context(), email)
 
     if negotiate.WantsJSON(w, r) { // Vary: Accept もここで立ちます
-        w.Header().Set("Content-Type", "application/json")
-        _ = json.NewEncoder(w).Encode(comics)
+        negotiate.JSON(w, r, http.StatusOK, comics)
         return
     }
     // 人にはページを返します。CSRF トークンはセッション経路でのみ載ります。

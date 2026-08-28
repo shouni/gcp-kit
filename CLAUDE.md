@@ -104,6 +104,10 @@ update that list in the same commit. The Go version comes from `go.mod` (current
     slow-header connections are enough to jam an instance.
   - It does not subscribe to signals. The caller passes a `signal.NotifyContext` ctx, so what counts as
     "time to stop" stays with the app.
+  - **`Config.Listener` exists so testing the serve loop stays the kit's job.** Once starting and stopping
+    moved in here, an app that wants to test its server would otherwise have to keep its own copy of the
+    loop — ap-mcp did exactly that. Handing in a port-0 listener also removes the poll-until-it-answers
+    dance the tests here used to need.
 - **`secureheaders`**: the defensive response headers, with the CSP assembled from the parts that differ.
   Five apps carried a byte-identical middleware and header map; only `img-src`/`media-src` varied, so
   `Config` takes `ImageSources`/`MediaSources` and builds the other nine directives. Handing back a whole

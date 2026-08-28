@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -111,15 +112,15 @@ func TestServeRejectsIncompleteConfig(t *testing.T) {
 // TestServeShutsDownOnContextCancel は、ctx が終わったらサーバーが止まり、
 // Serve が返ることを検証します。
 func TestServeShutsDownOnContextCancel(t *testing.T) {
-	port := freePort(t)
+	ln, addr := testListener(t)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	served := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
 		done <- cloudrun.Serve(ctx, cloudrun.Config{
-			Port:   port,
-			Logger: discardLogger(),
+			Listener: ln,
+			Logger:   discardLogger(),
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				close(served)
 				w.WriteHeader(http.StatusOK)
@@ -127,9 +128,8 @@ func TestServeShutsDownOnContextCancel(t *testing.T) {
 		})
 	}()
 
-	// 実際に待ち受けていることを、リクエストが通ることで確かめます。
-	waitForServer(t, port)
-	resp, err := (&http.Client{Timeout: 5 * time.Second}).Get("http://127.0.0.1:" + port + "/")
+	// リスナーは既に開いているため、待ち受け開始を待つ必要がありません。
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Get("http://" + addr + "/")
 	if err != nil {
 		t.Fatalf("リクエストが通りません: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestServeReportsListenFailure(t *testing.T) {
 // TestServeForcesCloseOnSlowHandler は、猶予内に終わらない接続があっても
 // Serve が返ることを検証します。返らなければ Cloud Run の SIGKILL 待ちになります。
 func TestServeForcesCloseOnSlowHandler(t *testing.T) {
-	port := freePort(t)
+	ln, addr := testListener(t)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	handling := make(chan struct{})
@@ -194,7 +194,7 @@ func TestServeForcesCloseOnSlowHandler(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- cloudrun.Serve(ctx, cloudrun.Config{
-			Port:            port,
+			Listener:        ln,
 			Logger:          discardLogger(),
 			ShutdownTimeout: 50 * time.Millisecond,
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -205,12 +205,11 @@ func TestServeForcesCloseOnSlowHandler(t *testing.T) {
 		})
 	}()
 
-	waitForServer(t, port)
 	go func() {
 		// 応答は返らない。接続を掴ませるためだけのリクエストなので、
 		// テストが終わったら諦めるようタイムアウトを付けます。
 		client := &http.Client{Timeout: 10 * time.Second}
-		resp, err := client.Get("http://127.0.0.1:" + port + "/slow")
+		resp, err := client.Get("http://" + addr + "/slow")
 		if err == nil {
 			_ = resp.Body.Close()
 		}
@@ -237,58 +236,96 @@ func TestServeForcesCloseOnSlowHandler(t *testing.T) {
 	}
 }
 
-// freePort は、空いている TCP ポート番号を返します。
-func freePort(t *testing.T) string {
+// testListener は、ポート 0 で開いたリスナーとその接続先を返します。
+//
+// Serve はリスナーを閉じて返るため、ここでは閉じません（二重クローズを避けます）。
+func testListener(t *testing.T) (net.Listener, string) {
 	t.Helper()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer func() { _ = ln.Close() }()
-
-	_, port, err := net.SplitHostPort(ln.Addr().String())
-	if err != nil {
-		t.Fatalf("SplitHostPort: %v", err)
-	}
-	return port
+	return ln, ln.Addr().String()
 }
 
-// waitForServer は、待ち受けが始まるまで TCP 接続を試します。
-//
-// HTTP リクエストを投げないのは、意図的にブロックするハンドラーを持つテストが
-// あるためです。到達確認のつもりの 1 本がそこで固まります。
-func waitForServer(t *testing.T, port string) {
-	t.Helper()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", "127.0.0.1:"+port, 100*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("サーバーが待ち受けを始めませんでした")
-}
-
-// TestServeUsesDefaultLogger は、Logger 未指定でも slog.Default() へ倒れて
-// 落ちないことを検証します。他の設定と同じくゼロ値で動く必要があります。
+// TestServeUsesDefaultLogger は、Logger 未指定でも slog.Default() へ倒れることを
+// 検証します。他の設定と同じくゼロ値で動く必要があります。
 func TestServeUsesDefaultLogger(t *testing.T) {
+	var buf syncBuffer
+	restore := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(restore) })
+
+	ln, _ := testListener(t)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() {
+		done <- cloudrun.Serve(ctx, cloudrun.Config{Listener: ln, Handler: http.NotFoundHandler()})
+	}()
+
+	// 起動ログが出るまで待ってから止めます。
+	deadline := time.Now().Add(5 * time.Second)
+	for buf.Len() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Serve = %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve が返りません")
+	}
+	if buf.Len() == 0 {
+		t.Error("slog.Default() へ出力されていません")
+	}
+}
+
+// TestServeReportsListenFailureBeforeLogging は、待ち受けに失敗したときに
+// 「起動しました」と記録しないことを検証します。出てしまうと、ログだけ見て
+// 動いていると誤解します。
+func TestServeReportsListenFailureBeforeLogging(t *testing.T) {
 	var buf bytes.Buffer
 	restore := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	t.Cleanup(func() { slog.SetDefault(restore) })
 
-	// 不正なポートで即座に返す。起動ログはこの時点で既に出ている。
 	if err := cloudrun.Serve(context.Background(), cloudrun.Config{
 		Port:    "99999",
 		Handler: http.NotFoundHandler(),
 	}); err == nil {
 		t.Fatal("Serve = nil, want エラー")
 	}
-	if buf.Len() == 0 {
-		t.Error("slog.Default() へ出力されていません")
+	if buf.Len() != 0 {
+		t.Errorf("待ち受けに失敗したのに記録が出ています: %s", buf.String())
 	}
+}
+
+// syncBuffer は、ログを書くゴルーチンと読むテストの両方から触れるバッファです。
+// bytes.Buffer をそのまま共有すると競合します。
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) Len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Len()
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

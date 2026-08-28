@@ -225,6 +225,12 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
   rejects raw `//`-prefixed strings rather than trusting `url.Parse` (`//@/` parses to an empty host but is
   protocol-relative to browsers), plus backslashes and control characters. `FuzzIsSafeRelativePath` and
   `FuzzBuildLoginRedirectURL` guard the invariant; `auth/session/testdata/fuzz/` holds regression seeds.
+- **`Logout` is knowingly left without CSRF protection.** It checks neither the method nor a token, so a
+  cross-site request can clear someone's session. That was weighed and accepted: the whole cost is one
+  round trip back through Google, which the user's existing Google session usually completes without a
+  prompt. It also cannot be chained into signing a victim into someone else's account — `Callback` still
+  requires the state cookie and PKCE verifier that this server issued during that browser's own `Login`.
+  Raise it again only with a consequence that outweighs the churn.
 
 ### Testing notes
 

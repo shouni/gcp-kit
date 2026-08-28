@@ -92,6 +92,15 @@ update that list in the same commit. The Go version comes from `go.mod` (current
   falls to HTML and `;q=0` is not honoured — the callers all send an explicit `Accept`, and widening it
   would change behaviour in three apps at once. Splitting page routes from API routes is still right when
   there is no JSON twin (input forms); this is only for one resource with two representations.
+  - **`JSON` and `Error` write the response, because sharing only the decision left the writing to drift.**
+    Five apps had their own pair: `Content-Type` split between `application/json` and
+    `application/json; charset=utf-8`, and an encode failure was logged with context, logged without it, or
+    dropped on the floor. `charset` carries no meaning for JSON (RFC 8259 fixes UTF-8) — the point is that
+    one client calls four of these backends, so the value has to be the same everywhere.
+  - **`JSON` does not set `Vary: Accept`; `Error` does.** Only the caller knows whether the route varies,
+    and `Error` knows because it asked `WantsJSON`. A JSON-only route needs no `Vary`.
+  - **`Error` is not JSON-only on purpose.** The browser JS reads an error body with `resp.text()`, so a
+    page caller still gets `text/plain`.
 - **`serverrole`**: the `Role` vocabulary (`web` / `worker` / `both`) for deployments that run one image as
   two Cloud Run services. It holds the words and `Parse`'s strictness, nothing else — the kit never branches
   on a role, so which routes each face serves stays in the consuming app's router. Three apps had a

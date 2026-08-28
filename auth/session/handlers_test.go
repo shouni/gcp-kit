@@ -6,6 +6,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -636,4 +637,77 @@ func TestLogout(t *testing.T) {
 			t.Fatalf("status = %d, want %d", rr.Code, http.StatusSeeOther)
 		}
 	})
+}
+
+// TestLoginPrompt は、prompt を指定したときだけ認可 URL に載ること、
+// 載せても state と PKCE のチャレンジが失われないことを検証します。
+//
+// prompt は「ログアウトが効いて見えるか」を左右します。付けないと、
+// ログアウト直後にログイン画面へ送られた時点で Google が何も聞かずに
+// 承認を返し、利用者は元のログイン状態に戻ります。
+func TestLoginPrompt(t *testing.T) {
+	t.Parallel()
+
+	newHandler := func(prompt Prompt) *Handler {
+		return &Handler{
+			oauthConfig: &oauth2.Config{
+				ClientID: "client-id",
+				Endpoint: oauth2.Endpoint{AuthURL: "https://accounts.example.com/o/oauth2/auth"},
+			},
+			store:       newTestCookieStore(),
+			sessionName: "test-session",
+			prompt:      prompt,
+		}
+	}
+
+	tests := []struct {
+		name   string
+		prompt Prompt
+		want   string
+	}{
+		{name: "未指定なら付けない", prompt: "", want: ""},
+		{name: "アカウント選択を挟む", prompt: PromptSelectAccount, want: "select_account"},
+		{name: "再認証まで要求する", prompt: PromptLogin, want: "login"},
+		{name: "空白だけなら付けない", prompt: "   ", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			rr := httptest.NewRecorder()
+			newHandler(tt.prompt).Login(rr, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+
+			loc, err := url.Parse(rr.Header().Get("Location"))
+			if err != nil {
+				t.Fatalf("Location が URL として読めません: %v", err)
+			}
+			query := loc.Query()
+
+			if got := query.Get("prompt"); got != tt.want {
+				t.Errorf("prompt = %q, want %q", got, tt.want)
+			}
+			// prompt を足しても、横取り対策の 2 つは必ず残っている必要があります。
+			if query.Get("state") == "" {
+				t.Error("state が認可 URL から失われています")
+			}
+			if query.Get("code_challenge") == "" || query.Get("code_challenge_method") != "S256" {
+				t.Errorf("PKCE のチャレンジが失われています: challenge=%q method=%q",
+					query.Get("code_challenge"), query.Get("code_challenge_method"))
+			}
+		})
+	}
+}
+
+// TestWithPromptOption は、New 経由でも prompt が Handler へ届くことを確認します。
+func TestWithPromptOption(t *testing.T) {
+	t.Parallel()
+
+	h, err := New(validTestConfig(), WithPrompt(PromptSelectAccount))
+	if err != nil {
+		t.Fatalf("New = %v", err)
+	}
+	if got := h.promptParam(); got != "select_account" {
+		t.Errorf("promptParam() = %q, want select_account", got)
+	}
 }

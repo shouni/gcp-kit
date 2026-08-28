@@ -21,6 +21,7 @@ type options struct {
 	stateMaxAge   time.Duration
 	store         sessions.Store
 	logger        *slog.Logger
+	prompt        Prompt
 }
 
 func newOptions(opts []Option) *options {
@@ -106,4 +107,37 @@ func WithStore(store sessions.Store) Option {
 // 未指定の場合は slog.Default() です。
 func WithLogger(logger *slog.Logger) Option {
 	return func(o *options) { o.logger = logger }
+}
+
+// Prompt は、認可画面で Google に何を尋ねさせるかの指定です
+// （OpenID Connect の prompt パラメータ）。
+type Prompt string
+
+const (
+	// PromptSelectAccount はアカウント選択画面を必ず挟みます。
+	//
+	// ログアウトを実効あるものにするのが主な用途です。Logout が消せるのは
+	// このアプリのクッキーだけで、Google 側のセッションは残ります。prompt を
+	// 付けないと、ログアウト後にログイン画面へ送られた時点で Google が何も
+	// 聞かずに承認を返すため、利用者から見ると一瞬ちらついて元のログイン状態に
+	// 戻るだけになります。共用端末で「ログアウト」が効きません。
+	PromptSelectAccount Prompt = "select_account"
+
+	// PromptLogin は Google での再認証（パスワード入力など）まで要求します。
+	PromptLogin Prompt = "login"
+
+	// PromptConsent は同意画面を毎回表示させます。
+	PromptConsent Prompt = "consent"
+
+	// PromptNone は画面を一切出させず、対話が必要な場合はエラーを返させます。
+	// 利用者の操作を伴わない再取得に使います。他の値と併用はできません。
+	PromptNone Prompt = "none"
+)
+
+// WithPrompt は認可 URL の prompt パラメータを指定します。
+//
+// 未指定なら付けません（Google の既定は「聞かずに済むなら聞かない」です）。
+// ログアウト後に必ずアカウントを選ばせたい場合は PromptSelectAccount を渡します。
+func WithPrompt(prompt Prompt) Option {
+	return func(o *options) { o.prompt = prompt }
 }

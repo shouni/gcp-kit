@@ -47,7 +47,14 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	h.setTemporaryCookie(w, DefaultStateCookie, state)
 	h.setTemporaryCookie(w, DefaultVerifierCookie, verifier)
 
-	authURL := h.oauthConfig.AuthCodeURL(state, oauth2.S256ChallengeOption(verifier))
+	// PKCE のチャレンジは必ず載せます。prompt は指定があるときだけ足すので、
+	// state と code_challenge を上書きする余地はありません。
+	authOpts := []oauth2.AuthCodeOption{oauth2.S256ChallengeOption(verifier)}
+	if prompt := h.promptParam(); prompt != "" {
+		authOpts = append(authOpts, oauth2.SetAuthURLParam("prompt", prompt))
+	}
+
+	authURL := h.oauthConfig.AuthCodeURL(state, authOpts...)
 	http.Redirect(w, r, authURL, http.StatusTemporaryRedirect)
 }
 

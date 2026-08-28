@@ -86,6 +86,7 @@ type Handler struct {
 	cfgCallbackPath string
 	cfgLogoutPath   string
 	cfgStateMaxAge  time.Duration
+	prompt          Prompt
 	logger          *slog.Logger
 }
 
@@ -132,6 +133,7 @@ func New(cfg Config, opts ...Option) (*Handler, error) {
 		cfgCallbackPath: o.callbackPath,
 		cfgLogoutPath:   o.logoutPath,
 		cfgStateMaxAge:  o.stateMaxAge,
+		prompt:          o.prompt,
 		logger:          o.logger,
 	}, nil
 }
@@ -195,6 +197,11 @@ func pathOrDefault(path, fallback string) string {
 		return fallback
 	}
 	return path
+}
+
+// promptParam は認可 URL へ載せる prompt の値を返します。未指定なら空です。
+func (h *Handler) promptParam() string {
+	return strings.TrimSpace(string(h.prompt))
 }
 
 func (h *Handler) stateCookieMaxAge() int {

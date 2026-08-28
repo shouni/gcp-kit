@@ -225,12 +225,17 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
   rejects raw `//`-prefixed strings rather than trusting `url.Parse` (`//@/` parses to an empty host but is
   protocol-relative to browsers), plus backslashes and control characters. `FuzzIsSafeRelativePath` and
   `FuzzBuildLoginRedirectURL` guard the invariant; `auth/session/testdata/fuzz/` holds regression seeds.
-- **`Logout` is knowingly left without CSRF protection.** It checks neither the method nor a token, so a
-  cross-site request can clear someone's session. That was weighed and accepted: the whole cost is one
-  round trip back through Google, which the user's existing Google session usually completes without a
-  prompt. It also cannot be chained into signing a victim into someone else's account — `Callback` still
-  requires the state cookie and PKCE verifier that this server issued during that browser's own `Login`.
-  Raise it again only with a consequence that outweighs the churn.
+- **`Logout` only ends this app's session, and by default that is barely visible.** It clears the cookie
+  and redirects to `loginPath()`, which is the `Login` handler, which bounces to Google — and Google, with
+  the user's SSO session still live and consent already granted, approves without asking. The user flickers
+  and lands back signed in. `WithPrompt(PromptSelectAccount)` is what makes logout mean something; without
+  it, "log out" does not hold on a shared machine. The kit never sends the user to Google's own logout,
+  which would sign them out of Gmail and everything else.
+  - **It is knowingly left without CSRF protection**, checking neither the method nor a token, so a
+    cross-site request can clear someone's session. Accepted: the cost is that same round trip. It cannot
+    be chained into signing a victim into another account either — `Callback` still requires the state
+    cookie and PKCE verifier this server issued during that browser's own `Login`. Raise it again only
+    with a consequence that outweighs the churn.
 
 ### Testing notes
 

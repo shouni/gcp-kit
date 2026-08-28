@@ -10,9 +10,7 @@
 
 ## 🚀 概要 (About) - Cloud Run と Cloud Tasks を使った開発を最速の軌道へ
 
-**GCP Kit** は、Google Cloud Platform (GCP) を活用したWebアプリケーションや非同期ワーカーの開発をシンプルかつ堅牢にするためのGo言語向けツールキットです。
-
-Cloud Run や Cloud Tasks を用いたアーキテクチャで毎回同じ答えになる部分——**認証（人とサービス）・型安全なタスク投入と受信・Cloud Logging 互換のログ・ヘルスチェックと正常停止・防御的な HTTP ヘッダー・表現の出し分け・Web / Worker の役割判定**——を引き受け、ビジネスロジックに集中できるようにします。
+**GCP Kit** は、Cloud Run と Cloud Tasks でアプリを動かすときに毎回同じ答えになる部分を引き受ける Go のツールキットです。
 
 ---
 

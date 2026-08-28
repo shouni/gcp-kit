@@ -55,8 +55,11 @@
   * `WriteTimeout` に既定値を置きません（worker は数分かかることがあるため）。`ReadHeaderTimeout` は 5 秒です。
 * **`negotiate`**: 通した相手に合わせて表現を選ぶ（`auth` と対になります）
   * `WantsJSON` が `Accept` で表現を選び、**同時に `Vary: Accept` を立てます**。
-  * `JSON` / `Error` が書き出しを持ちます。`Error` は相手が JSON を求めていれば `{"error": ...}`、
-    そうでなければ `text/plain` を返します。
+  * `JSON` / `Error` / `ErrorJSON` が書き出しを持ちます。**ルートの性質で使い分けます。**
+    画面と API が同じ URL を共有するなら `Error`（相手が JSON を求めていれば `{"error": ...}`、
+    そうでなければ `text/plain`）。**JSON しか返さないルートは `ErrorJSON`** です — 成功時が
+    無条件 JSON なのにエラーだけ `Accept` で形が変わると、呼び出し側は成功と失敗で
+    本文の読み方を変えることになります。
 * **`secureheaders`**: CSP・HSTS・`nosniff`・`Referrer-Policy`・`Permissions-Policy` を全応答へ付与
   * CSP は `ImageSources` / `MediaSources` だけ渡せば、残り 9 ディレクティブをキットが組み立てます。
 * **`serverrole`**: `web` / `worker` / `both` の語彙と `Parse`

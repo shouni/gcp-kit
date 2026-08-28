@@ -124,10 +124,14 @@ update that list in the same commit. The Go version comes from `go.mod` (current
     `application/json; charset=utf-8`, and an encode failure was logged with context, logged without it, or
     dropped on the floor. `charset` carries no meaning for JSON (RFC 8259 fixes UTF-8) — the point is that
     one client calls four of these backends, so the value has to be the same everywhere.
-  - **`JSON` does not set `Vary: Accept`; `Error` does.** Only the caller knows whether the route varies,
-    and `Error` knows because it asked `WantsJSON`. A JSON-only route needs no `Vary`.
-  - **`Error` is not JSON-only on purpose.** The browser JS reads an error body with `resp.text()`, so a
-    page caller still gets `text/plain`.
+  - **`JSON` and `ErrorJSON` do not set `Vary: Accept`; `Error` does.** Only `Error` varies, and it knows
+    because it asked `WantsJSON`. A JSON-only route needs no `Vary`.
+  - **`Error` negotiates, `ErrorJSON` does not, and the route decides which.** Where a page and an API
+    share a URL, the browser JS reads the error with `resp.text()`, so a page caller wants `text/plain`.
+    Where the route only ever answers JSON, its success path is unconditional JSON and the error path has
+    to match: a caller that does not send `Accept` — a browser `fetch` reading `payload.error`, for one —
+    otherwise gets a body it cannot parse, and the server's message never reaches the user. That happened
+    once, which is why the two are separate functions rather than a flag.
 - **`serverrole`**: the `Role` vocabulary (`web` / `worker` / `both`) for deployments that run one image as
   two Cloud Run services. It holds the words and `Parse`'s strictness, nothing else — the kit never branches
   on a role, so which routes each face serves stays in the consuming app's router. Three apps had a

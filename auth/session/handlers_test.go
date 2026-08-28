@@ -711,3 +711,80 @@ func TestWithPromptOption(t *testing.T) {
 		t.Errorf("promptParam() = %q, want select_account", got)
 	}
 }
+
+// TestSaveSessionAndRedirectRotatesSessionID は、ログインでセッション ID が
+// 振り直されることを検証します（セッション固定攻撃対策）。
+//
+// 既定の CookieStore ではクッキー自体が中身なので固定は成立しませんが、
+// README が薦めているとおり WithStore でサーバーサイドのストアを入れると、
+// クッキーが運ぶのは ID だけになります。攻撃者が事前に仕込んだ ID のまま
+// 認証済みにすると、攻撃者はその ID で被害者として振る舞えます。
+func TestSaveSessionAndRedirectRotatesSessionID(t *testing.T) {
+	t.Parallel()
+
+	const (
+		plantedID = "attacker-known-id"
+		email     = "user@example.com"
+	)
+
+	store := newIDStore()
+	// 攻撃者が仕込んだセッションが、既にストアにある状態。
+	store.saved[plantedID] = map[any]any{
+		DefaultRedirectSessionKey: "/dashboard",
+		CSRFTokenKey:              "token-fixed-before-login",
+	}
+
+	h := &Handler{store: store, sessionName: "test-session"}
+	req := httptest.NewRequest(http.MethodGet, "/auth/callback", nil)
+	req.AddCookie(&http.Cookie{Name: "test-session", Value: plantedID})
+	rr := httptest.NewRecorder()
+
+	if err := h.saveSessionAndRedirect(rr, req, email); err != nil {
+		t.Fatalf("saveSessionAndRedirect = %v", err)
+	}
+
+	// 仕込まれた ID が認証済みになっていないこと。
+	if values, ok := store.saved[plantedID]; ok {
+		if _, authenticated := values[DefaultUserSessionKey]; authenticated {
+			t.Error("攻撃者が知っている ID がそのまま認証済みになりました（セッション固定）")
+		}
+	}
+
+	// 別の ID の下に認証済みセッションが入っていること。
+	var newID string
+	for id, values := range store.saved {
+		if id == plantedID {
+			continue
+		}
+		if got, _ := values[DefaultUserSessionKey].(string); got == email {
+			newID = id
+		}
+	}
+	if newID == "" {
+		t.Fatalf("新しい ID で認証済みセッションが保存されていません: %v", store.saved)
+	}
+
+	// ログイン前の CSRF トークンは持ち越さない。
+	if _, ok := store.saved[newID][CSRFTokenKey]; ok {
+		t.Error("ログイン前の CSRF トークンが新しいセッションへ持ち越されています")
+	}
+
+	// ID を振り直しても、ログイン前に控えた遷移先は失わない。
+	if got := rr.Header().Get("Location"); got != "/dashboard" {
+		t.Errorf("Location = %q, want /dashboard", got)
+	}
+
+	// ブラウザへ渡すクッキーが新しい ID になっていること。
+	var cookieValue string
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == "test-session" {
+			cookieValue = c.Value
+		}
+	}
+	if cookieValue == plantedID {
+		t.Error("応答のクッキーが仕込まれた ID のままです")
+	}
+	if cookieValue != newID {
+		t.Errorf("クッキー = %q, want %q（保存された新しい ID）", cookieValue, newID)
+	}
+}

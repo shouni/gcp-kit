@@ -225,6 +225,13 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
   rejects raw `//`-prefixed strings rather than trusting `url.Parse` (`//@/` parses to an empty host but is
   protocol-relative to browsers), plus backslashes and control characters. `FuzzIsSafeRelativePath` and
   `FuzzBuildLoginRedirectURL` guard the invariant; `auth/session/testdata/fuzz/` holds regression seeds.
+- **The session ID is dropped at login so the store issues a new one.** `saveSessionAndRedirect` sets
+  `session.ID = ""` before saving. The default `CookieStore` has no ID and ignores it; this exists for the
+  server-side store `WithStore` advertises, where the cookie carries only an ID. Keeping the ID a login
+  hands an attacker who planted one a session that is now authenticated as the victim. The old entry is
+  left to expire rather than deleted — it only ever held pre-login values, and deleting it would mean
+  emitting two `Set-Cookie` headers for one name, which stores handle differently.
+  `TestSaveSessionAndRedirectRotatesSessionID` guards it with a store that mimics the ID contract.
 - **`Logout` only ends this app's session, and by default that is barely visible.** It clears the cookie
   and redirects to `loginPath()`, which is the `Login` handler, which bounces to Google — and Google, with
   the user's SSO session still live and consent already granted, approves without asking. The user flickers

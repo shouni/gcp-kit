@@ -223,6 +223,19 @@ func (h *Handler) saveSessionAndRedirect(w http.ResponseWriter, r *http.Request,
 	// 再生成させます（ログイン前に固定されたトークンを使い回させないため）。
 	delete(session.Values, CSRFTokenKey)
 
+	// セッション ID も捨てて振り直させます（セッション固定攻撃対策）。
+	//
+	// 既定の CookieStore に ID の概念は無く、この行は無視されます。効くのは
+	// WithStore でサーバーサイドのストアを入れた構成で、そこでは ID がセッションの
+	// 識別子になるため、攻撃者が事前に仕込んだ ID のまま認証済みにしてしまうと、
+	// 攻撃者はその ID で被害者として振る舞えます。gorilla のストアは ID が空なら
+	// Save で新しい ID を生成する約束なので、捨てるだけで振り直されます。
+	//
+	// 古い ID の中身は消しません。認証前の値しか持たず、認証済みになることも
+	// ないためです（ストアの TTL で消えます）。消しにいくと同じ名前の Set-Cookie を
+	// 2 回出すことになり、ストア実装ごとの差が表に出ます。
+	session.ID = ""
+
 	session.Values[DefaultUserSessionKey] = email
 	if err := session.Save(r, w); err != nil {
 		return fmt.Errorf("save session: %w", err)

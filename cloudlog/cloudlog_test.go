@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -310,6 +311,53 @@ func TestTraceMiddlewareComposesWithApplicationAttrs(t *testing.T) {
 func TestHandlerOptionsRespectsLevel(t *testing.T) {
 	var buf bytes.Buffer
 	newTestLogger(&buf, slog.LevelWarn).InfoContext(context.Background(), "filtered out")
+	if buf.Len() != 0 {
+		t.Errorf("レベル未満のログが出力された: %s", buf.String())
+	}
+}
+
+// TestNewHandlerMatchesManualComposition は、NewHandler が兄弟アプリの main.go に
+// 書かれていた 3 行と同じ出力になることを固定します。
+//
+// 引き上げの要点は、slogctx.NewHandler で包み忘れても何のエラーも出ず、
+// context に載せた属性が黙って消えるだけ、という点です。等価であることを
+// ここで押さえておかないと、移行したときに気付けません。
+func TestNewHandlerMatchesManualComposition(t *testing.T) {
+	var fromKit, manual bytes.Buffer
+
+	ctx := slogctx.With(context.Background(), slog.String("job_id", "job-1"))
+
+	slog.New(cloudlog.NewHandler(&fromKit, slog.LevelInfo)).
+		WarnContext(ctx, "handled", "attempt", 2)
+
+	// これまで各アプリが手で書いていた組み立て。
+	base := slog.NewJSONHandler(&manual, cloudlog.HandlerOptions(slog.LevelInfo))
+	slog.New(slogctx.NewHandler(base)).
+		WarnContext(ctx, "handled", "attempt", 2)
+
+	kit, man := decodeLines(t, &fromKit), decodeLines(t, &manual)
+	if len(kit) != 1 || len(man) != 1 {
+		t.Fatalf("entries = %d / %d, want 1 / 1", len(kit), len(man))
+	}
+
+	// 中身が空でも一致してしまうため、期待する形を先に確かめる。
+	if kit[0]["severity"] != "WARNING" || kit[0]["message"] != "handled" || kit[0]["job_id"] != "job-1" {
+		t.Fatalf("entry = %v, want severity/message/job_id が揃っていること", kit[0])
+	}
+
+	// 時刻だけは一致しない。
+	delete(kit[0], slog.TimeKey)
+	delete(man[0], slog.TimeKey)
+	if !reflect.DeepEqual(kit[0], man[0]) {
+		t.Errorf("NewHandler の出力が従来の組み立てと違います:\n kit    = %v\n manual = %v", kit[0], man[0])
+	}
+}
+
+func TestNewHandlerRespectsLevel(t *testing.T) {
+	var buf bytes.Buffer
+	slog.New(cloudlog.NewHandler(&buf, slog.LevelWarn)).
+		InfoContext(context.Background(), "filtered out")
+
 	if buf.Len() != 0 {
 		t.Errorf("レベル未満のログが出力された: %s", buf.String())
 	}

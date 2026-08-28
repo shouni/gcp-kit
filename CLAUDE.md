@@ -79,6 +79,12 @@ update that list in the same commit. The Go version comes from `go.mod` (current
   slog's default `level`/`msg` keys are not the ones Cloud Logging reads (`severity`/`message`), so without
   `HandlerOptions` every entry shows as INFO in Logs Explorer and `slog.Error` never reaches a log-based
   alert. It deliberately does not choose the destination or the level — that part is not GCP-specific.
+  - **`NewHandler` owns the composition order, because getting it wrong fails silently.** Drop the
+    `slogctx.NewHandler` wrapper and nothing errors — `job_id` and the trace ID just stop appearing. Six
+    apps were copying the same three lines, which is exactly the kind of thing a copy cannot keep right.
+    `TestNewHandlerMatchesManualComposition` pins it against the hand-written form.
+  - **It does not call `slog.SetDefault`.** Replacing the default logger is process-wide, so that line
+    stays visible in the app's `main`.
   - **`ParseTraceContext` returns Cloud Logging's representation, not the header's.** `SPAN_ID` arrives in
     decimal (`.../1;o=1`) but `logging.googleapis.com/spanId` expects 16 hex digits, so passing the raw
     value through means span correlation silently never matches. Trace IDs are zero-padded to 32 hex digits.

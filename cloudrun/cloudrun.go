@@ -55,9 +55,20 @@ const (
 // Config は Serve の設定です。Port と Handler だけが必須です。
 type Config struct {
 	// Port は待ち受けるポートです。Cloud Run が PORT 環境変数で渡します。
+	// Listener を指定した場合は使いません。
 	Port string
 	// Handler はルーターです。
 	Handler http.Handler
+
+	// Listener を指定すると、Port で待ち受ける代わりにこのリスナーを使います。
+	//
+	// テストのためにあります。ポート 0 で開いたリスナーを渡せば、空きポートを
+	// 探して接続できるまでポーリングする、という迂回をせずにサーバーを起動できます。
+	// 起動と正常停止をキットが持つ以上、それを試せる形にするのもキットの役目です
+	// （さもないと、テストしたいアプリが自前のサーブループを抱え続けます）。
+	//
+	// Serve は、自分で開いたリスナーもここで渡されたリスナーも閉じます。
+	Listener net.Listener
 
 	// ReadHeaderTimeout / IdleTimeout は 0 なら既定値です。
 	ReadHeaderTimeout time.Duration
@@ -91,8 +102,19 @@ func Serve(ctx context.Context, cfg Config) error {
 	if cfg.Handler == nil {
 		return errors.New("cloudrun: Handler must not be nil")
 	}
-	if cfg.Port == "" {
-		return errors.New("cloudrun: Port must not be empty")
+	if cfg.Port == "" && cfg.Listener == nil {
+		return errors.New("cloudrun: Port または Listener のどちらかが要ります")
+	}
+
+	ln := cfg.Listener
+	if ln == nil {
+		// ListenConfig を使うのは ctx を尊重させるためです。起動直後に停止が
+		// 掛かった場合、待ち受けの確立まで待たずに諦められます。
+		var lc net.ListenConfig
+		var err error
+		if ln, err = lc.Listen(ctx, "tcp", net.JoinHostPort("", cfg.Port)); err != nil {
+			return fmt.Errorf("cloudrun: ポート %s で待ち受けられません: %w", cfg.Port, err)
+		}
 	}
 
 	srv := cfg.newServer()
@@ -100,8 +122,9 @@ func Serve(ctx context.Context, cfg Config) error {
 
 	serverErrors := make(chan error, 1)
 	go func() {
-		log.InfoContext(ctx, "HTTP サーバーを起動しました", "port", cfg.Port)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.InfoContext(ctx, "HTTP サーバーを起動しました", "addr", ln.Addr().String())
+		// Serve はリスナーを閉じて返るため、渡されたリスナーもここで閉じられます。
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serverErrors <- err
 		}
 	}()

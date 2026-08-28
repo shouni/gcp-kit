@@ -50,6 +50,8 @@
 * **`cloudrun`**: ヘルスチェックと、起動から正常停止まで
   * ヘルスチェックは `HealthPath`（`/health`）です。**`/healthz` は `*.run.app` の GFE が横取りします。**
   * `Serve` は ctx が終わるまで動かし、猶予内に止まらなければ強制的に閉じます。
+    テストでは `Listener` にポート 0 のリスナーを渡せます（空きポートを探して接続できるまで
+    待つ、という迂回が要りません）。
   * `WriteTimeout` に既定値を置きません（worker は数分かかることがあるため）。`ReadHeaderTimeout` は 5 秒です。
 * **`negotiate`**: 通した相手に合わせて表現を選ぶ（`auth` と対になります）
   * `WantsJSON` が `Accept` で表現を選び、**同時に `Vary: Accept` を立てます**。

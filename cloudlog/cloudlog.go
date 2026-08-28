@@ -5,16 +5,18 @@
 // `severity`/`message` です。既定のままだと Logs Explorer 上ですべてのエントリが
 // INFO 扱いになり、重大度での絞り込みができません。HandlerOptions がこの差を吸収します。
 //
-// 出力先やレベルの決定、context 属性の付与といった GCP に依存しない部分は
-// 意図的に持ちません。アプリケーション側で組み立ててください。
+// 組み立ては NewHandler が引き受けます。出力先とレベルは GCP に依存しないため、
+// 引数として呼び出し側に残します。
 //
 //	level := slogctx.ParseLevel(os.Getenv("LOG_LEVEL"))
-//	base := slog.NewJSONHandler(os.Stdout, cloudlog.HandlerOptions(level))
-//	slog.SetDefault(slog.New(slogctx.NewHandler(base)))
+//	slog.SetDefault(slog.New(cloudlog.NewHandler(os.Stdout, level)))
 package cloudlog
 
 import (
+	"io"
 	"log/slog"
+
+	"github.com/shouni/go-utils/slogctx"
 )
 
 // Cloud Logging がトレースとの相関に使う予約フィールド名です。
@@ -24,6 +26,20 @@ const (
 	// SpanKey はスパン ID を入れるフィールドです。
 	SpanKey = "logging.googleapis.com/spanId"
 )
+
+// NewHandler は、Cloud Logging 互換の JSON を w へ書き、context に載せた属性も
+// 出力する slog.Handler を組み立てます。
+//
+// 組み立ての順番をここに置くのは、外しても何も言わずに壊れる部分だからです。
+// slogctx.NewHandler で包み忘れてもエラーは出ず、job_id やトレース ID がログから
+// 消えるだけなので、6 つの兄弟アプリが同じ 3 行を逐語で写していました。
+//
+// 使い方はパッケージのドキュメントにあります。slog.SetDefault をこの中でやらないのは、
+// 既定ロガーの差し替えがプロセス全体に効くためです。呼び出し側から見える場所に残します。
+// 別の組み立てをしたい場合は HandlerOptions を直接 slog.NewJSONHandler へ渡してください。
+func NewHandler(w io.Writer, level slog.Level) slog.Handler {
+	return slogctx.NewHandler(slog.NewJSONHandler(w, HandlerOptions(level)))
+}
 
 // HandlerOptions は、Cloud Logging 互換の属性名で出力する slog.HandlerOptions を返します。
 // slog.NewJSONHandler へ渡して使います。

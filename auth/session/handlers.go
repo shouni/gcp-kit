@@ -47,7 +47,14 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	h.setTemporaryCookie(w, DefaultStateCookie, state)
 	h.setTemporaryCookie(w, DefaultVerifierCookie, verifier)
 
-	authURL := h.oauthConfig.AuthCodeURL(state, oauth2.S256ChallengeOption(verifier))
+	// PKCE のチャレンジは必ず載せます。prompt は指定があるときだけ足すので、
+	// state と code_challenge を上書きする余地はありません。
+	authOpts := []oauth2.AuthCodeOption{oauth2.S256ChallengeOption(verifier)}
+	if prompt := h.promptParam(); prompt != "" {
+		authOpts = append(authOpts, oauth2.SetAuthURLParam("prompt", prompt))
+	}
+
+	authURL := h.oauthConfig.AuthCodeURL(state, authOpts...)
 	http.Redirect(w, r, authURL, http.StatusTemporaryRedirect)
 }
 
@@ -98,7 +105,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 // 既定の sessions.CookieStore はクッキー自体がセッションの実体であるため、
 // これはクライアントにクッキーの破棄を指示するだけで、サーバー側での失効はできません
 // （盗まれたクッキーは有効期限まで使えます）。確実な失効が必要な場合は
-// Config.Store にサーバーサイドのストアを注入してください。
+// WithStore にサーバーサイドのストアを渡してください。
 func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	if err := h.clearSessionCookie(w, r); err != nil {
 		h.log().WarnContext(r.Context(), "ログアウト時のセッション破棄に失敗", "error", err)
@@ -215,6 +222,19 @@ func (h *Handler) saveSessionAndRedirect(w http.ResponseWriter, r *http.Request,
 	// ログイン前のセッションに紐づく CSRF トークンは破棄し、認証済みセッション用に
 	// 再生成させます（ログイン前に固定されたトークンを使い回させないため）。
 	delete(session.Values, CSRFTokenKey)
+
+	// セッション ID も捨てて振り直させます（セッション固定攻撃対策）。
+	//
+	// 既定の CookieStore に ID の概念は無く、この行は無視されます。効くのは
+	// WithStore でサーバーサイドのストアを入れた構成で、そこでは ID がセッションの
+	// 識別子になるため、攻撃者が事前に仕込んだ ID のまま認証済みにしてしまうと、
+	// 攻撃者はその ID で被害者として振る舞えます。gorilla のストアは ID が空なら
+	// Save で新しい ID を生成する約束なので、捨てるだけで振り直されます。
+	//
+	// 古い ID の中身は消しません。認証前の値しか持たず、認証済みになることも
+	// ないためです（ストアの TTL で消えます）。消しにいくと同じ名前の Set-Cookie を
+	// 2 回出すことになり、ストア実装ごとの差が表に出ます。
+	session.ID = ""
 
 	session.Values[DefaultUserSessionKey] = email
 	if err := session.Save(r, w); err != nil {

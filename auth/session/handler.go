@@ -86,6 +86,7 @@ type Handler struct {
 	cfgCallbackPath string
 	cfgLogoutPath   string
 	cfgStateMaxAge  time.Duration
+	prompt          Prompt
 	logger          *slog.Logger
 }
 
@@ -132,6 +133,7 @@ func New(cfg Config, opts ...Option) (*Handler, error) {
 		cfgCallbackPath: o.callbackPath,
 		cfgLogoutPath:   o.logoutPath,
 		cfgStateMaxAge:  o.stateMaxAge,
+		prompt:          o.prompt,
 		logger:          o.logger,
 	}, nil
 }
@@ -197,6 +199,11 @@ func pathOrDefault(path, fallback string) string {
 	return path
 }
 
+// promptParam は認可 URL へ載せる prompt の値を返します。未指定なら空です。
+func (h *Handler) promptParam() string {
+	return strings.TrimSpace(string(h.prompt))
+}
+
 func (h *Handler) stateCookieMaxAge() int {
 	if h.cfgStateMaxAge > 0 {
 		return int(h.cfgStateMaxAge.Seconds())
@@ -204,11 +211,11 @@ func (h *Handler) stateCookieMaxAge() int {
 	return int(defaultStateMaxAge.Seconds())
 }
 
-// toLowerMap はスライス内の文字列を正規化（トリム + 小文字化）して map に格納します。
-// 空白のみの要素は破棄します。環境変数から分割したリストに空要素が混ざっても、
-// 許可リストが「空ではないが誰も許可しない」状態にならないようにするためです。
+// toLowerMap は許可リストを正規化（トリム + 小文字化）して map にします。
+// 空白のみの要素を捨てるのは、環境変数を分割した値に空要素が混ざっても、
+// 「空ではないが誰も許可しない」リストにならないようにするためです。
 func toLowerMap(slice []string) map[string]struct{} {
-	m := make(map[string]struct{})
+	m := make(map[string]struct{}, len(slice))
 	for _, s := range slice {
 		if trimmed := strings.TrimSpace(s); trimmed != "" {
 			m[strings.ToLower(trimmed)] = struct{}{}

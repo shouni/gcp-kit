@@ -47,3 +47,21 @@ func (r Role) ServesWeb() bool { return r == Both || r == Web }
 
 // ServesWorker は、この役割が Worker 面を提供するかを返します。
 func (r Role) ServesWorker() bool { return r == Both || r == Worker }
+
+// UnmarshalText は encoding.TextUnmarshaler を実装します。
+//
+// 環境変数や JSON をデコードする時点で Parse を通すためにあります。これが無いと、
+// デコーダは Role が定義済み文字列型であることだけを見て未知の値でも代入でき、
+// アプリが後から Parse を呼び忘れると ServesWeb も ServesWorker も false のまま
+// 起動して、何のルートも提供しないサービスがデプロイされます。
+//
+// 値が与えられなかった場合、多くのデコーダはこのメソッドを呼びません。
+// 未設定を弾くのはタグ側の役目です（例: env:"SERVER_ROLE,required"）。
+func (r *Role) UnmarshalText(text []byte) error {
+	role, err := Parse(string(text))
+	if err != nil {
+		return err
+	}
+	*r = role
+	return nil
+}

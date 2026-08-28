@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -125,4 +126,57 @@ func makeUnsignedJWT(claims map[string]any) string {
 	payload := base64.RawURLEncoding.EncodeToString(payloadBytes)
 	sig := base64.RawURLEncoding.EncodeToString([]byte("signature"))
 	return header + "." + payload + "." + sig
+}
+
+// idStore は、サーバーサイドのセッションストア（Redis 等）の約束を最小限まねた
+// テスト用ストアです。クッキーが運ぶのは ID だけで、中身はストア側が持ちます。
+// ID が空のまま Save されたら新しい ID を振ります（gorilla のストアの約束）。
+type idStore struct {
+	saved  map[string]map[any]any
+	nextID int
+}
+
+func newIDStore() *idStore {
+	return &idStore{saved: map[string]map[any]any{}}
+}
+
+func (s *idStore) Get(r *http.Request, name string) (*sessions.Session, error) {
+	session := sessions.NewSession(s, name)
+	session.Values = map[any]any{}
+	session.Options = &sessions.Options{Path: "/"}
+	session.IsNew = true
+
+	cookie, err := r.Cookie(name)
+	if err != nil || cookie.Value == "" {
+		return session, nil
+	}
+
+	session.ID = cookie.Value
+	if values, ok := s.saved[cookie.Value]; ok {
+		for k, v := range values {
+			session.Values[k] = v
+		}
+		session.IsNew = false
+	}
+	return session, nil
+}
+
+func (s *idStore) New(r *http.Request, name string) (*sessions.Session, error) {
+	return s.Get(r, name)
+}
+
+func (s *idStore) Save(_ *http.Request, w http.ResponseWriter, session *sessions.Session) error {
+	if session.ID == "" {
+		s.nextID++
+		session.ID = fmt.Sprintf("sid-%d", s.nextID)
+	}
+
+	values := make(map[any]any, len(session.Values))
+	for k, v := range session.Values {
+		values[k] = v
+	}
+	s.saved[session.ID] = values
+
+	http.SetCookie(w, sessions.NewCookie(session.Name(), session.ID, session.Options))
+	return nil
 }

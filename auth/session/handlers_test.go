@@ -6,6 +6,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -636,4 +637,154 @@ func TestLogout(t *testing.T) {
 			t.Fatalf("status = %d, want %d", rr.Code, http.StatusSeeOther)
 		}
 	})
+}
+
+// TestLoginPrompt は、prompt を指定したときだけ認可 URL に載ること、
+// 載せても state と PKCE のチャレンジが失われないことを検証します。
+//
+// prompt は「ログアウトが効いて見えるか」を左右します。付けないと、
+// ログアウト直後にログイン画面へ送られた時点で Google が何も聞かずに
+// 承認を返し、利用者は元のログイン状態に戻ります。
+func TestLoginPrompt(t *testing.T) {
+	t.Parallel()
+
+	newHandler := func(prompt Prompt) *Handler {
+		return &Handler{
+			oauthConfig: &oauth2.Config{
+				ClientID: "client-id",
+				Endpoint: oauth2.Endpoint{AuthURL: "https://accounts.example.com/o/oauth2/auth"},
+			},
+			store:       newTestCookieStore(),
+			sessionName: "test-session",
+			prompt:      prompt,
+		}
+	}
+
+	tests := []struct {
+		name   string
+		prompt Prompt
+		want   string
+	}{
+		{name: "未指定なら付けない", prompt: "", want: ""},
+		{name: "アカウント選択を挟む", prompt: PromptSelectAccount, want: "select_account"},
+		{name: "再認証まで要求する", prompt: PromptLogin, want: "login"},
+		{name: "空白だけなら付けない", prompt: "   ", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			rr := httptest.NewRecorder()
+			newHandler(tt.prompt).Login(rr, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+
+			loc, err := url.Parse(rr.Header().Get("Location"))
+			if err != nil {
+				t.Fatalf("Location が URL として読めません: %v", err)
+			}
+			query := loc.Query()
+
+			if got := query.Get("prompt"); got != tt.want {
+				t.Errorf("prompt = %q, want %q", got, tt.want)
+			}
+			// prompt を足しても、横取り対策の 2 つは必ず残っている必要があります。
+			if query.Get("state") == "" {
+				t.Error("state が認可 URL から失われています")
+			}
+			if query.Get("code_challenge") == "" || query.Get("code_challenge_method") != "S256" {
+				t.Errorf("PKCE のチャレンジが失われています: challenge=%q method=%q",
+					query.Get("code_challenge"), query.Get("code_challenge_method"))
+			}
+		})
+	}
+}
+
+// TestWithPromptOption は、New 経由でも prompt が Handler へ届くことを確認します。
+func TestWithPromptOption(t *testing.T) {
+	t.Parallel()
+
+	h, err := New(validTestConfig(), WithPrompt(PromptSelectAccount))
+	if err != nil {
+		t.Fatalf("New = %v", err)
+	}
+	if got := h.promptParam(); got != "select_account" {
+		t.Errorf("promptParam() = %q, want select_account", got)
+	}
+}
+
+// TestSaveSessionAndRedirectRotatesSessionID は、ログインでセッション ID が
+// 振り直されることを検証します（セッション固定攻撃対策）。
+//
+// 既定の CookieStore ではクッキー自体が中身なので固定は成立しませんが、
+// README が薦めているとおり WithStore でサーバーサイドのストアを入れると、
+// クッキーが運ぶのは ID だけになります。攻撃者が事前に仕込んだ ID のまま
+// 認証済みにすると、攻撃者はその ID で被害者として振る舞えます。
+func TestSaveSessionAndRedirectRotatesSessionID(t *testing.T) {
+	t.Parallel()
+
+	const (
+		plantedID = "attacker-known-id"
+		email     = "user@example.com"
+	)
+
+	store := newIDStore()
+	// 攻撃者が仕込んだセッションが、既にストアにある状態。
+	store.saved[plantedID] = map[any]any{
+		DefaultRedirectSessionKey: "/dashboard",
+		CSRFTokenKey:              "token-fixed-before-login",
+	}
+
+	h := &Handler{store: store, sessionName: "test-session"}
+	req := httptest.NewRequest(http.MethodGet, "/auth/callback", nil)
+	req.AddCookie(&http.Cookie{Name: "test-session", Value: plantedID})
+	rr := httptest.NewRecorder()
+
+	if err := h.saveSessionAndRedirect(rr, req, email); err != nil {
+		t.Fatalf("saveSessionAndRedirect = %v", err)
+	}
+
+	// 仕込まれた ID が認証済みになっていないこと。
+	if values, ok := store.saved[plantedID]; ok {
+		if _, authenticated := values[DefaultUserSessionKey]; authenticated {
+			t.Error("攻撃者が知っている ID がそのまま認証済みになりました（セッション固定）")
+		}
+	}
+
+	// 別の ID の下に認証済みセッションが入っていること。
+	var newID string
+	for id, values := range store.saved {
+		if id == plantedID {
+			continue
+		}
+		if got, _ := values[DefaultUserSessionKey].(string); got == email {
+			newID = id
+		}
+	}
+	if newID == "" {
+		t.Fatalf("新しい ID で認証済みセッションが保存されていません: %v", store.saved)
+	}
+
+	// ログイン前の CSRF トークンは持ち越さない。
+	if _, ok := store.saved[newID][CSRFTokenKey]; ok {
+		t.Error("ログイン前の CSRF トークンが新しいセッションへ持ち越されています")
+	}
+
+	// ID を振り直しても、ログイン前に控えた遷移先は失わない。
+	if got := rr.Header().Get("Location"); got != "/dashboard" {
+		t.Errorf("Location = %q, want /dashboard", got)
+	}
+
+	// ブラウザへ渡すクッキーが新しい ID になっていること。
+	var cookieValue string
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == "test-session" {
+			cookieValue = c.Value
+		}
+	}
+	if cookieValue == plantedID {
+		t.Error("応答のクッキーが仕込まれた ID のままです")
+	}
+	if cookieValue != newID {
+		t.Errorf("クッキー = %q, want %q（保存された新しい ID）", cookieValue, newID)
+	}
 }

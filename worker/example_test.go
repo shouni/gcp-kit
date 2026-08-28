@@ -42,6 +42,7 @@ func ExampleNewHandler() {
 
 	mux := http.NewServeMux()
 	// Handler は http.Handler を実装しているためそのまま登録できます。
-	// 実運用では auth.NewTaskVerifier(...).Middleware で包んでください。
+	// 実運用では auth.Require(oidc.New(audience, allowedServiceAccounts)) で
+	// 包んでください（サービスしか来ないルートなので、失敗はフォールバックせず止めます）。
 	mux.Handle("POST /tasks/run", h)
 }

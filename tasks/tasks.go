@@ -38,7 +38,7 @@ type Config struct {
 	WorkerURL           string // タスクの送信先エンドポイント
 	ServiceAccountEmail string // OIDCトークン生成用
 	// Audience はトークン検証用の audience です。空の場合は WorkerURL が使われます。
-	// 受信側 (auth.NewTaskVerifier に渡す audience) と一致させてください。
+	// 受信側 (oidc.New に渡す audience) と一致させてください。
 	Audience string
 	// DispatchDeadline は、このキューへ投入する全タスクに適用する応答待ち時間です。
 	// 未指定 (0) は Cloud Tasks の既定である 10 分を意味します。
@@ -173,7 +173,10 @@ func WithDispatchDeadline(d time.Duration) EnqueueOption {
 }
 
 // WithHeader は、ワーカーへのリクエストに付与するヘッダーを追加します。
-// Content-Type は application/json 固定です。
+//
+// Content-Type の既定は application/json で、同じキーを渡せば上書きできます。
+// Authorization だけは指定しても効きません。OIDC トークンを設定してあるため、
+// Cloud Tasks が配送時にこのヘッダーを上書きします。
 func WithHeader(key, value string) EnqueueOption {
 	return func(o *enqueueOptions) {
 		if o.headers == nil {

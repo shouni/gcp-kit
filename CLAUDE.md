@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-GCP Kit (`github.com/shouni/gcp-kit`) is a Go library (not a service) of five independent packages for
+GCP Kit (`github.com/shouni/gcp-kit`) is a Go library (not a service) of eight independent packages for
 building Cloud Run + Cloud Tasks apps on GCP: Google OAuth2 session auth plus inbound OIDC verification,
 a generic Cloud Tasks enqueuer, a generic Cloud Tasks worker handler, Cloud Logging-compatible
 structured logging, and the web/worker role vocabulary those deployments split on. Each package is meant
@@ -75,6 +75,16 @@ update that list in the same commit. The Go version comes from `go.mod` (current
   was how they were composed, and that difference now lives in `Require` vs `Protected`. It requires no
   OAuth2 config, so a worker-only process verifies inbound tokens without ever holding client secrets.
   An empty allowlist is `ErrNotConfigured`, never "allow everyone".
+- **`cloudlog`**: Cloud Logging-compatible `slog.HandlerOptions`, plus the trace-correlation middleware.
+  slog's default `level`/`msg` keys are not the ones Cloud Logging reads (`severity`/`message`), so without
+  `HandlerOptions` every entry shows as INFO in Logs Explorer and `slog.Error` never reaches a log-based
+  alert. It deliberately does not choose the destination or the level — that part is not GCP-specific.
+  - **`ParseTraceContext` returns Cloud Logging's representation, not the header's.** `SPAN_ID` arrives in
+    decimal (`.../1;o=1`) but `logging.googleapis.com/spanId` expects 16 hex digits, so passing the raw
+    value through means span correlation silently never matches. Trace IDs are zero-padded to 32 hex digits.
+  - **A trace context that isn't valid hex is dropped, never written.** The header is caller-controlled and
+    Cloud Run forwards what it was handed; writing it unchecked into a reserved field lets anyone inject an
+    arbitrary string or ride another request's trace.
 - **`negotiate`**: `WantsJSON(w, r)` — picks the representation from `Accept` **and sets `Vary: Accept` on
   the way past**. It takes the `ResponseWriter` on purpose: deciding without declaring the variance is the
   bug this package exists to prevent, and three sibling apps had shipped exactly that (a byte-identical
@@ -89,10 +99,21 @@ update that list in the same commit. The Go version comes from `go.mod` (current
   it (below), which is easier to keep right in one place than in three. Because `Role` is a defined string
   type and nothing here dispatches on it, an app that wants a fourth role declares its own constant and
   wraps `Parse` — no kit release needed.
+- **`tasks`**: `Enqueuer[T]` — Cloud Tasks enqueue with the OIDC token setup folded in, so no caller
+  assembles the auth block itself. `T` is the contract with `worker`.
+  - **`EnqueueWithName` treats `ALREADY_EXISTS` as success**, so a retried enqueue creates one task. That
+    covers duplicate *creation* only — delivery is still at-least-once, which the worker has to handle.
+  - **`DispatchDeadline` is the worker's effective run-time limit, not a wait.** Unset means Cloud Tasks'
+    10-minute default, and no amount of Cloud Run `timeout` gets past it.
+  - The CreateTask RPC is given its own 20s deadline because Cloud Tasks rejects a request whose deadline is
+    more than 30s out, and callers naturally pass the long job-lifetime context straight in.
 - **`worker`**: `Handler[T]` — generic HTTP handler (implements `http.Handler`) that decodes a JSON body into
   `T` and calls a user-supplied `TaskExecutor[T]`. Deliberately has no dependency on `tasks` or `auth` — a
   worker endpoint is typically wrapped in `auth.Require(verifier)` at the router level, not internally. Executor errors wrapping `worker.ErrPermanent` return 2xx so Cloud Tasks stops retrying;
   everything else returns 500 to trigger backoff.
+  - **The pprof goroutine label goes on with `pprof.Do`, never `SetGoroutineLabels` alone.** The latter does
+    not restore on return, so net/http's keep-alive connection goroutine carries the previous task's name
+    into the next request — and a traceback naming the wrong task is worse than one naming none.
 
 ### File layout inside `auth`
 
@@ -133,7 +154,7 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
 - **`google.golang.org/grpc/status`/`codes`**: Cloud Tasks errors are matched by gRPC status code (see
   `tasks.EnqueueWithName`'s `codes.AlreadyExists` handling), not by string matching or sentinel errors from
   the client library.
-- **Errors distinguish "not attempted" from "failed"**: e.g. `auth.ErrM2MNotAttempted` lets callers use
+- **Errors distinguish "not attempted" from "failed"**: `auth.ErrNotAttempted` lets callers use
   `errors.Is` to treat "no bearer token presented" as a normal fallback path (skip logging) versus an actual
   verification failure (log it).
 
@@ -150,13 +171,13 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
   `email` claim against an allowlist. There is one
   implementation — `oidc.Verifier` — specifically so one caller shape can't be hardened while the other
   drifts. Don't reintroduce a second verification path, and don't add a third entry point.
-- **Authorization is evaluated per request, not once at login.** `Handler.Middleware` re-checks
+- **Authorization is evaluated per request, not once at login.** `Handler.Authenticate` re-checks
   `isAuthorized(email)` on every request, not just in `Callback`. The default `CookieStore` makes the cookie
   itself the session, so there is nothing to revoke server-side; if the allowlist were only consulted at login,
   an address removed from `AllowedEmails`/`AllowedDomains` would keep full access until the cookie expired
   (7 days by default). Re-checking is what makes the allowlist an actual eviction mechanism, and it costs one
   map lookup. `TestMiddlewareRejectsRevokedSession` guards it. Tests that drive an authenticated request
-  through `Middleware` must therefore give their `Handler` an allowlist (`testAllowedDomains()`).
+  through `Authenticate` must therefore give their `Handler` an allowlist (`testAllowedDomains()`).
 - **An empty allowlist means "verify nothing successfully", not "allow everyone".** `Verifier.Configured()`
   reports false without both an audience and a non-empty allowlist, and `auth.Require` then answers
   500 rather than letting the request through. Callers check `Verifier.Configured()` at startup so a
@@ -166,12 +187,15 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
 - **Redirect targets go through `isSafeRelativePath`** (`auth/session/authenticate.go`) on both write and read. It
   rejects raw `//`-prefixed strings rather than trusting `url.Parse` (`//@/` parses to an empty host but is
   protocol-relative to browsers), plus backslashes and control characters. `FuzzIsSafeRelativePath` and
-  `FuzzBuildLoginRedirectURL` guard the invariant; `auth/testdata/fuzz/` holds regression seeds.
+  `FuzzBuildLoginRedirectURL` guard the invariant; `auth/session/testdata/fuzz/` holds regression seeds.
 
 ### Testing notes
 
-Coverage is roughly auth 92% / tasks 82% / worker 95%. The uncovered remainder in `tasks` is the thin
-`*cloudtasks.Client` wrapper and `NewEnqueuer`, which need real GCP credentials.
+Coverage is roughly auth 81% / oidc 98% / session 91% / cloudlog 97% / negotiate 100% / serverrole 100% /
+tasks 87% / worker 96%. The uncovered remainder in `tasks` is the thin `*cloudtasks.Client` wrapper and
+`NewEnqueuer`, which need real GCP credentials.
 
-Fuzz targets live in `auth/fuzz_test.go` and run for 20s each in CI. Run them longer when touching redirect
-or header parsing: `go test ./auth/... -run '^$' -fuzz FuzzIsSafeRelativePath -fuzztime 2m`.
+Fuzz targets live in `auth/session/fuzz_test.go` (`FuzzIsSafeRelativePath`, `FuzzBuildLoginRedirectURL`) and
+`auth/oidc/fuzz_test.go` (`FuzzExtractBearerToken`), and run for 20s each in CI. Run them longer when
+touching redirect or header parsing:
+`go test ./auth/session/ -run '^$' -fuzz FuzzIsSafeRelativePath -fuzztime 2m`.

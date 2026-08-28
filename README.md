@@ -84,6 +84,15 @@ Cloud Run や Cloud Tasks を用いたアーキテクチャにおいて、ボイ
 
   * **出力先とレベルは持たない**: GCP に依存しないため引数で受け取ります。
     `slog.SetDefault` も内側では呼びません（プロセス全体に効くので、呼び出し側に残します）。
+* **`cloudrun`**: **ヘルスチェックと、起動から正常停止まで**
+  * **`/healthz` を使いません**: Cloud Run の既定ドメイン (`*.run.app`) では GFE がこのパスを
+    横取りし、コンテナへ届く前に汎用の 404 に置き換えます。**ローカルでは通るのにデプロイすると
+    404**、という形でしか現れないため、パスを `HealthPath` に固定しています。
+  * **`Serve` は ctx が終わるまで動かし、猶予内に止まらなければ強制的に閉じます。** 閉じ切らずに
+    返ると接続を掴んだままプロセスが残り、Cloud Run の SIGKILL 待ちになります。
+  * **`WriteTimeout` に既定値を置きません**: worker 面のハンドラーは数分かかることがあり、
+    既定値を置くと正常な応答を途中で切ります。`ReadHeaderTimeout` は既定 5 秒です
+    （Cloud Run は同時リクエスト数でスケールするため、遅い接続を数本掴まれると詰まります）。
 * **`negotiate`**: **通した相手に合わせて表現を選ぶ**（`auth` と対になります）
   * `WantsJSON` が `Accept` を見て表現を選び、**同時に `Vary: Accept` を立てます**。
     判定と宣言を1つの関数にまとめてあるのは、同じ URL が `Accept` で中身を変えるのに
@@ -98,12 +107,23 @@ Cloud Run や Cloud Tasks を用いたアーキテクチャにおいて、ボイ
   * 画面用と API 用にルートを分けると同じ取得処理を2本持つことになり、片方だけ直したときに
     表示と機械可読な結果が食い違います。ただし**入力フォームのように JSON の対応物が無いもの**は
     別のリソースなので、分けたままにします。
+* **`secureheaders`**: **ブラウザ向けの防御的レスポンスヘッダー**
+  * CSP・HSTS・`nosniff`・`Referrer-Policy`・`Permissions-Policy` を全応答へ付けます。
+  * **CSP は差分だけ受け取ります**: アプリごとに違うのは `img-src` / `media-src` に足す
+    GCS のオリジンだけなので、`ImageSources` / `MediaSources` を渡せば残り 9 ディレクティブは
+    キットが組み立てます。`'self'` や `object-src 'none'` の取りこぼしが構造的に起きません。
+  * 外部オリジンを `script-src` に許さないのは、CDN を allowlist に載せる形が
+    「任意の npm パッケージの読み込みを許可する」に等しくなるためです。
 * **`serverrole`**: **Web / Worker の役割判定**
   * 1つのイメージを2つの Cloud Run サービス（公開 web / 非公開 worker）としてデプロイする構成向けに、
     `web` / `worker` / `both` の語彙と `Parse` を提供します。
   * **未設定と未知の値はエラーです。** 未設定を `both` に落とすと、環境変数が1つ欠けただけで
     公開側に worker のルートが復活します。役割ごとに何を提供するかは利用側の router が決めるため、
     キットは役割で分岐しません（4つ目の役割はアプリ側で足せます）。
+  * **デコードの時点で弾きます**: `Role` は `encoding.TextUnmarshaler` を実装しているので、
+    `env:"SERVER_ROLE"` や JSON から読む時点で `Parse` が効きます。これが無いと未知の値が
+    そのまま入り、**起動はするがどのルートも提供しない**サービスができあがります
+    （未設定を弾くのはタグ側の役目です。例: `env:"SERVER_ROLE,required"`）。
 * **`tasks`**: **型安全な Cloud Tasks エンキュー**
   * **Generics 対応**: `[T any]` で独自の構造体を型安全に投入できます。`T` は `worker` との契約です。
   * **認証のカプセル化**: サービスアカウントによる OIDC トークン認証の設定を内側に隠します。
@@ -198,7 +218,9 @@ gcp-kit/
 │   ├── session/    # 人: OAuth2 ログイン・セッション・CSRF
 │   └── oidc/       # サービス: 受信 OIDC Bearer の検証
 ├── cloudlog/       # Cloud Logging 互換の slog 設定とトレース相関
+├── cloudrun/       # /health の公開と、起動から正常停止まで
 ├── negotiate/      # Accept による表現の選択と Vary: Accept
+├── secureheaders/  # ブラウザ向けの防御的レスポンスヘッダー
 ├── serverrole/     # web / worker / both の語彙と Parse
 ├── tasks/          # Cloud Tasks への型安全な投入（Generics）
 └── worker/         # Cloud Tasks からの受信ハンドラー（Generics）

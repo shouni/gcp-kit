@@ -4,11 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-GCP Kit (`github.com/shouni/gcp-kit`) is a Go library (not a service) of eight independent packages for
+GCP Kit (`github.com/shouni/gcp-kit`) is a Go library (not a service) of ten independent packages for
 building Cloud Run + Cloud Tasks apps on GCP: Google OAuth2 session auth plus inbound OIDC verification,
 a generic Cloud Tasks enqueuer, a generic Cloud Tasks worker handler, Cloud Logging-compatible
-structured logging, and the web/worker role vocabulary those deployments split on. Each package is meant
-to be imported independently.
+structured logging, the serving lifecycle and health path, browser-facing response headers, content
+negotiation, and the web/worker role vocabulary those deployments split on. Each package is meant to be
+imported independently.
 
 ## Commands
 
@@ -91,6 +92,23 @@ update that list in the same commit. The Go version comes from `go.mod` (current
   - **A trace context that isn't valid hex is dropped, never written.** The header is caller-controlled and
     Cloud Run forwards what it was handed; writing it unchecked into a reserved field lets anyone inject an
     arbitrary string or ride another request's trace.
+- **`cloudrun`**: `Health` plus `Serve` — how a process takes requests and how it stops.
+  - **`/healthz` is not the path.** On the default `*.run.app` domain the GFE treats it as reserved and
+    answers a generic 404 before the request reaches the container. It works locally and 404s only once
+    deployed, so `HealthPath` pins it and `TestHealthPath` guards it.
+  - **`Health` reports the process, not its dependencies.** A failing health check gets the instance
+    replaced, so reporting a downstream outage here just restarts the pod until the downstream recovers.
+  - **Shutdown force-closes when the grace period runs out.** Returning while `Shutdown` is still stuck
+    leaves the process holding connections until Cloud Run sends SIGKILL.
+  - **No default `WriteTimeout`.** Worker handlers run for minutes; a default there cuts a healthy
+    response in half. `ReadHeaderTimeout` does get one — Cloud Run scales on concurrency, so a few
+    slow-header connections are enough to jam an instance.
+  - It does not subscribe to signals. The caller passes a `signal.NotifyContext` ctx, so what counts as
+    "time to stop" stays with the app.
+- **`secureheaders`**: the defensive response headers, with the CSP assembled from the parts that differ.
+  Five apps carried a byte-identical middleware and header map; only `img-src`/`media-src` varied, so
+  `Config` takes `ImageSources`/`MediaSources` and builds the other nine directives. Handing back a whole
+  CSP string would have let `'self'` or `object-src 'none'` go missing one app at a time.
 - **`negotiate`**: `WantsJSON(w, r)` — picks the representation from `Accept` **and sets `Vary: Accept` on
   the way past**. It takes the `ResponseWriter` on purpose: deciding without declaring the variance is the
   bug this package exists to prevent, and three sibling apps had shipped exactly that (a byte-identical
@@ -114,6 +132,10 @@ update that list in the same commit. The Go version comes from `go.mod` (current
   it (below), which is easier to keep right in one place than in three. Because `Role` is a defined string
   type and nothing here dispatches on it, an app that wants a fourth role declares its own constant and
   wraps `Parse` — no kit release needed.
+  - **`Role` implements `encoding.TextUnmarshaler` so the decoder enforces `Parse`.** Every app binds it
+    straight to `env:"SERVER_ROLE"`; without this the decoder happily assigns an unknown string, and if the
+    app then forgets its own `Parse` call, both `ServesWeb` and `ServesWorker` report false — a service that
+    starts and serves nothing. An unset value is the tag's job (`env:"SERVER_ROLE,required"`).
 - **`tasks`**: `Enqueuer[T]` — Cloud Tasks enqueue with the OIDC token setup folded in, so no caller
   assembles the auth block itself. `T` is the contract with `worker`.
   - **`EnqueueWithName` treats `ALREADY_EXISTS` as success**, so a retried enqueue creates one task. That
@@ -206,9 +228,9 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
 
 ### Testing notes
 
-Coverage is roughly auth 81% / oidc 98% / session 91% / cloudlog 97% / negotiate 100% / serverrole 100% /
-tasks 87% / worker 96%. The uncovered remainder in `tasks` is the thin `*cloudtasks.Client` wrapper and
-`NewEnqueuer`, which need real GCP credentials.
+Coverage is roughly auth 81% / oidc 98% / session 91% / cloudlog 97% / cloudrun 98% / negotiate 100% /
+secureheaders 100% / serverrole 100% / tasks 87% / worker 96%. The uncovered remainder in `tasks` is the
+thin `*cloudtasks.Client` wrapper and `NewEnqueuer`, which need real GCP credentials.
 
 Fuzz targets live in `auth/session/fuzz_test.go` (`FuzzIsSafeRelativePath`, `FuzzBuildLoginRedirectURL`) and
 `auth/oidc/fuzz_test.go` (`FuzzExtractBearerToken`), and run for 20s each in CI. Run them longer when

@@ -10,7 +10,7 @@
 
 ## 🚀 概要 (About) - Cloud Run と Cloud Tasks を使った開発を最速の軌道へ
 
-**GCP Kit** は、Cloud Run と Cloud Tasks でアプリを動かすときにボイラープレートになりがちな部分を引き受ける Go のツールキットです。
+**GCP Kit** は、ボイラープレートになりがちな部分を引き受ける Go のツールキットです。
 
 ---
 

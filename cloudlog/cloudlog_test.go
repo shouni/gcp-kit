@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/shouni/go-utils/slogctx"
@@ -96,39 +97,108 @@ func TestSeverityOf(t *testing.T) {
 	}
 }
 
+// Cloud Run が実際に送る形の X-Cloud-Trace-Context です。
+// SPAN_ID がヘッダー上は 10 進数（"/1"）で、Cloud Logging の spanId が期待する
+// 16 進 16 桁（"0000000000000001"）とは表現が違う点がこのテスト群の要点です。
+const (
+	testTraceHeader = "105445aa7843bc8bf206b12000100000/1;o=1"
+	testTraceID     = "105445aa7843bc8bf206b12000100000"
+	testSpanID      = "0000000000000001"
+)
+
 func TestParseTraceContext(t *testing.T) {
 	tests := []struct {
+		name      string
 		header    string
 		wantTrace string
 		wantSpan  string
 	}{
-		{"abc123/456;o=1", "abc123", "456"},
-		{"abc123/456", "abc123", "456"},
-		{"abc123", "abc123", ""},
-		{"", "", ""},
+		{
+			name:      "Cloud Run が送る形。10 進数の SPAN_ID を 16 進 16 桁へ直す",
+			header:    testTraceHeader,
+			wantTrace: testTraceID,
+			wantSpan:  testSpanID,
+		},
+		{
+			name:      "サンプリング指定なし",
+			header:    testTraceID + "/456",
+			wantTrace: testTraceID,
+			wantSpan:  "00000000000001c8",
+		},
+		{
+			name:      "32 桁に満たない TRACE_ID は 0 で左詰めする",
+			header:    "abc123/1",
+			wantTrace: "00000000000000000000000000abc123",
+			wantSpan:  testSpanID,
+		},
+		{
+			name:      "大文字の 16 進数は小文字へ揃える",
+			header:    "ABC123/1",
+			wantTrace: "00000000000000000000000000abc123",
+			wantSpan:  testSpanID,
+		},
+		{
+			name:      "SPAN_ID なし",
+			header:    testTraceID,
+			wantTrace: testTraceID,
+		},
+		{
+			name:      "SPAN_ID が無く、サンプリング指定だけある形",
+			header:    testTraceID + ";o=1",
+			wantTrace: testTraceID,
+		},
+		{
+			name:   "16 進数でない TRACE_ID は相関に使わない",
+			header: "trace-abc/1",
+		},
+		{
+			name:   "32 桁を超える TRACE_ID は相関に使わない",
+			header: strings.Repeat("a", 33) + "/1",
+		},
+		{
+			name:      "10 進数でない SPAN_ID は捨てるが、TRACE_ID は残す",
+			header:    testTraceID + "/span-1",
+			wantTrace: testTraceID,
+		},
+		{
+			name:      "SPAN_ID 0 は「スパンなし」の意味",
+			header:    testTraceID + "/0",
+			wantTrace: testTraceID,
+		},
+		{
+			name:      "64 ビットに収まらない SPAN_ID は捨てる",
+			header:    testTraceID + "/18446744073709551616",
+			wantTrace: testTraceID,
+		},
+		{
+			name:   "空",
+			header: "",
+		},
 	}
 
 	for _, tt := range tests {
-		trace, span := cloudlog.ParseTraceContext(tt.header)
-		if trace != tt.wantTrace || span != tt.wantSpan {
-			t.Errorf("ParseTraceContext(%q) = (%q, %q), want (%q, %q)",
-				tt.header, trace, span, tt.wantTrace, tt.wantSpan)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			trace, span := cloudlog.ParseTraceContext(tt.header)
+			if trace != tt.wantTrace || span != tt.wantSpan {
+				t.Errorf("ParseTraceContext(%q) = (%q, %q), want (%q, %q)",
+					tt.header, trace, span, tt.wantTrace, tt.wantSpan)
+			}
+		})
 	}
 }
 
 func TestTraceAttrs(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set(cloudlog.TraceHeader, "trace-abc/span-1;o=1")
+	req.Header.Set(cloudlog.TraceHeader, testTraceHeader)
 
 	attrs := cloudlog.TraceAttrs("my-project", req)
 	if len(attrs) != 2 {
 		t.Fatalf("attrs = %v, want 2 件", attrs)
 	}
-	if attrs[0].Key != cloudlog.TraceKey || attrs[0].Value.String() != "projects/my-project/traces/trace-abc" {
+	if attrs[0].Key != cloudlog.TraceKey || attrs[0].Value.String() != "projects/my-project/traces/"+testTraceID {
 		t.Errorf("attrs[0] = %v", attrs[0])
 	}
-	if attrs[1].Key != cloudlog.SpanKey || attrs[1].Value.String() != "span-1" {
+	if attrs[1].Key != cloudlog.SpanKey || attrs[1].Value.String() != testSpanID {
 		t.Errorf("attrs[1] = %v", attrs[1])
 	}
 
@@ -144,6 +214,30 @@ func TestTraceAttrs(t *testing.T) {
 	}
 }
 
+// TestTraceAttrsIgnoresForgedHeader は、呼び出し元が細工したヘッダーを
+// Cloud Logging の予約フィールドへ書かないことを検証します。
+//
+// このヘッダーは誰でも付けられ、Cloud Run は提示された値を引き継ぎます。
+// 検証せずに書くと、trace フィールドに任意の文字列を仕込めるうえ、
+// 他リクエストのトレースへ相乗りする経路にもなります。
+func TestTraceAttrsIgnoresForgedHeader(t *testing.T) {
+	forged := []string{
+		`" injected`,
+		"../../other-project/traces/deadbeef",
+		"not-hex-at-all/1",
+		strings.Repeat("f", 64) + "/1",
+	}
+
+	for _, header := range forged {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set(cloudlog.TraceHeader, header)
+
+		if got := cloudlog.TraceAttrs("my-project", req); got != nil {
+			t.Errorf("TraceAttrs(%q) = %v, want nil（相関に使わない）", header, got)
+		}
+	}
+}
+
 func TestTraceMiddlewareAttachesTrace(t *testing.T) {
 	var buf bytes.Buffer
 	logger := newTestLogger(&buf, slog.LevelInfo)
@@ -153,17 +247,17 @@ func TestTraceMiddlewareAttachesTrace(t *testing.T) {
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set(cloudlog.TraceHeader, "trace-abc/span-1;o=1")
+	req.Header.Set(cloudlog.TraceHeader, testTraceHeader)
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 
 	entries := decodeLines(t, &buf)
 	if len(entries) != 1 {
 		t.Fatalf("entries = %d, want 1", len(entries))
 	}
-	if entries[0][cloudlog.TraceKey] != "projects/my-project/traces/trace-abc" {
+	if entries[0][cloudlog.TraceKey] != "projects/my-project/traces/"+testTraceID {
 		t.Errorf("trace = %v", entries[0][cloudlog.TraceKey])
 	}
-	if entries[0][cloudlog.SpanKey] != "span-1" {
+	if entries[0][cloudlog.SpanKey] != testSpanID {
 		t.Errorf("span = %v", entries[0][cloudlog.SpanKey])
 	}
 }
@@ -178,7 +272,7 @@ func TestTraceMiddlewareSkipsWithoutProjectID(t *testing.T) {
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set(cloudlog.TraceHeader, "trace-abc/span-1;o=1")
+	req.Header.Set(cloudlog.TraceHeader, testTraceHeader)
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 
 	entries := decodeLines(t, &buf)
@@ -201,7 +295,7 @@ func TestTraceMiddlewareComposesWithApplicationAttrs(t *testing.T) {
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set(cloudlog.TraceHeader, "trace-abc/span-1")
+	req.Header.Set(cloudlog.TraceHeader, testTraceID+"/1")
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 
 	entries := decodeLines(t, &buf)

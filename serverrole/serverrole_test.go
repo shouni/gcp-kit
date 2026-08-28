@@ -1,6 +1,8 @@
 package serverrole
 
 import (
+	"encoding"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -85,5 +87,69 @@ func TestRoleServes(t *testing.T) {
 				t.Errorf("ServesWorker() = %v, want %v", got, tt.servesWork)
 			}
 		})
+	}
+}
+
+// TestRoleUnmarshalText は、デコードの時点で Parse の厳しさが効くことを検証します。
+//
+// 各アプリは env タグで Role を直接受けているため、ここで弾けないと
+// 未知の値がそのまま Role に入り、起動はするがどのルートも提供しない
+// サービスができあがります。
+func TestRoleUnmarshalText(t *testing.T) {
+	tests := []struct {
+		name    string
+		text    string
+		want    Role
+		wantErr bool
+	}{
+		{name: "既知の値", text: "worker", want: Worker},
+		{name: "大文字と空白は正規化する", text: "  Web  ", want: Web},
+		{name: "空はエラー", text: "", wantErr: true},
+		{name: "未知の値はエラー", text: "api", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var role Role
+			err := role.UnmarshalText([]byte(tt.text))
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("UnmarshalText(%q) = nil, want エラー", tt.text)
+				}
+				// 失敗しても値を書き換えない（呼び出し側がゼロ値のまま扱える）。
+				if role != "" {
+					t.Errorf("エラー時に role = %q が入っています", role)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("UnmarshalText(%q) = %v", tt.text, err)
+			}
+			if role != tt.want {
+				t.Errorf("role = %q, want %q", role, tt.want)
+			}
+		})
+	}
+}
+
+// TestRoleImplementsTextUnmarshaler は、デコーダが実際にこの経路を通ることを固定します。
+// encoding/json は encoding.TextUnmarshaler を見て呼び分けるため、
+// caarlos0/env（各アプリが使っている）も同じ判定で通ります。
+func TestRoleImplementsTextUnmarshaler(t *testing.T) {
+	var _ encoding.TextUnmarshaler = (*Role)(nil)
+
+	var cfg struct {
+		Role Role `json:"role"`
+	}
+	if err := json.Unmarshal([]byte(`{"role":"WORKER"}`), &cfg); err != nil {
+		t.Fatalf("Unmarshal = %v", err)
+	}
+	if cfg.Role != Worker {
+		t.Errorf("role = %q, want %q", cfg.Role, Worker)
+	}
+
+	if err := json.Unmarshal([]byte(`{"role":"api"}`), &cfg); err == nil {
+		t.Error("未知の値がデコードで通ってしまいました")
 	}
 }

@@ -151,3 +151,74 @@ func TestWriteNilArgs(t *testing.T) {
 		t.Errorf("body = %q", got)
 	}
 }
+
+// TestErrorJSON は、相手が何を求めていても JSON を返すことを検証します。
+//
+// JSON しか返さないルートでは、成功時が無条件 JSON である以上、エラーも同じ形で
+// なければ呼び出し側が成功と失敗で本文の読み方を変えることになります。
+func TestErrorJSON(t *testing.T) {
+	for _, accept := range []string{"application/json", "text/html", "*/*", ""} {
+		t.Run("Accept="+accept, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			if accept != "" {
+				req.Header.Set("Accept", accept)
+			}
+
+			negotiate.ErrorJSON(rec, req, http.StatusBadGateway, "読み出しに失敗しました")
+
+			if rec.Code != http.StatusBadGateway {
+				t.Errorf("status = %d, want 502", rec.Code)
+			}
+			if got := rec.Header().Get("Content-Type"); got != "application/json; charset=utf-8" {
+				t.Errorf("Content-Type = %q", got)
+			}
+
+			var body map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("本文が JSON として読めません: %v (%s)", err, rec.Body.String())
+			}
+			if body["error"] != "読み出しに失敗しました" {
+				t.Errorf("body[error] = %v", body["error"])
+			}
+			// 応答が Accept で変わらない以上、Vary を立てる理由がありません。
+			if got := rec.Header().Get("Vary"); got != "" {
+				t.Errorf("Vary = %q, want 空", got)
+			}
+		})
+	}
+}
+
+// TestErrorAndErrorJSONAgreeForJSONCallers は、JSON を求めた相手には
+// 2 つが同じ応答を返すことを固定します。違いは「求めていない相手に何を返すか」
+// だけである、という関係を崩さないためです。
+func TestErrorAndErrorJSONAgreeForJSONCallers(t *testing.T) {
+	newReq := func() *http.Request {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("Accept", "application/json")
+		return req
+	}
+
+	negotiated := httptest.NewRecorder()
+	negotiate.Error(negotiated, newReq(), http.StatusNotFound, "見つかりません")
+
+	always := httptest.NewRecorder()
+	negotiate.ErrorJSON(always, newReq(), http.StatusNotFound, "見つかりません")
+
+	if negotiated.Code != always.Code {
+		t.Errorf("status = %d / %d", negotiated.Code, always.Code)
+	}
+	if negotiated.Body.String() != always.Body.String() {
+		t.Errorf("body = %q / %q", negotiated.Body.String(), always.Body.String())
+	}
+	if got, want := negotiated.Header().Get("Content-Type"), always.Header().Get("Content-Type"); got != want {
+		t.Errorf("Content-Type = %q / %q", got, want)
+	}
+	// Error は判定するので Vary を立て、ErrorJSON は立てません。
+	if negotiated.Header().Get("Vary") != "Accept" {
+		t.Error("Error が Vary: Accept を立てていません")
+	}
+	if always.Header().Get("Vary") != "" {
+		t.Error("ErrorJSON が Vary を立てています")
+	}
+}

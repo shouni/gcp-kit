@@ -53,6 +53,10 @@ update that list in the same commit. The Go version comes from `go.mod` (current
     `ProtectedMiddleware` did — sends an HTML login page to an agent that asked for JSON.
   - Scanning continues past a decisive failure so that a caller holding both a bad token and a valid session
     is not locked out; the failure is only remembered, in case nothing else succeeds.
+  - **That scan makes the order matter for successful requests too, not just failed ones.** `Authenticate`
+    takes the `ResponseWriter` and some methods write to it (`session` clears a broken cookie), and those
+    headers survive a later success — there is nothing to roll back to. Keep the browser-facing method
+    last, or a Bearer call that also carries a stale cookie gets a `Set-Cookie` deleting it on its 200.
   - **Both challenges follow the specs rather than a house style.** `oidc` sends `WWW-Authenticate` on every
     401 (RFC 9110, Section 15.5.2 makes it a MUST — without it a client cannot learn the route takes Bearer) and
     splits `invalid_token` (401, refetch and retry) from `insufficient_scope` (403, refetching won't help),

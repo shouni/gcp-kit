@@ -10,31 +10,21 @@
 
 ## 🚀 概要 (About) - Cloud Run と Cloud Tasks を使った開発を最速の軌道へ
 
-**GCP Kit** は、ボイラープレートになりがちな部分を引き受ける Go のツールキットです。
+**GCP Kit** は、Cloud Run 上の Go サービスが毎回書く定型（認証・レスポンスヘッダー・起動と正常停止・Cloud Tasks の投入と受信）を引き受けるツールキットです。
 
 ---
 
 ## ✨ 提供機能 (Features)
 
-パッケージは独立しており、必要なものだけを import できます。判断の理由は各パッケージの godoc にあります。
+パッケージは独立しており、必要なものだけを import できます。ここに挙げるのは
+**知らずに踏むと高くつく前提**だけです。API の詳細と個々の判断理由は各パッケージの godoc にあります。
 
 * **`auth`**: 「誰として通すか」の契約（`Authenticator`）と合成（標準ライブラリのみ）
   * 人は `auth/session`、サービスは `auth/oidc` が実装します。合成は `Require`（サービス専用ルート）と
     `Protected`（人もサービスも来るルート）が引き受けます。
-  * 応答を決めるのは、資格情報を提示したうえで落ちた方式です。提示すらしていない方式には答えさせません。
-
-| 状況 | `auth.Protected(verifier, session)` | `auth.Require(verifier)` |
-| --- | --- | --- |
-| 資格情報なし・ページを求めている | 302 ログイン画面へ | 401 `WWW-Authenticate: Bearer` |
-| 資格情報なし・JSON を求めている | 401 | 401 `WWW-Authenticate: Bearer` |
-| トークンが不正 | 401 `error="invalid_token"` | 同左 |
-| 呼び出し元が許可リストに無い | 403 `error="insufficient_scope"` | 同左 |
-| 検証器が未設定 | 302 / 401（ログに記録） | 500 |
-
-状態コードは RFC 6750 §3.1、`WWW-Authenticate` の付与は RFC 9110 §15.5.2 に従います。
-
+  * 落ち方の一覧は「認証の応答」を参照してください。
 * **`auth/session`**: Google OAuth2 ログイン（PKCE）・セッション・CSRF
-  * 許可はドメイン / メールアドレスのリストで、**空のリストは「全部拒否」**です。判定は毎リクエスト
+  * 許可はドメイン / メールアドレスのリストで、**空のリストは「全部拒否」です**。判定は毎リクエスト
     行うため、リストから外せばその場で締め出せます。
   * 既定は Cookie ストア。サーバー側で失効させたい場合は `WithStore` にサーバーサイドのストアを渡します。
   * **`WithPrompt(session.PromptSelectAccount)` を渡さないと、ログアウトが効いて見えません。**
@@ -61,7 +51,7 @@
     無条件 JSON なのにエラーだけ `Accept` で形が変わると、呼び出し側は成功と失敗で
     本文の読み方を変えることになります。
 * **`secureheaders`**: CSP・HSTS・`nosniff`・`Referrer-Policy`・`Permissions-Policy` を全応答へ付与
-  * CSP は `ImageSources` / `MediaSources` だけ渡せば、残り 9 ディレクティブをキットが組み立てます。
+  * CSP は `ImageSources` / `MediaSources` だけ渡せば、残りはキットが組み立てます。
 * **`serverrole`**: `web` / `worker` / `both` の語彙と `Parse`
   * **未設定と未知の値はエラーです。** `Role` は `encoding.TextUnmarshaler` を実装しているので、
     `env:"SERVER_ROLE"` や JSON から読む時点で弾けます（未設定を弾くのは `,required` タグの役目です）。
@@ -78,10 +68,29 @@
 
 ---
 
+## 🔐 認証の応答 (Auth responses)
+
+資格情報を提示したうえで落ちた方式が応答を決めます。提示すらしていない方式には答えさせません。
+
+| 状況 | `auth.Protected(verifier, session)` | `auth.Require(verifier)` |
+| --- | --- | --- |
+| 資格情報なし・ページを求めている | 302 ログイン画面へ | 401 `WWW-Authenticate: Bearer` |
+| 資格情報なし・JSON を求めている | 401 | 401 `WWW-Authenticate: Bearer` |
+| トークンが不正 | 401 `error="invalid_token"` | 同左 |
+| 呼び出し元が許可リストに無い | 403 `error="insufficient_scope"` | 同左 |
+| 検証器が未設定 | 302 / 401（ログに記録） | 500 |
+
+状態コードは RFC 6750, Section 3.1、`WWW-Authenticate` の付与は RFC 9110, Section 15.5.2 に従います。
+
+---
+
 ## 🚦 使い方 (Usage)
 
+1 つの関数の中身を順に分けたものです。上から連結すればそのまま動きます。
+
+### 1. 人（ブラウザ）を通す
+
 ```go
-// 1. 人（ブラウザ）の方式
 sessionHandler, err := session.New(session.Config{
     ClientID:          os.Getenv("GOOGLE_CLIENT_ID"),
     ClientSecret:      os.Getenv("GOOGLE_CLIENT_SECRET"),
@@ -92,8 +101,13 @@ sessionHandler, err := session.New(session.Config{
     IsSecureCookie:    true,
     AllowedDomains:    []string{"example.com"},
 })
+```
 
-// 2. サービスの方式。audience と許可SAの両方が必須です（片方だけでは常に検証失敗）。
+### 2. サービスを通す
+
+audience と許可 SA は両方が必須です。片方だけでは常に検証失敗になります。
+
+```go
 apiVerifier := oidc.New(serviceURL, allowedCallerSAs)
 taskVerifier := oidc.New(workerURL, allowedCallerSAs)
 
@@ -102,8 +116,13 @@ taskVerifier := oidc.New(workerURL, allowedCallerSAs)
 if !taskVerifier.Configured() || !apiVerifier.Configured() {
     return errors.New("OIDC verification is not configured")
 }
+```
 
-// 3. ルーティング（役割は明示が必須。未設定を both に落とすと、公開側に worker のルートが復活します）
+### 3. ルーティング
+
+役割は明示が必須です。未設定を `both` に落とすと、公開側に worker のルートが復活します。
+
+```go
 role, err := serverrole.Parse(os.Getenv("SERVER_ROLE"))
 mux := http.NewServeMux()
 mux.HandleFunc(cloudrun.HealthPath, cloudrun.Health) // "/healthz" は Cloud Run に横取りされます
@@ -119,8 +138,13 @@ if role.ServesWorker() {
     // サービスしか来ないルート。失敗はフォールバックせず 401/403 で止まります。
     mux.Handle("POST /tasks/run", auth.Require(taskVerifier)(workerHandler))
 }
+```
 
-// 4. 起動。ctx が終わるまで動かし、猶予内に止まらなければ強制的に閉じます。
+### 4. 起動
+
+ctx が終わるまで動かし、猶予内に止まらなければ強制的に閉じます。
+
+```go
 ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 defer stop()
 
@@ -130,6 +154,8 @@ handler := secureheaders.New(secureheaders.Config{
 
 return cloudrun.Serve(ctx, cloudrun.Config{Port: os.Getenv("PORT"), Handler: handler})
 ```
+
+### 5. 通した相手に何を返すか
 
 **誰を通すかは `auth` が決め、その相手に何を返すかは `negotiate` が決めます。** 通したエージェントに
 HTML を返しては意味がないので、保護したハンドラーの中では対で使います。
@@ -152,7 +178,6 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
 より詳しい例は [pkg.go.dev の Example](https://pkg.go.dev/github.com/shouni/gcp-kit) を参照してください。
 
 ---
-
 ## 🏗 プロジェクトレイアウト (Project Layout)
 
 ```text

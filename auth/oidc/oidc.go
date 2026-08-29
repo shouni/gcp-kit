@@ -36,7 +36,7 @@ type Verifier struct {
 // テストで差し替えるために関数フィールドとして保持します。
 type validateFunc func(ctx context.Context, token, audience string) (*idtoken.Payload, error)
 
-// 検証失敗の種類。RFC 6750 §3.1 の error コードと状態コードに対応させるために分けています。
+// 検証失敗の種類。RFC 6750, Section 3.1 の error コードと状態コードに対応させるために分けています。
 // トークンが壊れている（401・取り直せば直る）のと、呼び出し元が許可されていない
 // （403・取り直しても直らない）のとでは、クライアントが次に取るべき行動が違います。
 var (
@@ -145,9 +145,9 @@ func toLowerMap(slice []string) map[string]struct{} {
 
 // Challenge は auth.Challenger を実装し、RFC 6750 に沿った応答を返します。
 //
-// RFC 9110 §15.5.2 は、401 を返すサーバーが WWW-Authenticate を送ることを要求します。
+// RFC 9110, Section 15.5.2 は、401 を返すサーバーが WWW-Authenticate を送ることを要求します。
 // これが無いと、クライアントは「このリソースが Bearer を受け付ける」ことを知る手段が
-// ありません。状態コードは RFC 6750 §3.1 の対応に従います。
+// ありません。状態コードは RFC 6750, Section 3.1 の対応に従います。
 //
 //   - 資格情報なし:       401 Bearer
 //   - トークンが不正:     401 error="invalid_token"（取り直せば直る）

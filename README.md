@@ -83,15 +83,13 @@
 
 ```go
 sessionHandler, err := session.New(session.Config{
-    ClientID:          os.Getenv("GOOGLE_CLIENT_ID"),
-    ClientSecret:      os.Getenv("GOOGLE_CLIENT_SECRET"),
-    RedirectURL:       serviceURL + "/auth/callback",
-    SessionKeys: []session.SessionKey{
-        // 先頭が現行の鍵。新しいセッションはこれで発行されます。
-        {Auth: []byte(os.Getenv("SESSION_SECRET")), Encrypt: []byte(os.Getenv("SESSION_ENCRYPT_KEY"))},
-        // 鍵の入れ替え中だけ、旧鍵を読み出し用に残します。
-        // {Auth: []byte(os.Getenv("SESSION_SECRET_OLD")), Encrypt: []byte(os.Getenv("SESSION_ENCRYPT_KEY_OLD"))},
-    },
+    ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
+    ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
+    RedirectURL:  serviceURL + "/auth/callback",
+    SessionKeys: []session.SessionKey{{
+        Auth:    []byte(os.Getenv("SESSION_SECRET")),
+        Encrypt: []byte(os.Getenv("SESSION_ENCRYPT_KEY")),
+    }},
     SessionName:    "app-session",
     IsSecureCookie: true,
     AllowedDomains: []string{"example.com"},

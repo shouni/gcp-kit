@@ -175,6 +175,11 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
 
 ### Conventions used throughout
 
+- **The README's feature list carries only what is expensive not to know.** Signatures belong in godoc and
+  reasoning belongs in this file; a bullet that restates an API is noise, and the list stops being read at
+  all once it reads like a reference. This rule used to sit in the README itself, addressed to readers who
+  are not the ones it constrains.
+
 - **Fail-closed by default**: empty allowlists (`session.Handler.allowedEmails`/`allowedDomains`,
   `oidc.Verifier.allowed`) deny everything rather than allow everything. Preserve this when touching
   authorization logic. `toLowerMap` drops whitespace-only entries so a list can't be "non-empty but allows

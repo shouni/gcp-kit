@@ -132,11 +132,8 @@ func (h *Handler) Challenge(w http.ResponseWriter, r *http.Request, err error) {
 // 忘れる取りこぼしを塞ぐためです。共有キャッシュや CDN を前に置いたとき、Vary が
 // 無いと、JSON を求めた呼び出し元へログイン画面の HTML が返りえます。
 //
-// 判定は "application/json" の部分一致だけを見ます。ここで要るのは「ページを求めた
-// 人か、JSON を求めたエージェントか」の二分だけで、q 値による優先順位は要りません。
-//
-// 同じ判定は github.com/shouni/go-serve-kit/respond にもありますが、これは意図的な
-// 複製です。この 1 か所のためにキット間の依存を増やさない判断で、両者は独立に動きます。
+// go-serve-kit の respond.WantsJSON と意図的に重複させています。この 1 か所のために
+// キット間の依存を増やさない判断で、両者は独立に動きます。
 func wantsJSON(w http.ResponseWriter, r *http.Request) bool {
 	w.Header().Add("Vary", "Accept")
 	return strings.Contains(strings.ToLower(r.Header.Get("Accept")), "application/json")

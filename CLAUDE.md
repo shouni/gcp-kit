@@ -220,7 +220,13 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
   500 rather than letting the request through. Callers check `Verifier.Configured()` at startup so a
   misconfiguration surfaces before Cloud Tasks retries a task to exhaustion and drops it.
 - **`email_verified` is required everywhere** an email is accepted as an identity — ID token login, UserInfo
-  API fallback, and OIDC verification. `auth.VerifiedEmail` is the single gate.
+  API fallback, and OIDC verification. `auth.VerifiedEmail` is the single gate, and all three paths **call
+  it** rather than restate it. They did not always: `fetchUserEmail` used to check `u.VerifiedEmail` on its
+  own decoded struct, and had already drifted — it accepted a verified-but-empty address that the ID token
+  path rejected. Restating the rule is how one side loosens. The UserInfo API spells the claim
+  `verified_email` rather than `email_verified`, so that translation happens at the call site; the judgement
+  does not. `TestVerifiedEmail` covers the malformed shapes (missing, string, numeric, non-string email),
+  all of which must fail closed.
 - **Redirect targets go through `isSafeRelativePath`** (`auth/session/authenticate.go`) on both write and read. It
   rejects raw `//`-prefixed strings rather than trusting `url.Parse` (`//@/` parses to an empty host but is
   protocol-relative to browsers), plus backslashes and control characters. `FuzzIsSafeRelativePath` and
@@ -246,7 +252,7 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
 
 ### Testing notes
 
-Coverage is roughly auth 81% / oidc 98% / session 91% / cloudlog 97% / cloudrun 94% / tasks 87% /
+Coverage is roughly auth 90% / oidc 98% / session 91% / cloudlog 97% / cloudrun 94% / tasks 87% /
 worker 96%. The uncovered remainder in `tasks` is the thin `*cloudtasks.Client` wrapper and
 `NewEnqueuer`, which need real GCP credentials.
 

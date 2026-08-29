@@ -123,6 +123,22 @@ func TestFetchUserEmail(t *testing.T) {
 		}
 	})
 
+	// 判定を auth.VerifiedEmail に委ねる前は、この経路だけ空アドレスを素通しして
+	// いました（ID トークン経路は弾いていました）。基準を書き写すのではなく同じ
+	// 関数を呼ぶようにした理由がこれで、片側だけが緩んだ状態が実際に起きていました。
+	t.Run("verified but empty email fails", func(t *testing.T) {
+		t.Parallel()
+		h, ctx := newFetchUserEmailHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"email": "", "verified_email": true})
+		})
+
+		got, err := h.fetchUserEmail(ctx, &oauth2.Token{AccessToken: "tok"})
+		if err == nil {
+			t.Fatalf("fetchUserEmail() = %q, error = nil, want error", got)
+		}
+	})
+
 	// エラー応答をそのままデコードすると「未検証」という実態と異なるエラーに
 	// なってしまうため、ステータスコードを先に確認します。
 	t.Run("non-200 response reports the status", func(t *testing.T) {

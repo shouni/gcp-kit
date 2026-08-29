@@ -13,6 +13,8 @@ import (
 
 	"github.com/gorilla/sessions"
 	"golang.org/x/oauth2"
+
+	"github.com/shouni/gcp-kit/auth"
 )
 
 // userInfoBodyLimit は UserInfo レスポンスとして読み込む最大バイト数です。
@@ -44,11 +46,14 @@ func (h *Handler) fetchUserEmail(ctx context.Context, token *oauth2.Token) (stri
 		return "", fmt.Errorf("UserInfo レスポンスの解析に失敗: %w", err)
 	}
 
-	// ID トークン経路（auth.VerifiedEmail）と同じ基準を、UserInfo 経路にも当てます。
-	if !u.VerifiedEmail {
-		return "", fmt.Errorf("email %q is not verified", u.Email)
-	}
-	return u.Email, nil
+	// 判定そのものを auth.VerifiedEmail に通します。同じ基準を書き写すのではなく
+	// 同じ関数を呼ぶのは、片方だけが緩む余地を残さないためです。UserInfo API の
+	// キーは ID トークンと違う（verified_email / email_verified）ので、詰め替えは
+	// ここで行い、基準の判断は 1 か所に置きます。
+	return auth.VerifiedEmail(map[string]any{
+		"email":          u.Email,
+		"email_verified": u.VerifiedEmail,
+	})
 }
 
 // isAuthorized はメールアドレスが許可リストまたは許可ドメインに含まれるか判定します。

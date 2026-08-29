@@ -2,7 +2,6 @@ package session
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -13,14 +12,12 @@ import (
 // validTestConfig は、必須項目だけを埋めた最小の有効な Config を返します。
 func validTestConfig() Config {
 	return Config{
-		ClientID:     "client-id",
-		ClientSecret: "client-secret",
-		RedirectURL:  "https://example.com/auth/callback",
-		SessionKeys: []SessionKey{{
-			Auth:    []byte("1234567890123456"),
-			Encrypt: []byte("1234567890123456"),
-		}},
-		SessionName: "session",
+		ClientID:          "client-id",
+		ClientSecret:      "client-secret",
+		RedirectURL:       "https://example.com/auth/callback",
+		SessionAuthKey:    "1234567890123456",
+		SessionEncryptKey: "1234567890123456",
+		SessionName:       "session",
 	}
 }
 
@@ -55,27 +52,14 @@ func TestNewHandlerValidatesConfig(t *testing.T) {
 			cfg:  without(func(c *Config) { c.SessionName = "" }),
 		},
 		{
-			// 鍵が 1 組も無いと、鍵の無い CookieStore が出来上がります。
-			name: "no session keys",
-			cfg:  without(func(c *Config) { c.SessionKeys = nil }),
-		},
-		{
 			// 署名キーは16バイト以上が必要です。
 			name: "short auth key",
-			cfg:  without(func(c *Config) { c.SessionKeys[0].Auth = []byte("too-short") }),
+			cfg:  without(func(c *Config) { c.SessionAuthKey = "too-short" }),
 		},
 		{
 			// 暗号化キーは 16/24/32 バイトのいずれかである必要があります。
 			name: "invalid encrypt key length",
-			cfg:  without(func(c *Config) { c.SessionKeys[0].Encrypt = []byte("12345678901234567") }),
-		},
-		{
-			// 検証は先頭だけでなく全ての組に掛かります。旧鍵が壊れていると、
-			// 鍵の入れ替え中にだけ復号が失敗する、という形で現れます。
-			name: "invalid rotated key",
-			cfg: without(func(c *Config) {
-				c.SessionKeys = append(c.SessionKeys, SessionKey{Auth: []byte("short"), Encrypt: []byte("1234567890123456")})
-			}),
+			cfg:  without(func(c *Config) { c.SessionEncryptKey = "12345678901234567" }),
 		},
 	}
 
@@ -224,74 +208,5 @@ func TestLogoutRedirectsToLogin(t *testing.T) {
 	}
 	if loc := rr.Header().Get("Location"); loc != DefaultLoginPath {
 		t.Fatalf("Location = %q, want %q", loc, DefaultLoginPath)
-	}
-}
-
-// 鍵のローテーション。組を 1 つしか渡せないと、鍵を変えた瞬間に全利用者が
-// 強制ログアウトになります。旧鍵を残せる形になっていることを押さえます。
-func TestSessionKeyRotation(t *testing.T) {
-	t.Parallel()
-
-	oldKey := SessionKey{Auth: []byte("old-auth-key-01234567890"), Encrypt: []byte("old-encrypt-key-")}
-	newKey := SessionKey{Auth: []byte("new-auth-key-01234567890"), Encrypt: []byte("new-encrypt-key-")}
-
-	handlerWith := func(t *testing.T, keys ...SessionKey) *Handler {
-		t.Helper()
-		cfg := validTestConfig()
-		cfg.SessionKeys = keys
-		cfg.AllowedDomains = []string{"example.com"}
-		h, err := New(cfg)
-		if err != nil {
-			t.Fatalf("New() error = %v", err)
-		}
-		return h
-	}
-
-	// issue は、その鍵構成で発行されたセッションクッキーを返します。
-	issue := func(t *testing.T, h *Handler) *http.Cookie {
-		t.Helper()
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		rec := httptest.NewRecorder()
-		sess, err := h.store.Get(req, h.sessionName)
-		if err != nil {
-			t.Fatalf("store.Get() error = %v", err)
-		}
-		sess.Values[DefaultUserSessionKey] = "user@example.com"
-		if err := sess.Save(req, rec); err != nil {
-			t.Fatalf("session.Save() error = %v", err)
-		}
-		cookies := rec.Result().Cookies()
-		if len(cookies) == 0 {
-			t.Fatal("セッションクッキーが発行されていません")
-		}
-		return cookies[0]
-	}
-
-	// reads は、その鍵構成でクッキーを認証済みとして読めるかを返します。
-	reads := func(t *testing.T, h *Handler, cookie *http.Cookie) bool {
-		t.Helper()
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.AddCookie(cookie)
-		_, err := h.Authenticate(httptest.NewRecorder(), req)
-		return err == nil
-	}
-
-	issued := issue(t, handlerWith(t, oldKey))
-
-	// 新鍵を先頭に、旧鍵を残した構成。配布済みのクッキーはまだ読めます。
-	if !reads(t, handlerWith(t, newKey, oldKey), issued) {
-		t.Error("旧鍵を残しているのに、発行済みのクッキーが読めません")
-	}
-
-	// 旧鍵を外した構成では読めません（それが外すという操作の意味です）。
-	if reads(t, handlerWith(t, newKey), issued) {
-		t.Error("外したはずの旧鍵でクッキーが読めています")
-	}
-
-	// 発行に使われるのは先頭の組だけです。これが成り立たないと、旧鍵は
-	// いつまでも外せません。
-	rotated := issue(t, handlerWith(t, newKey, oldKey))
-	if !reads(t, handlerWith(t, newKey), rotated) {
-		t.Error("ローテーション後に発行したクッキーが、新鍵だけでは読めません")
 	}
 }

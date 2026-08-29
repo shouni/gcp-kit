@@ -130,7 +130,11 @@ workflow and nothing else.
     loop — ap-mcp did exactly that. Handing in a port-0 listener also removes the poll-until-it-answers
     dance the tests here used to need.
 - **`tasks`**: `Enqueuer[T]` — Cloud Tasks enqueue with the OIDC token setup folded in, so no caller
-  assembles the auth block itself. `T` is the contract with `worker`.
+  assembles the auth block itself. **`T` is a convention shared with `worker`, not something the compiler
+  enforces** — the two live in separate packages (so a worker-only process does not link the Cloud Tasks
+  client), so nothing stops `NewEnqueuer[A]` from being paired with `NewHandler[B]`. What `T` does buy is
+  a fixed payload type inside the app. Do not "fix" this by having `worker` import `tasks`; the realistic
+  failure is revision skew between the two Cloud Run services, which no type parameter can catch.
   - **`EnqueueWithName` treats `ALREADY_EXISTS` as success**, so a retried enqueue creates one task. That
     covers duplicate *creation* only — delivery is still at-least-once, which the worker has to handle.
   - **`DispatchDeadline` is the worker's effective run-time limit, not a wait.** Unset means Cloud Tasks'
@@ -141,6 +145,15 @@ workflow and nothing else.
   `T` and calls a user-supplied `TaskExecutor[T]`. Deliberately has no dependency on `tasks` or `auth` — a
   worker endpoint is typically wrapped in `auth.Require(verifier)` at the router level, not internally. Executor errors wrapping `worker.ErrPermanent` return 2xx so Cloud Tasks stops retrying;
   everything else returns 500 to trigger backoff.
+  - **Decoding is lenient by default and `WithStrictJSON` must not become the default.** Web and worker are
+    separate Cloud Run services, so during a rolling deploy the newer side sends fields the older side does
+    not know. Strict decoding answers 400, and Cloud Tasks drops a 4xx task without retrying — the skew
+    stops being survivable and starts eating tasks. The option is for pinning a payload shape on purpose,
+    not for catching type drift.
+  - **`Metadata` is read straight off caller-controlled headers.** `MetadataFromContext` reports `ok` for
+    anything that sets `X-CloudTasks-TaskName`, so it says what the request claims, not who sent it.
+    Confirming the caller is `auth.Require`'s job; treat `TaskName` as an idempotency key only on a route
+    that verification already covers.
   - **The pprof goroutine label goes on with `pprof.Do`, never `SetGoroutineLabels` alone.** The latter does
     not restore on return, so net/http's keep-alive connection goroutine carries the previous task's name
     into the next request — and a traceback naming the wrong task is worse than one naming none.

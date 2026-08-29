@@ -22,7 +22,7 @@
 * **`auth`**: 「誰として通すか」の契約（`Authenticator`）と合成（標準ライブラリのみ）
   * 人は `auth/session`、サービスは `auth/oidc` が実装します。合成は `Require`（サービス専用ルート）と
     `Protected`（人もサービスも来るルート）が引き受けます。
-  * 落ち方の一覧は「認証の応答」を参照してください。
+  * 落ち方の一覧は[認証の応答](#-認証の応答-auth-responses)にあります。
 * **`auth/session`**: Google OAuth2 ログイン（PKCE）・セッション・CSRF
   * 許可はドメイン / メールアドレスのリストで、**空のリストは「全部拒否」です**。判定は毎リクエスト
     行うため、リストから外せばその場で締め出せます。
@@ -44,15 +44,14 @@
     待つ、という迂回が要りません）。
   * `WriteTimeout` に既定値を置きません（worker は数分かかることがあるため）。`ReadHeaderTimeout` は 5 秒です。
 * **`tasks`**: Cloud Tasks エンキュー（`Enqueuer[T]`）
-  * **`T` は投入側と受信側で揃える規約で、型による強制ではありません。** `worker.Handler[T]` に
-    同じ型を渡すのは呼び出し側の責任で、両者は別パッケージなのでコンパイラは結びつけません
-    （`worker` が `tasks` に依存しないのは、Worker 単体プロセスに Cloud Tasks クライアントを
-    積ませないためです）。`T` が効くのは、アプリ内で `Enqueue` に渡す値の型が固定される範囲までです。
   * OIDC トークンの設定を内側に隠します。`EnqueueWithName` は決定的な名前で投入し、`ALREADY_EXISTS` を
     成功として扱います（防げるのは重複した「投入」までで、重複「配信」は worker 側の冪等性が受け持ちます）。
   * **`DispatchDeadline` は「ワーカーの実行時間の実効上限」です。** 未指定だと Cloud Tasks の既定 10 分が
     上限になり、Cloud Run の `timeout` を伸ばしても超えられません。アプリ側の全体タイムアウトは
     これより短く取ってください。
+  * **`T` は `worker.Handler[T]` と揃える規約で、型による強制ではありません。** 別パッケージなので
+    コンパイラは両者を結びつけません（`worker` を独立させているのは、Worker 単体プロセスに
+    Cloud Tasks クライアントを積ませないためです）。
 * **`worker`**: Cloud Tasks 向けハンドラー（`Handler[T]`）
   * ペイロードをデコードして `TaskExecutor[T]` へ渡し、エラーを Cloud Tasks の再試行仕様に沿った
     状態コードへ写します。リトライしても直らない失敗は `worker.ErrPermanent` でラップして打ち切れます。
@@ -116,10 +115,9 @@ if !taskVerifier.Configured() || !apiVerifier.Configured() {
 
 ### 3. ルーティング
 
-役割は明示が必須です。未設定を `both` に落とすと、公開側に worker のルートが復活します。
+ルートは 3 つの形に分かれます。人だけが来るか、人とサービスの両方が来るか、サービスしか来ないかです。
 
 ```go
-role, err := serverrole.Parse(os.Getenv("SERVER_ROLE")) // go-serve-kit
 mux := http.NewServeMux()
 mux.HandleFunc(cloudrun.HealthPath, cloudrun.Health) // "/healthz" は Cloud Run に横取りされます
 mux.Handle("GET /auth/login", http.HandlerFunc(sessionHandler.Login))
@@ -130,10 +128,8 @@ mux.Handle("/private", auth.Protected(sessionHandler)(privateHandler))
 // 人もエージェントも来るルート。有効な Bearer はセッションと CSRF をバイパスし、
 // それ以外はログインへ回ります（人向けの方式が最後だから）。
 mux.Handle("/api/", auth.Protected(apiVerifier, sessionHandler)(http.HandlerFunc(apiHandler)))
-if role.ServesWorker() {
-    // サービスしか来ないルート。失敗はフォールバックせず 401/403 で止まります。
-    mux.Handle("POST /tasks/run", auth.Require(taskVerifier)(workerHandler))
-}
+// サービスしか来ないルート。失敗はフォールバックせず 401/403 で止まります。
+mux.Handle("POST /tasks/run", auth.Require(taskVerifier)(workerHandler))
 ```
 
 ### 4. 起動
@@ -144,16 +140,13 @@ ctx が終わるまで動かし、猶予内に止まらなければ強制的に�
 ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 defer stop()
 
-handler := secureheaders.Middleware(secureheaders.Config{ // go-serve-kit
-    MediaSources: []string{"https://storage.googleapis.com"}, // 署名付き URL へ 302 する場合
-})(mux)
-
-return cloudrun.Serve(ctx, cloudrun.Config{Port: os.Getenv("PORT"), Handler: handler})
+return cloudrun.Serve(ctx, cloudrun.Config{Port: os.Getenv("PORT"), Handler: mux})
 ```
 
 より詳しい例は [pkg.go.dev の Example](https://pkg.go.dev/github.com/shouni/gcp-kit) を参照してください。
 
 ---
+
 ## 🏗 プロジェクトレイアウト (Project Layout)
 
 ```text
@@ -163,8 +156,8 @@ gcp-kit/
 │   └── oidc/       # サービス: 受信 OIDC Bearer の検証
 ├── cloudlog/       # Cloud Logging 互換の slog 設定とトレース相関
 ├── cloudrun/       # /health の公開と、起動から正常停止まで
-├── tasks/          # Cloud Tasks への型安全な投入（Generics）
-└── worker/         # Cloud Tasks からの受信ハンドラー（Generics）
+├── tasks/          # Cloud Tasks への投入（Enqueuer[T]）
+└── worker/         # Cloud Tasks からの受信ハンドラー（Handler[T]）
 ```
 
 ---

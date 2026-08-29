@@ -43,7 +43,11 @@
     テストでは `Listener` にポート 0 のリスナーを渡せます（空きポートを探して接続できるまで
     待つ、という迂回が要りません）。
   * `WriteTimeout` に既定値を置きません（worker は数分かかることがあるため）。`ReadHeaderTimeout` は 5 秒です。
-* **`tasks`**: 型安全な Cloud Tasks エンキュー（`Enqueuer[T]`。`T` は `worker` との契約）
+* **`tasks`**: Cloud Tasks エンキュー（`Enqueuer[T]`）
+  * **`T` は投入側と受信側で揃える規約で、型による強制ではありません。** `worker.Handler[T]` に
+    同じ型を渡すのは呼び出し側の責任で、両者は別パッケージなのでコンパイラは結びつけません
+    （`worker` が `tasks` に依存しないのは、Worker 単体プロセスに Cloud Tasks クライアントを
+    積ませないためです）。`T` が効くのは、アプリ内で `Enqueue` に渡す値の型が固定される範囲までです。
   * OIDC トークンの設定を内側に隠します。`EnqueueWithName` は決定的な名前で投入し、`ALREADY_EXISTS` を
     成功として扱います（防げるのは重複した「投入」までで、重複「配信」は worker 側の冪等性が受け持ちます）。
   * **`DispatchDeadline` は「ワーカーの実行時間の実効上限」です。** 未指定だと Cloud Tasks の既定 10 分が
@@ -53,6 +57,10 @@
   * ペイロードをデコードして `TaskExecutor[T]` へ渡し、エラーを Cloud Tasks の再試行仕様に沿った
     状態コードへ写します。リトライしても直らない失敗は `worker.ErrPermanent` でラップして打ち切れます。
   * `MetadataFromContext` で再試行回数やタスク名を参照でき、at-least-once 配信に対して冪等に書けます。
+    値は Cloud Tasks が付けるヘッダーそのものなので、**呼び出し元の確認は `auth.Require` の役目**です。
+  * **デコードは既定で寛容（未知フィールドを無視）です。`WithStrictJSON` を安易に既定にしないでください。**
+    Web 面と Worker 面は別サービスなので、ローリングデプロイ中は新しい側が足したフィールドが古い側へ
+    届きます。厳格化すると 400 になり、**Cloud Tasks はリトライせずタスクを破棄**します。
 
 ---
 

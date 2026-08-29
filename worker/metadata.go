@@ -45,7 +45,12 @@ func WithMetadata(ctx context.Context, md Metadata) context.Context {
 }
 
 // MetadataFromContext は TaskExecutor に渡されたコンテキストから Cloud Tasks の
-// 配信情報を取り出します。Cloud Tasks 以外からの呼び出しでは ok=false になります。
+// 配信情報を取り出します。ヘッダーが無ければ ok=false です。
+//
+// 値はリクエストヘッダーそのものなので、これは「呼び出し元が何を名乗ったか」であって
+// 「誰が呼んだか」ではありません。X-CloudTasks-TaskName は誰でも付けられます。
+// 呼び出し元の確認は auth.Require の仕事で、TaskName を冪等キーに使ってよいのは、
+// その検証が掛かっているルートに限ります。
 func MetadataFromContext(ctx context.Context) (Metadata, bool) {
 	md, ok := ctx.Value(metadataContextKey{}).(Metadata)
 	return md, ok && md.TaskName != ""

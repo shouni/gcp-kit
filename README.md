@@ -43,18 +43,6 @@
     テストでは `Listener` にポート 0 のリスナーを渡せます（空きポートを探して接続できるまで
     待つ、という迂回が要りません）。
   * `WriteTimeout` に既定値を置きません（worker は数分かかることがあるため）。`ReadHeaderTimeout` は 5 秒です。
-* **`negotiate`**: 通した相手に合わせて表現を選ぶ（`auth` と対になります）
-  * `WantsJSON` が `Accept` で表現を選び、**同時に `Vary: Accept` を立てます**。
-  * `JSON` / `Error` / `ErrorJSON` が書き出しを持ちます。**ルートの性質で使い分けます。**
-    画面と API が同じ URL を共有するなら `Error`（相手が JSON を求めていれば `{"error": ...}`、
-    そうでなければ `text/plain`）。**JSON しか返さないルートは `ErrorJSON`** です — 成功時が
-    無条件 JSON なのにエラーだけ `Accept` で形が変わると、呼び出し側は成功と失敗で
-    本文の読み方を変えることになります。
-* **`secureheaders`**: CSP・HSTS・`nosniff`・`Referrer-Policy`・`Permissions-Policy` を全応答へ付与
-  * CSP は `ImageSources` / `MediaSources` だけ渡せば、残りはキットが組み立てます。
-* **`serverrole`**: `web` / `worker` / `both` の語彙と `Parse`
-  * **未設定と未知の値はエラーです。** `Role` は `encoding.TextUnmarshaler` を実装しているので、
-    `env:"SERVER_ROLE"` や JSON から読む時点で弾けます（未設定を弾くのは `,required` タグの役目です）。
 * **`tasks`**: 型安全な Cloud Tasks エンキュー（`Enqueuer[T]`。`T` は `worker` との契約）
   * OIDC トークンの設定を内側に隠します。`EnqueueWithName` は決定的な名前で投入し、`ALREADY_EXISTS` を
     成功として扱います（防げるのは重複した「投入」までで、重複「配信」は worker 側の冪等性が受け持ちます）。
@@ -123,7 +111,7 @@ if !taskVerifier.Configured() || !apiVerifier.Configured() {
 役割は明示が必須です。未設定を `both` に落とすと、公開側に worker のルートが復活します。
 
 ```go
-role, err := serverrole.Parse(os.Getenv("SERVER_ROLE"))
+role, err := serverrole.Parse(os.Getenv("SERVER_ROLE")) // go-serve-kit
 mux := http.NewServeMux()
 mux.HandleFunc(cloudrun.HealthPath, cloudrun.Health) // "/healthz" は Cloud Run に横取りされます
 mux.Handle("GET /auth/login", http.HandlerFunc(sessionHandler.Login))
@@ -148,31 +136,11 @@ ctx が終わるまで動かし、猶予内に止まらなければ強制的に�
 ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 defer stop()
 
-handler := secureheaders.New(secureheaders.Config{
+handler := secureheaders.Middleware(secureheaders.Config{ // go-serve-kit
     MediaSources: []string{"https://storage.googleapis.com"}, // 署名付き URL へ 302 する場合
 })(mux)
 
 return cloudrun.Serve(ctx, cloudrun.Config{Port: os.Getenv("PORT"), Handler: handler})
-```
-
-### 5. 通した相手に何を返すか
-
-**誰を通すかは `auth` が決め、その相手に何を返すかは `negotiate` が決めます。** 通したエージェントに
-HTML を返しては意味がないので、保護したハンドラーの中では対で使います。
-
-```go
-func apiHandler(w http.ResponseWriter, r *http.Request) {
-    // セッションを開き直さずに、認証済みユーザーを参照できます。
-    email, _ := session.EmailFromContext(r.Context())
-    comics := store.List(r.Context(), email)
-
-    if negotiate.WantsJSON(w, r) { // Vary: Accept もここで立ちます
-        negotiate.JSON(w, r, http.StatusOK, comics)
-        return
-    }
-    // 人にはページを返します。CSRF トークンはセッション経路でのみ載ります。
-    _ = tmpl.Execute(w, page{Comics: comics, CSRFToken: session.CSRFTokenFromContext(r.Context())})
-}
 ```
 
 より詳しい例は [pkg.go.dev の Example](https://pkg.go.dev/github.com/shouni/gcp-kit) を参照してください。
@@ -187,9 +155,6 @@ gcp-kit/
 │   └── oidc/       # サービス: 受信 OIDC Bearer の検証
 ├── cloudlog/       # Cloud Logging 互換の slog 設定とトレース相関
 ├── cloudrun/       # /health の公開と、起動から正常停止まで
-├── negotiate/      # Accept による表現の選択と Vary: Accept
-├── secureheaders/  # ブラウザ向けの防御的レスポンスヘッダー
-├── serverrole/     # web / worker / both の語彙と Parse
 ├── tasks/          # Cloud Tasks への型安全な投入（Generics）
 └── worker/         # Cloud Tasks からの受信ハンドラー（Generics）
 ```

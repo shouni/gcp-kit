@@ -12,8 +12,6 @@ import (
 	"strings"
 
 	"github.com/gorilla/sessions"
-
-	"github.com/shouni/gcp-kit/negotiate"
 )
 
 const (
@@ -115,9 +113,9 @@ func (h *Handler) Challenge(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, errInvalidCSRF):
 		http.Error(w, "Invalid CSRF token", http.StatusForbidden)
 	case errors.Is(err, errNoSession), errors.Is(err, errUnauthMail):
-		// WantsJSON は Vary: Accept も立てます。この応答は実際に Accept で
+		// wantsJSON は Vary: Accept も立てます。この応答は実際に Accept で
 		// 変わるため、キャッシュへ伝える必要があります。
-		if negotiate.WantsJSON(w, r) {
+		if wantsJSON(w, r) {
 			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 			return
 		}
@@ -126,6 +124,19 @@ func (h *Handler) Challenge(w http.ResponseWriter, r *http.Request, err error) {
 		h.log().ErrorContext(r.Context(), "セッション認証で予期しない失敗", "error", err, "path", r.URL.Path)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 	}
+}
+
+// wantsJSON は、呼び出し元が JSON を求めているかを返し、同時に Vary: Accept を立てます。
+//
+// 判定と宣言を 1 つにまとめてあるのは、Accept で応答が変わることをキャッシュへ伝え
+// 忘れる取りこぼしを塞ぐためです。共有キャッシュや CDN を前に置いたとき、Vary が
+// 無いと、JSON を求めた呼び出し元へログイン画面の HTML が返りえます。
+//
+// go-serve-kit の respond.WantsJSON と意図的に重複させています。この 1 か所のために
+// キット間の依存を増やさない判断で、両者は独立に動きます。
+func wantsJSON(w http.ResponseWriter, r *http.Request) bool {
+	w.Header().Add("Vary", "Accept")
+	return strings.Contains(strings.ToLower(r.Header.Get("Accept")), "application/json")
 }
 
 // clearSessionCookieLogged はクッキーの破棄を試み、失敗しても処理を止めません。

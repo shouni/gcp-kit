@@ -31,6 +31,10 @@ import (
 // w を受け取るのは、確認の過程で応答へ書き込む必要がある方式があるためです
 // （壊れたセッションクッキーの破棄など）。ただし応答本体
 // （リダイレクトや 401）は書きません。それは Challenge の仕事です。
+//
+// ここで書いたヘッダーは、確認に失敗しても応答に残ります。Protected は失敗した
+// 方式で走査を止めないため、後の方式が成立して 200 を返しても取り消されません。
+// 書き込みは、そうなっても差し支えないものに限ってください。
 type Authenticator interface {
 	Authenticate(w http.ResponseWriter, r *http.Request) (context.Context, error)
 }
@@ -99,6 +103,12 @@ func Require(a Authenticator, opts ...Option) func(http.Handler) http.Handler {
 //
 // ErrNotConfigured だけは確定的な失敗に数えません。設定漏れでフォールバックを止めると、
 // サービス側の設定を直すまで人までログインできなくなります。
+//
+// 方式の順序は、どれも成立しなかった場合だけでなく、成立した場合の応答にも効きます。
+// Authenticate が応答へ書いたヘッダーは、その方式が落ちても残るためです（走査を
+// 続ける以上、巻き戻す先がありません）。人向けの方式は最後に置いてください。
+// auth/session を先に置くと、壊れたクッキーを持ったまま Bearer で通った呼び出しの
+// 200 応答に、セッションを破棄する Set-Cookie が紛れ込みます。
 func Protected(first Authenticator, rest ...Authenticator) func(http.Handler) http.Handler {
 	return ProtectedWith(nil, append([]Authenticator{first}, rest...)...)
 }

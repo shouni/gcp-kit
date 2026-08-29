@@ -27,6 +27,9 @@
   * 許可はドメイン / メールアドレスのリストで、**空のリストは「全部拒否」です**。判定は毎リクエスト
     行うため、リストから外せばその場で締め出せます。
   * 既定は Cookie ストア。サーバー側で失効させたい場合は `WithStore` にサーバーサイドのストアを渡します。
+  * **`SessionKeys` の先頭が現行の鍵で、2 つ目以降は読み出し専用の旧鍵です。** 鍵を差し替えるときは
+    旧鍵を残してください。1 組しか渡さずに値を変えると、**その瞬間に全利用者が強制ログアウト**します。
+    入れ替えが行き渡った後（クッキーの有効期間、既定 7 日）に旧鍵を外します。
   * **`WithPrompt(session.PromptSelectAccount)` を渡さないと、ログアウトが効いて見えません。**
     `Logout` が消せるのはこのアプリのクッキーだけで、Google 側のセッションは残るためです。
 * **`auth/oidc`**: サービス間呼び出しの受信検証（`Verifier`）
@@ -83,11 +86,15 @@ sessionHandler, err := session.New(session.Config{
     ClientID:          os.Getenv("GOOGLE_CLIENT_ID"),
     ClientSecret:      os.Getenv("GOOGLE_CLIENT_SECRET"),
     RedirectURL:       serviceURL + "/auth/callback",
-    SessionAuthKey:    os.Getenv("SESSION_SECRET"),        // 16バイト以上
-    SessionEncryptKey: os.Getenv("SESSION_ENCRYPT_KEY"),   // 16/24/32バイト
-    SessionName:       "app-session",
-    IsSecureCookie:    true,
-    AllowedDomains:    []string{"example.com"},
+    SessionKeys: []session.SessionKey{
+        // 先頭が現行の鍵。新しいセッションはこれで発行されます。
+        {Auth: []byte(os.Getenv("SESSION_SECRET")), Encrypt: []byte(os.Getenv("SESSION_ENCRYPT_KEY"))},
+        // 鍵の入れ替え中だけ、旧鍵を読み出し用に残します。
+        // {Auth: []byte(os.Getenv("SESSION_SECRET_OLD")), Encrypt: []byte(os.Getenv("SESSION_ENCRYPT_KEY_OLD"))},
+    },
+    SessionName:    "app-session",
+    IsSecureCookie: true,
+    AllowedDomains: []string{"example.com"},
 })
 ```
 

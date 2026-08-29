@@ -67,6 +67,14 @@ update that list in the same commit. The Go version comes from `go.mod` (current
   failed**. Redirecting the latter would hide whether a forged request was rejected or waved through.
   - Authorization is re-evaluated on **every** request, not once at login (see the security invariants below
     for why the default `CookieStore` forces this).
+  - **`SessionKeys` is a list so the keys can be rotated.** The first pair signs and encrypts new
+    sessions; the rest are tried on read. A single pair made rotation impossible — changing the value
+    logs every user out at once — which is the kind of thing nobody discovers until the day they have to
+    rotate. Validation runs over every pair, not just the first, so a broken old key fails at startup
+    rather than midway through a rollout. `TestSessionKeyRotation` pins all three properties (old cookie
+    still reads, dropping the old key stops it, new cookies read with the new key alone).
+  - Keys are `[]byte`, not `string`. The AES key must be exactly 16/24/32 **bytes**, and a length check
+    on a string invites counting characters.
   - CSRF tokens are minted on GET only. Minting on a state-changing request would hand a valid token to a
     request that arrived without one.
   - Required settings are `Config` fields; everything optional is a `With*` option, matching how

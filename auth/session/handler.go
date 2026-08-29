@@ -57,15 +57,41 @@ var defaultScopes = []string{
 // Config は Handler の必須設定です。
 // 任意の項目は Option（With で始まる関数）で指定します。
 type Config struct {
-	ClientID          string
-	ClientSecret      string
-	RedirectURL       string
-	SessionAuthKey    string // 署名用 (HMAC)
-	SessionEncryptKey string // 暗号化用 (AES)
-	SessionName       string
-	IsSecureCookie    bool
-	AllowedEmails     []string
-	AllowedDomains    []string
+	ClientID     string
+	ClientSecret string
+	RedirectURL  string
+	// SessionKeys は、セッションクッキーの署名鍵と暗号化鍵の組です。
+	//
+	// 先頭の組が現行の鍵で、新しいセッションはこれで発行されます。2 つ目以降は
+	// 読み出しにだけ使われる旧鍵です。鍵を差し替えるときに旧鍵を残しておけば、
+	// 既に配ったクッキーを失効させずに入れ替えられます（ローテーション）。
+	// 組を 1 つしか渡せないと、鍵を変えた瞬間に全利用者が強制ログアウトになります。
+	//
+	// 入れ替えが行き渡った後（クッキーの有効期間、既定 7 日）に旧鍵を外します。
+	// WithStore で外部ストアを渡す場合、この鍵は使われません。
+	SessionKeys    []SessionKey
+	SessionName    string
+	IsSecureCookie bool
+	AllowedEmails  []string
+	AllowedDomains []string
+}
+
+// SessionKey は、セッションクッキーに使う鍵の組です。
+type SessionKey struct {
+	// Auth は署名 (HMAC) 用の鍵です。16 バイト以上が要ります。
+	Auth []byte
+	// Encrypt は暗号化 (AES) 用の鍵です。16 / 24 / 32 バイトのいずれかです。
+	Encrypt []byte
+}
+
+// keyPairs は、gorilla の NewCookieStore が期待する並び（署名鍵と暗号化鍵の交互）へ
+// 展開します。先頭の組が発行に、全ての組が読み出しに使われます。
+func (c Config) keyPairs() [][]byte {
+	pairs := make([][]byte, 0, len(c.SessionKeys)*2)
+	for _, key := range c.SessionKeys {
+		pairs = append(pairs, key.Auth, key.Encrypt)
+	}
+	return pairs
 }
 
 type googleUserInfo struct {
@@ -110,8 +136,8 @@ func New(cfg Config, opts ...Option) (*Handler, error) {
 
 	store := o.store
 	if store == nil {
-		// 認証キーと暗号化キーを個別に渡す
-		cookieStore := sessions.NewCookieStore([]byte(cfg.SessionAuthKey), []byte(cfg.SessionEncryptKey))
+		// 先頭が現行の鍵、以降は読み出し専用の旧鍵として渡ります。
+		cookieStore := sessions.NewCookieStore(cfg.keyPairs()...)
 		cookieStore.Options = &sessions.Options{
 			Path:     "/",
 			MaxAge:   int(o.sessionMaxAge.Seconds()),
@@ -147,8 +173,6 @@ func validateConfig(cfg Config) error {
 		{"ClientID", cfg.ClientID},
 		{"ClientSecret", cfg.ClientSecret},
 		{"RedirectURL", cfg.RedirectURL},
-		{"SessionAuthKey", cfg.SessionAuthKey},
-		{"SessionEncryptKey", cfg.SessionEncryptKey},
 		{"SessionName", cfg.SessionName},
 	}
 
@@ -158,15 +182,21 @@ func validateConfig(cfg Config) error {
 		}
 	}
 
-	// 署名キー (HMAC) は十分な長さがあれば良いため、16バイト以上であることを確認します。
-	if authLen := len(cfg.SessionAuthKey); authLen < 16 {
-		return fmt.Errorf("auth config SessionAuthKey length is %d: must be at least 16 bytes for security", authLen)
+	// 空のリストを許すと、鍵の無い CookieStore が出来上がります。
+	if len(cfg.SessionKeys) == 0 {
+		return errors.New("auth config SessionKeys must not be empty")
 	}
-
-	// 暗号化キー (AES) は 16/24/32 バイトのいずれかである必要があります。
-	keyLen := len(cfg.SessionEncryptKey)
-	if keyLen != 16 && keyLen != 24 && keyLen != 32 {
-		return errors.New("auth config SessionEncryptKey must be 16, 24, or 32 bytes long")
+	for i, key := range cfg.SessionKeys {
+		// 署名キー (HMAC) は十分な長さがあれば良いため、16バイト以上であることを確認します。
+		if authLen := len(key.Auth); authLen < 16 {
+			return fmt.Errorf("auth config SessionKeys[%d].Auth length is %d: must be at least 16 bytes for security", i, authLen)
+		}
+		// 暗号化キー (AES) は 16/24/32 バイトのいずれかである必要があります。
+		switch len(key.Encrypt) {
+		case 16, 24, 32:
+		default:
+			return fmt.Errorf("auth config SessionKeys[%d].Encrypt is %d bytes: must be 16, 24, or 32", i, len(key.Encrypt))
+		}
 	}
 
 	redirectURL, err := url.Parse(cfg.RedirectURL)

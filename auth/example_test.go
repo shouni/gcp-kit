@@ -46,14 +46,16 @@ func ExampleRequire() {
 // 置くと、どれも成立しなかったときログイン画面へ送られます。
 func ExampleProtected() {
 	handler, err := session.New(session.Config{
-		ClientID:          "xxxxx.apps.googleusercontent.com",
-		ClientSecret:      "secret",
-		RedirectURL:       "https://app.example.com/auth/callback",
-		SessionAuthKey:    "0123456789abcdef0123456789abcdef", // 16バイト以上
-		SessionEncryptKey: "0123456789abcdef",                 // 16/24/32バイト
-		SessionName:       "app-session",
-		IsSecureCookie:    true,
-		AllowedDomains:    []string{"example.com"},
+		ClientID:     "xxxxx.apps.googleusercontent.com",
+		ClientSecret: "secret",
+		RedirectURL:  "https://app.example.com/auth/callback",
+		SessionKeys: []session.SessionKey{{
+			Auth:    []byte("0123456789abcdef0123456789abcdef"), // 16バイト以上
+			Encrypt: []byte("0123456789abcdef"),                 // 16/24/32バイト
+		}},
+		SessionName:    "app-session",
+		IsSecureCookie: true,
+		AllowedDomains: []string{"example.com"},
 	})
 	if err != nil {
 		slog.Error("failed to build session handler", "error", err)

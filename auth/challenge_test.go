@@ -16,13 +16,15 @@ func newTestSession(t *testing.T) *session.Handler {
 	t.Helper()
 
 	h, err := session.New(session.Config{
-		ClientID:          "id",
-		ClientSecret:      "secret",
-		RedirectURL:       "https://app.example.com/auth/callback",
-		SessionAuthKey:    "0123456789abcdef0123456789abcdef",
-		SessionEncryptKey: "0123456789abcdef",
-		SessionName:       "s",
-		AllowedDomains:    []string{"example.com"},
+		ClientID:     "id",
+		ClientSecret: "secret",
+		RedirectURL:  "https://app.example.com/auth/callback",
+		SessionKeys: []session.SessionKey{{
+			Auth:    []byte("0123456789abcdef0123456789abcdef"),
+			Encrypt: []byte("0123456789abcdef"),
+		}},
+		SessionName:    "s",
+		AllowedDomains: []string{"example.com"},
 	})
 	if err != nil {
 		t.Fatalf("session.New() error = %v", err)

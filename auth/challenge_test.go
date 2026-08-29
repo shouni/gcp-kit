@@ -50,11 +50,12 @@ func TestChallengeMatrix(t *testing.T) {
 		wantStatus int
 		wantWWW    string
 		wantRedir  bool
+		wantVary   bool // session の応答は Accept で変わるため Vary が要る
 	}{
 		{
 			// リダイレクトを返すと、エージェントは HTML のログイン画面を受け取ります。
 			name: "Protected: エージェントが Bearer を忘れた", accept: "application/json",
-			protected: true, wantStatus: http.StatusUnauthorized,
+			protected: true, wantStatus: http.StatusUnauthorized, wantVary: true,
 		},
 		{
 			name: "Protected: エージェントの Bearer が不正", accept: "application/json", authz: "Bearer bogus",
@@ -63,7 +64,7 @@ func TestChallengeMatrix(t *testing.T) {
 		{
 			// ブラウザの挙動は変わりません。
 			name: "Protected: 未ログインのブラウザ", accept: browserAccept,
-			protected: true, wantStatus: http.StatusFound, wantRedir: true,
+			protected: true, wantStatus: http.StatusFound, wantRedir: true, wantVary: true,
 		},
 		{
 			name: "Require: 資格情報なし", accept: "application/json",
@@ -109,6 +110,11 @@ func TestChallengeMatrix(t *testing.T) {
 			}
 			if gotRedir := rec.Header().Get("Location") != ""; gotRedir != tt.wantRedir {
 				t.Errorf("リダイレクト = %v, want %v (Location=%q)", gotRedir, tt.wantRedir, rec.Header().Get("Location"))
+			}
+			// Accept で応答が変わる経路では、それをキャッシュへ伝えないと
+			// JSON を求めた呼び出し元へログイン画面の HTML が返りえます。
+			if gotVary := rec.Header().Get("Vary") == "Accept"; gotVary != tt.wantVary {
+				t.Errorf("Vary: Accept = %v, want %v", gotVary, tt.wantVary)
 			}
 		})
 	}

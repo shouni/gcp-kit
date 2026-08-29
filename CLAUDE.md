@@ -4,12 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-GCP Kit (`github.com/shouni/gcp-kit`) is a Go library (not a service) of ten independent packages for
+GCP Kit (`github.com/shouni/gcp-kit`) is a Go library (not a service) of seven independent packages for
 building Cloud Run + Cloud Tasks apps on GCP: Google OAuth2 session auth plus inbound OIDC verification,
 a generic Cloud Tasks enqueuer, a generic Cloud Tasks worker handler, Cloud Logging-compatible
-structured logging, the serving lifecycle and health path, browser-facing response headers, content
-negotiation, and the web/worker role vocabulary those deployments split on. Each package is meant to be
-imported independently.
+structured logging, and the serving lifecycle and health path. Each package is meant to be imported
+independently.
+
+The three packages that never depended on GCP — response writing plus `Accept` negotiation, browser-facing
+response headers, and the web/worker role vocabulary — now live in `github.com/shouni/go-serve-kit`
+(`respond` / `secureheaders` / `serverrole`). **Neither module requires the other, in either direction**,
+and that is a deliberate choice rather than an oversight: see `wantsJSON` under `auth/session`.
 
 ## Commands
 
@@ -67,6 +71,11 @@ update that list in the same commit. The Go version comes from `go.mod` (current
     request that arrived without one.
   - Required settings are `Config` fields; everything optional is a `With*` option, matching how
     `netarmor` and `go-http-kit` are configured.
+  - **`wantsJSON` in `authenticate.go` is a deliberate copy of `go-serve-kit`'s `respond.WantsJSON`.**
+    `Challenge` needs it to answer a JSON caller with 401 instead of an HTML login redirect. Taking the
+    dependency for this one call site was rejected on purpose, so the two are allowed to drift — this copy
+    only has to keep answering "page or JSON" for this one branch, and it must keep setting `Vary: Accept`
+    (`TestChallengeMatrix` asserts it). Do not re-import go-serve-kit here to "fix" the duplication.
   - `WithCSRFToken` is exported for tests that render a template without running a full authentication
     round-trip. It looked unused when the surface was trimmed because that count excluded `_test.go`;
     six sibling test files use it. **Count test files too before unexporting something.**
@@ -108,41 +117,6 @@ update that list in the same commit. The Go version comes from `go.mod` (current
     moved in here, an app that wants to test its server would otherwise have to keep its own copy of the
     loop — ap-mcp did exactly that. Handing in a port-0 listener also removes the poll-until-it-answers
     dance the tests here used to need.
-- **`secureheaders`**: the defensive response headers, with the CSP assembled from the parts that differ.
-  Five apps carried a byte-identical middleware and header map; only `img-src`/`media-src` varied, so
-  `Config` takes `ImageSources`/`MediaSources` and builds the other nine directives. Handing back a whole
-  CSP string would have let `'self'` or `object-src 'none'` go missing one app at a time.
-- **`negotiate`**: `WantsJSON(w, r)` — picks the representation from `Accept` **and sets `Vary: Accept` on
-  the way past**. It takes the `ResponseWriter` on purpose: deciding without declaring the variance is the
-  bug this package exists to prevent, and three sibling apps had shipped exactly that (a byte-identical
-  `wantsJSON(r)` helper, no `Vary` anywhere). Matching is a substring check on `application/json`, so `*/*`
-  falls to HTML and `;q=0` is not honoured — the callers all send an explicit `Accept`, and widening it
-  would change behaviour in three apps at once. Splitting page routes from API routes is still right when
-  there is no JSON twin (input forms); this is only for one resource with two representations.
-  - **`JSON` and `Error` write the response, because sharing only the decision left the writing to drift.**
-    Five apps had their own pair: `Content-Type` split between `application/json` and
-    `application/json; charset=utf-8`, and an encode failure was logged with context, logged without it, or
-    dropped on the floor. `charset` carries no meaning for JSON (RFC 8259 fixes UTF-8) — the point is that
-    one client calls four of these backends, so the value has to be the same everywhere.
-  - **`JSON` and `ErrorJSON` do not set `Vary: Accept`; `Error` does.** Only `Error` varies, and it knows
-    because it asked `WantsJSON`. A JSON-only route needs no `Vary`.
-  - **`Error` negotiates, `ErrorJSON` does not, and the route decides which.** Where a page and an API
-    share a URL, the browser JS reads the error with `resp.text()`, so a page caller wants `text/plain`.
-    Where the route only ever answers JSON, its success path is unconditional JSON and the error path has
-    to match: a caller that does not send `Accept` — a browser `fetch` reading `payload.error`, for one —
-    otherwise gets a body it cannot parse, and the server's message never reaches the user. That happened
-    once, which is why the two are separate functions rather than a flag.
-- **`serverrole`**: the `Role` vocabulary (`web` / `worker` / `both`) for deployments that run one image as
-  two Cloud Run services. It holds the words and `Parse`'s strictness, nothing else — the kit never branches
-  on a role, so which routes each face serves stays in the consuming app's router. Three apps had a
-  byte-identical copy of this type; the reason to share it is not the duplication but the decision inside
-  it (below), which is easier to keep right in one place than in three. Because `Role` is a defined string
-  type and nothing here dispatches on it, an app that wants a fourth role declares its own constant and
-  wraps `Parse` — no kit release needed.
-  - **`Role` implements `encoding.TextUnmarshaler` so the decoder enforces `Parse`.** Every app binds it
-    straight to `env:"SERVER_ROLE"`; without this the decoder happily assigns an unknown string, and if the
-    app then forgets its own `Parse` call, both `ServesWeb` and `ServesWorker` report false — a service that
-    starts and serves nothing. An unset value is the tag's job (`env:"SERVER_ROLE,required"`).
 - **`tasks`**: `Enqueuer[T]` — Cloud Tasks enqueue with the OIDC token setup folded in, so no caller
   assembles the auth block itself. `T` is the contract with `worker`.
   - **`EnqueueWithName` treats `ALREADY_EXISTS` as success**, so a retried enqueue creates one task. That
@@ -204,12 +178,6 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
 
 ### Security invariants worth preserving
 
-- **An unset server role is an error, never `both`.** `serverrole.Parse` rejects the empty string and any
-  unknown value. Defaulting to `both` would put worker routes back on a publicly reachable service the
-  moment one environment variable goes missing; accepting an unknown value deploys a service that serves
-  nothing. Both are startup failures on purpose — this is the same fail-closed stance as the empty
-  allowlists above.
-
 - **A verified OIDC signature does not identify the caller.** `audience` is an arbitrary string, so any
   service account in any GCP project can mint a token for it. Every inbound OIDC path therefore checks the
   `email` claim against an allowlist. There is one
@@ -253,9 +221,9 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
 
 ### Testing notes
 
-Coverage is roughly auth 81% / oidc 98% / session 91% / cloudlog 97% / cloudrun 98% / negotiate 100% /
-secureheaders 100% / serverrole 100% / tasks 87% / worker 96%. The uncovered remainder in `tasks` is the
-thin `*cloudtasks.Client` wrapper and `NewEnqueuer`, which need real GCP credentials.
+Coverage is roughly auth 81% / oidc 98% / session 91% / cloudlog 97% / cloudrun 94% / tasks 87% /
+worker 96%. The uncovered remainder in `tasks` is the thin `*cloudtasks.Client` wrapper and
+`NewEnqueuer`, which need real GCP credentials.
 
 Fuzz targets live in `auth/session/fuzz_test.go` (`FuzzIsSafeRelativePath`, `FuzzBuildLoginRedirectURL`) and
 `auth/oidc/fuzz_test.go` (`FuzzExtractBearerToken`), and run for 20s each in CI. Run them longer when

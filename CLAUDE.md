@@ -27,12 +27,20 @@ go test ./auth/... -run TestName -v   # run a single test
 go test ./... -cover            # per-package coverage summary
 golangci-lint run ./...         # lint (config: .golangci.yml; CI uses the shared workflow's pin)
 govulncheck ./...               # vulnerability scan (CI runs this too)
+go run golang.org/x/exp/cmd/gorelease@latest   # what broke since the last tag, and the next version
 ```
 
 CI (`.github/workflows/ci.yml`) is a thin caller of the shared `shouni/workflows/.github/workflows/go-ci.yml@v1`:
 build+vet+gofmt+race-tests, golangci-lint, govulncheck, and a fuzz job. **The fuzz targets are listed by
 package path in `ci.yml`** — move a fuzz test to another package and the job silently stops covering it, so
 update that list in the same commit. The Go version comes from `go.mod` (currently 1.27).
+
+**Run `gorelease` before tagging.** It compares the module against its last tag and says both what broke
+and what the next version has to be. v1.12.0 shipped with `session.WithCSRFToken` unexported -- the symbol
+looked unused because the count had excluded `_test.go`, and nobody saw it go until after the tag; this is
+the output that would have said so. It is a release step rather than a CI job because it only means
+anything at the moment the version is chosen, and because every repo here keeps `ci.yml` to the shared
+workflow and nothing else.
 
 ## Architecture
 

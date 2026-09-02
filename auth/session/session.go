@@ -56,6 +56,66 @@ func (h *Handler) fetchUserEmail(ctx context.Context, token *oauth2.Token) (stri
 	})
 }
 
+// IssueSession は、email を認証済みの本人としてセッションを発行します。
+// Callback がログイン成立時に行う保存と同じで、リダイレクトを書かない点だけが違います。
+//
+// 本人性は呼び出し元の責任です（ここでは検証しません）。許可リストの判定だけは
+// Callback と同じく必ず通り、許可されない相手には発行せずエラーを返します。
+//
+// 公開しているのは、認証済みの画面を確かめるテストが OAuth の往復を偽装せずに
+// ログイン状態を作れるようにするためです（WithCSRFToken と同じ理由）。
+func (h *Handler) IssueSession(w http.ResponseWriter, r *http.Request, email string) error {
+	if !h.isAuthorized(email) {
+		return fmt.Errorf("issue session: %q is not authorized", email)
+	}
+	_, err := h.issueSession(w, r, email)
+	return err
+}
+
+// issueSession は認証済みのセッションを保存し、ログイン後に戻る先を返します。
+// Callback と IssueSession でセッションの作り方が枝分かれしないよう、ここに集めます。
+func (h *Handler) issueSession(w http.ResponseWriter, r *http.Request, email string) (string, error) {
+	session, err := h.store.Get(r, h.sessionName)
+	if err != nil {
+		h.log().WarnContext(r.Context(), "セッションの取得に失敗したため、新規セッションを作成します", "error", err)
+	}
+	if session == nil {
+		return "", errors.New("session store returned nil session")
+	}
+
+	targetURL := "/"
+	if url, ok := session.Values[DefaultRedirectSessionKey].(string); ok {
+		delete(session.Values, DefaultRedirectSessionKey)
+		// 保存時にも検証済みですが、セッションの中身を信用せず読み出し時にも確認します。
+		if isSafeRelativePath(url) {
+			targetURL = url
+		}
+	}
+
+	// ログイン前のセッションに紐づく CSRF トークンは破棄し、認証済みセッション用に
+	// 再生成させます（ログイン前に固定されたトークンを使い回させないため）。
+	delete(session.Values, CSRFTokenKey)
+
+	// セッション ID も捨てて振り直させます（セッション固定攻撃対策）。
+	//
+	// 既定の CookieStore に ID の概念は無く、この行は無視されます。効くのは
+	// WithStore でサーバーサイドのストアを入れた構成で、そこでは ID がセッションの
+	// 識別子になるため、攻撃者が事前に仕込んだ ID のまま認証済みにしてしまうと、
+	// 攻撃者はその ID で被害者として振る舞えます。gorilla のストアは ID が空なら
+	// Save で新しい ID を生成する約束なので、捨てるだけで振り直されます。
+	//
+	// 古い ID の中身は消しません。認証前の値しか持たず、認証済みになることも
+	// ないためです（ストアの TTL で消えます）。消しにいくと同じ名前の Set-Cookie を
+	// 2 回出すことになり、ストア実装ごとの差が表に出ます。
+	session.ID = ""
+
+	session.Values[DefaultUserSessionKey] = email
+	if err := session.Save(r, w); err != nil {
+		return "", fmt.Errorf("save session: %w", err)
+	}
+	return targetURL, nil
+}
+
 // isAuthorized はメールアドレスが許可リストまたは許可ドメインに含まれるか判定します。
 func (h *Handler) isAuthorized(email string) bool {
 	normalizedEmail := strings.ToLower(email)

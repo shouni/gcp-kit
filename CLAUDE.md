@@ -91,6 +91,16 @@ workflow and nothing else.
   - `WithCSRFToken` is exported for tests that render a template without running a full authentication
     round-trip. It looked unused when the surface was trimmed because that count excluded `_test.go`;
     six sibling test files use it. **Count test files too before unexporting something.**
+  - **`IssueSession` is exported so no caller has to reimplement the session cookie.** It is
+    `Callback`'s save without the redirect — both entry points go through one unexported `issueSession`,
+    so the CSRF-token drop and the session-ID rotation cannot apply to one and not the other. Without it,
+    an app whose tests need a logged-in request builds its own `sessions.CookieStore` from the same keys
+    and writes `DefaultUserSessionKey` by hand, which is a copy of this package's internal format:
+    change how the cookie is written and that app's tests keep passing on a cookie the real `Handler` can
+    no longer read. adk-review had exactly that copy, and it is why the module carried a direct
+    `gorilla/sessions` requirement it did not otherwise need.
+    It does not verify identity — that is the caller's — but it does apply the allowlist, so the
+    fail-closed rule holds at both entry points.
 - **`auth/oidc`**: inbound OIDC Bearer verification for service-to-service calls, `Verifier`. **One type,
   not two** — `TaskVerifier` and `M2MVerifier` were two wrappers over one verifier whose only difference
   was how they were composed, and that difference now lives in `Require` vs `Protected`. It requires no

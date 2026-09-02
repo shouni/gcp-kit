@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-GCP Kit (`github.com/shouni/gcp-kit`) is a Go library (not a service) of seven independent packages for
+GCP Kit (`github.com/shouni/gcp-kit`) is a Go library (not a service) of eight independent packages for
 building Cloud Run + Cloud Tasks apps on GCP: Google OAuth2 session auth plus inbound OIDC verification,
-a generic Cloud Tasks enqueuer, a generic Cloud Tasks worker handler, Cloud Logging-compatible
-structured logging, and the serving lifecycle and health path. Each package is meant to be imported
-independently.
+a generic Cloud Tasks enqueuer, a generic Cloud Tasks worker handler, Firestore-backed job status and
+history, Cloud Logging-compatible structured logging, and the serving lifecycle and health path. Each
+package is meant to be imported independently.
 
 The three packages that never depended on GCP — response writing plus `Accept` negotiation, browser-facing
 response headers, and the web/worker role vocabulary — now live in `github.com/shouni/go-serve-kit`
@@ -34,6 +34,11 @@ CI (`.github/workflows/ci.yml`) is a thin caller of the shared `shouni/workflows
 build+vet+gofmt+race-tests, golangci-lint, govulncheck, and a fuzz job. **The fuzz targets are listed by
 package path in `ci.yml`** — move a fuzz test to another package and the job silently stops covering it, so
 update that list in the same commit. The Go version comes from `go.mod` (currently 1.27).
+
+**Two breaking changes shipped in minor versions**, both in `auth/session` (`WithStore`'s signature, then
+its removal along with `WithSessionMaxAge` and two `Config` fields). `gorelease` said v2 both times; taking
+it would have rewritten the import path in 7 apps and 58 files, for API that nothing in the fleet called.
+Check what actually calls the API before using this as precedent.
 
 **Run `gorelease` before tagging.** It compares the module against its last tag and says both what broke
 and what the next version has to be. v1.12.0 shipped with `session.WithCSRFToken` unexported -- the symbol
@@ -77,8 +82,22 @@ workflow and nothing else.
   (session auth, CSRF verification, CSRF context), and `Challenge` decides the response — a redirect when
   the session is missing or the address fell off the allowlist, **403 when Origin or CSRF verification
   failed**. Redirecting the latter would hide whether a forged request was rejected or waved through.
-  - Authorization is re-evaluated on **every** request, not once at login (see the security invariants below
-    for why the default `CookieStore` forces this).
+  - Authorization is re-evaluated on **every** request, not once at login. It is what evicts an address
+    removed from the allowlist without having to find that person's stored session, and it costs one map
+    lookup.
+  - **The session lives server-side; the cookie carries an opaque ID and nothing else.** So there are no
+    session keys to configure and no cookie crypto to get wrong, and `Logout`, revocation and the ID
+    rotation in `issueSession` all actually take effect. `Session.Values` is `map[string]string` because
+    this package stores three values, all strings.
+  - **`Config.Store` is required and has no default.** An in-process default would give each Cloud Run
+    instance its own sessions and would look fine in development, where there is one instance.
+    `NewMemoryStore` is opt-in and says what it is for.
+  - **A store must not adopt an ID it cannot find.** The ID arrives in a cookie, so it is
+    attacker-controlled; writing a session under an unknown ID lets an attacker choose the victim's session
+    identifier. `Get` leaves the ID empty when there is no stored session and lets `Save` mint one.
+  - **Expiry is checked on read, not left to Firestore's TTL policy**, which deletes up to 24 hours late.
+    The policy still has to exist, or sessions accumulate forever — unlike cookies, stored sessions do not
+    expire themselves.
   - CSRF tokens are minted on GET only. Minting on a state-changing request would hand a valid token to a
     request that arrived without one.
   - Required settings are `Config` fields; everything optional is a `With*` option, matching how
@@ -91,6 +110,11 @@ workflow and nothing else.
   - `WithCSRFToken` is exported for tests that render a template without running a full authentication
     round-trip. It looked unused when the surface was trimmed because that count excluded `_test.go`;
     six sibling test files use it. **Count test files too before unexporting something.**
+  - **`IssueSession` is `Callback`'s save without the redirect**, exported so no caller reimplements it.
+    Both entry points go through one unexported `issueSession`, so the CSRF-token drop and the ID rotation
+    cannot apply to one and not the other. Without it an app's tests build their own store and write
+    `DefaultUserSessionKey` by hand — a copy of this package's format that keeps passing after the format
+    changes. It does not verify identity (the caller's job) but does apply the allowlist.
 - **`auth/oidc`**: inbound OIDC Bearer verification for service-to-service calls, `Verifier`. **One type,
   not two** — `TaskVerifier` and `M2MVerifier` were two wrappers over one verifier whose only difference
   was how they were composed, and that difference now lives in `Require` vs `Protected`. It requires no
@@ -157,6 +181,20 @@ workflow and nothing else.
   - **The pprof goroutine label goes on with `pprof.Do`, never `SetGoroutineLabels` alone.** The latter does
     not restore on return, so net/http's keep-alive connection goroutine carries the previous task's name
     into the next request — and a traceback naming the wrong task is worse than one naming none.
+- **`jobstatus`**: `Status`/`Recorder`/`StatusStore` — recording an async job's progress as a Firestore
+  document, and listing history by query. Completes the trio with `tasks` (enqueue) and `worker` (receive).
+  It was its own module, `go-job-firestore`, until it moved here: a Firestore adapter is GCP-specific, and
+  this repo's boundary rule is exactly that — the three packages that never depended on GCP were moved
+  *out*, to `go-serve-kit`.
+  - **The motive is the cost of listing, not atomicity.** It uses no transactions. With
+    `PIPELINE_TIMEOUT < dispatch deadline <= Cloud Run timeout` holding, redelivery arrives serially, so a
+    read-then-write rerun guard has no concurrent rival. What it replaces is walking a bucket prefix,
+    sorting job IDs in memory, and hiding the cost behind a cache — all workarounds for having no query.
+  - **It shares its name with `go-job-kit`'s `jobstatus`, deliberately.** They are two implementations of
+    one concept — Firestore here, object storage there — and the fleet splits cleanly along that line: the
+    apps whose artifacts live in a bucket take the go-job-kit one, the media-generation apps take this one.
+    No app uses both. Same name, different import path, is what `math/rand` and `crypto/rand` do. Check
+    that "no app uses both" still holds before adding a third.
 
 ### File layout inside `auth`
 
@@ -175,12 +213,17 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
 
 ### Conventions used throughout
 
+- **The README's feature list carries only what is expensive not to know.** Signatures belong in godoc and
+  reasoning belongs in this file; a bullet that restates an API is noise, and the list stops being read at
+  all once it reads like a reference. This rule used to sit in the README itself, addressed to readers who
+  are not the ones it constrains.
+
 - **Fail-closed by default**: empty allowlists (`session.Handler.allowedEmails`/`allowedDomains`,
   `oidc.Verifier.allowed`) deny everything rather than allow everything. Preserve this when touching
   authorization logic. `toLowerMap` drops whitespace-only entries so a list can't be "non-empty but allows
   nobody".
-- **Optional settings get defaults, not errors**: what `WithPaths`, `WithSessionMaxAge`, `WithStore` and
-  `WithLogger` set is zero-value-safe. Tests build `Handler{}` struct literals directly, so read these
+- **Optional settings get defaults, not errors**: what `WithPaths`, `WithStateMaxAge` and `WithLogger` set
+  is zero-value-safe. Tests build `Handler{}` struct literals directly, so read these
   through the accessors (`h.loginPath()`, `h.log()`) rather than the raw `cfg*` fields.
 - **Config structs + `validateConfig`**: every package entry point (`session.New`, `tasks.NewEnqueuer`)
   takes a `Config` struct and validates required fields / URL shape eagerly at construction time, not at
@@ -209,11 +252,10 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
   implementation — `oidc.Verifier` — specifically so one caller shape can't be hardened while the other
   drifts. Don't reintroduce a second verification path, and don't add a third entry point.
 - **Authorization is evaluated per request, not once at login.** `Handler.Authenticate` re-checks
-  `isAuthorized(email)` on every request, not just in `Callback`. The default `CookieStore` makes the cookie
-  itself the session, so there is nothing to revoke server-side; if the allowlist were only consulted at login,
-  an address removed from `AllowedEmails`/`AllowedDomains` would keep full access until the cookie expired
-  (7 days by default). Re-checking is what makes the allowlist an actual eviction mechanism, and it costs one
-  map lookup. `TestMiddlewareRejectsRevokedSession` guards it. Tests that drive an authenticated request
+  `isAuthorized(email)` on every request, not just in `Callback`. If the allowlist were only consulted at
+  login, an address removed from `AllowedEmails`/`AllowedDomains` would keep full access until the session
+  expired (7 days by default) — deleting the stored session would work, but that requires knowing which one.
+  Re-checking is what makes the allowlist an eviction mechanism on its own, and it costs one map lookup. `TestMiddlewareRejectsRevokedSession` guards it. Tests that drive an authenticated request
   through `Authenticate` must therefore give their `Handler` an allowlist (`testAllowedDomains()`).
 - **An empty allowlist means "verify nothing successfully", not "allow everyone".** `Verifier.Configured()`
   reports false without both an audience and a non-empty allowlist, and `auth.Require` then answers
@@ -232,9 +274,8 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
   protocol-relative to browsers), plus backslashes and control characters. `FuzzIsSafeRelativePath` and
   `FuzzBuildLoginRedirectURL` guard the invariant; `auth/session/testdata/fuzz/` holds regression seeds.
 - **The session ID is dropped at login so the store issues a new one.** `saveSessionAndRedirect` sets
-  `session.ID = ""` before saving. The default `CookieStore` has no ID and ignores it; this exists for the
-  server-side store `WithStore` advertises, where the cookie carries only an ID. Keeping the ID a login
-  hands an attacker who planted one a session that is now authenticated as the victim. The old entry is
+  `session.ID = ""` before saving, and `Save` mints a new one. Keeping the ID a login hands an attacker who
+  planted one a session that is now authenticated as the victim. The old entry is
   left to expire rather than deleted — it only ever held pre-login values, and deleting it would mean
   emitting two `Set-Cookie` headers for one name, which stores handle differently.
   `TestSaveSessionAndRedirectRotatesSessionID` guards it with a store that mimics the ID contract.

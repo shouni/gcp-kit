@@ -12,7 +12,7 @@ import (
 // newCSRFTestHandler は、セッションストアだけを備えた Handler を返します。
 // OAuth 設定は CSRF の経路に関係しないため設定しません。
 func newCSRFTestHandler() *Handler {
-	return &Handler{store: newTestCookieStore(), sessionName: "test-session", allowedDomains: testAllowedDomains()}
+	return &Handler{store: newTestStore(), sessionName: "test-session", allowedDomains: testAllowedDomains()}
 }
 
 func TestAuthenticatePutsCSRFTokenOnContext(t *testing.T) {
@@ -100,8 +100,8 @@ func loginSessionCookie(t *testing.T, h *Handler, email string) *http.Cookie {
 		t.Fatalf("store.Get() error = %v", err)
 	}
 	session.Values[DefaultUserSessionKey] = email
-	if err := session.Save(req, rec); err != nil {
-		t.Fatalf("session.Save() error = %v", err)
+	if err := h.store.Save(req, rec, session); err != nil {
+		t.Fatalf("store.Save() error = %v", err)
 	}
 
 	cookies := rec.Result().Cookies()

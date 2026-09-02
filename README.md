@@ -10,23 +10,26 @@
 
 ## 🚀 概要 (About) - Cloud Run と Cloud Tasks を使った開発を最速の軌道へ
 
-**GCP Kit** は、Cloud Run 上の Go サービスが毎回書く定型（認証・レスポンスヘッダー・起動と正常停止・Cloud Tasks の投入と受信）を引き受けるツールキットです。
+**GCP Kit** は、Cloud Run 上の Go サービスが毎回書く定型（認証・構造化ログ・起動と正常停止・Cloud Tasks の投入と受信・ジョブ状態の記録）を引き受けるツールキットです。
+
+レスポンス書き込みと `Accept` 判定・防御ヘッダー・web/worker の役割語彙は、GCP に依存しないため
+[go-serve-kit](https://github.com/shouni/go-serve-kit) にあります。
 
 ---
 
 ## ✨ 提供機能 (Features)
 
-パッケージは独立しており、必要なものだけを import できます。ここに挙げるのは
-**知らずに踏むと高くつく前提**だけです。API の詳細と個々の判断理由は各パッケージの godoc にあります。
-
 * **`auth`**: 「誰として通すか」の契約（`Authenticator`）と合成（標準ライブラリのみ）
-  * 人は `auth/session`、サービスは `auth/oidc` が実装します。合成は `Require`（サービス専用ルート）と
-    `Protected`（人もサービスも来るルート）が引き受けます。
-  * 落ち方の一覧は「認証の応答」を参照してください。
+  * 人は `auth/session`、サービスは `auth/oidc` が実装します。合成の違いは**フォールバックの有無**で、
+    `Require` は 1 つの方式で落ちたら止まり、`Protected` は方式を順に試して最初に成立したもので通します
+    （方式が 1 つでも構いません）。
+  * 落ち方の一覧は[認証の応答](#-認証の応答-auth-responses)にあります。
 * **`auth/session`**: Google OAuth2 ログイン（PKCE）・セッション・CSRF
   * 許可はドメイン / メールアドレスのリストで、**空のリストは「全部拒否」です**。判定は毎リクエスト
     行うため、リストから外せばその場で締め出せます。
-  * 既定は Cookie ストア。サーバー側で失効させたい場合は `WithStore` にサーバーサイドのストアを渡します。
+  * **セッションの実体はサーバー側にあり、クッキーが運ぶのは不透明な ID だけです。** 署名も暗号化も
+    要らないので、セッション鍵の設定はありません。代わりに `Logout` と失効が実際に効きます。
+    保存先は `Config.Store` で必須です（`NewFirestoreStore` / テストとローカルには `NewMemoryStore`）。
   * **`WithPrompt(session.PromptSelectAccount)` を渡さないと、ログアウトが効いて見えません。**
     `Logout` が消せるのはこのアプリのクッキーだけで、Google 側のセッションは残るためです。
 * **`auth/oidc`**: サービス間呼び出しの受信検証（`Verifier`）
@@ -44,23 +47,26 @@
     待つ、という迂回が要りません）。
   * `WriteTimeout` に既定値を置きません（worker は数分かかることがあるため）。`ReadHeaderTimeout` は 5 秒です。
 * **`tasks`**: Cloud Tasks エンキュー（`Enqueuer[T]`）
-  * **`T` は投入側と受信側で揃える規約で、型による強制ではありません。** `worker.Handler[T]` に
-    同じ型を渡すのは呼び出し側の責任で、両者は別パッケージなのでコンパイラは結びつけません
-    （`worker` が `tasks` に依存しないのは、Worker 単体プロセスに Cloud Tasks クライアントを
-    積ませないためです）。`T` が効くのは、アプリ内で `Enqueue` に渡す値の型が固定される範囲までです。
   * OIDC トークンの設定を内側に隠します。`EnqueueWithName` は決定的な名前で投入し、`ALREADY_EXISTS` を
     成功として扱います（防げるのは重複した「投入」までで、重複「配信」は worker 側の冪等性が受け持ちます）。
   * **`DispatchDeadline` は「ワーカーの実行時間の実効上限」です。** 未指定だと Cloud Tasks の既定 10 分が
     上限になり、Cloud Run の `timeout` を伸ばしても超えられません。アプリ側の全体タイムアウトは
     これより短く取ってください。
+  * **`T` は `worker.Handler[T]` と揃える規約で、型による強制ではありません。** 別パッケージなので
+    コンパイラは両者を結びつけません（`worker` を独立させているのは、Worker 単体プロセスに
+    Cloud Tasks クライアントを積ませないためです）。
 * **`worker`**: Cloud Tasks 向けハンドラー（`Handler[T]`）
   * ペイロードをデコードして `TaskExecutor[T]` へ渡し、エラーを Cloud Tasks の再試行仕様に沿った
     状態コードへ写します。リトライしても直らない失敗は `worker.ErrPermanent` でラップして打ち切れます。
   * `MetadataFromContext` で再試行回数やタスク名を参照でき、at-least-once 配信に対して冪等に書けます。
     値は Cloud Tasks が付けるヘッダーそのものなので、**呼び出し元の確認は `auth.Require` の役目**です。
-  * **デコードは既定で寛容（未知フィールドを無視）です。`WithStrictJSON` を安易に既定にしないでください。**
-    Web 面と Worker 面は別サービスなので、ローリングデプロイ中は新しい側が足したフィールドが古い側へ
-    届きます。厳格化すると 400 になり、**Cloud Tasks はリトライせずタスクを破棄**します。
+  * **デコードが既定で寛容なのは、ローリングデプロイ中の型のずれを生かすためです。** `WithStrictJSON`
+    を既定にすると 400 になり、**Cloud Tasks は 4xx をリトライせずタスクを破棄**します。
+* **`jobstatus`**: Firestore による進行状況の記録と履歴（`Status` / `Recorder` / `StatusStore`）
+  * `tasks`（投入）・`worker`（受信）に対する「記録」で、三点が揃います。**トランザクションは
+    使いません**（詳細は CLAUDE.md）。
+  * `go-job-kit` の `jobstatus` と**同名なのは意図的です**。1 つの概念の 2 実装（Firestore とオブジェクト
+    ストレージ）で、併用するアプリはありません。`math/rand` と `crypto/rand` と同じ関係です。
 
 ---
 
@@ -75,8 +81,15 @@
 | トークンが不正 | 401 `error="invalid_token"` | 同左 |
 | 呼び出し元が許可リストに無い | 403 `error="insufficient_scope"` | 同左 |
 | 検証器が未設定 | 302 / 401（ログに記録） | 500 |
+| 状態変更で Origin が一致しない | 403 `Invalid origin` | — |
+| 状態変更で CSRF トークンが不正 | 403 `Invalid CSRF token` | — |
+
+**下 2 行をリダイレクトにしません。** 偽造されたリクエストが素通りしたのか拒否されたのかを、
+利用者からも運用からも区別できなくなるためです。判定は POST / PUT / DELETE / PATCH にだけ掛かり、
+Bearer だけを受けるルート（`Require`）はセッションを見ないので該当しません。
 
 状態コードは RFC 6750, Section 3.1、`WWW-Authenticate` の付与は RFC 9110, Section 15.5.2 に従います。
+これ以外の予期しない失敗は 500 になります。
 
 ---
 
@@ -87,15 +100,24 @@
 ### 1. 人（ブラウザ）を通す
 
 ```go
+// セッション用のデータベースは、ジョブ状態用とは別に取ります（名前は識別子で後から
+// 変えられないため、片方の名前がもう片方の実態と合わなくなります）。
+fsClient, err := firestore.NewClientWithDatabase(ctx, projectID, "sessions")
+
+store, err := session.NewFirestoreStore(session.FirestoreConfig{
+    Client:      fsClient,
+    Collection:  "sessions",
+    StoreConfig: session.StoreConfig{Secure: true},
+})
+
 sessionHandler, err := session.New(session.Config{
-    ClientID:          os.Getenv("GOOGLE_CLIENT_ID"),
-    ClientSecret:      os.Getenv("GOOGLE_CLIENT_SECRET"),
-    RedirectURL:       serviceURL + "/auth/callback",
-    SessionAuthKey:    os.Getenv("SESSION_SECRET"),        // 16バイト以上
-    SessionEncryptKey: os.Getenv("SESSION_ENCRYPT_KEY"),   // 16/24/32バイト
-    SessionName:       "app-session",
-    IsSecureCookie:    true,
-    AllowedDomains:    []string{"example.com"},
+    ClientID:       os.Getenv("GOOGLE_CLIENT_ID"),
+    ClientSecret:   os.Getenv("GOOGLE_CLIENT_SECRET"),
+    RedirectURL:    serviceURL + "/auth/callback",
+    SessionName:    "app-session",
+    Store:          store,
+    IsSecureCookie: true,
+    AllowedDomains: []string{"example.com"},
 })
 ```
 
@@ -116,10 +138,9 @@ if !taskVerifier.Configured() || !apiVerifier.Configured() {
 
 ### 3. ルーティング
 
-役割は明示が必須です。未設定を `both` に落とすと、公開側に worker のルートが復活します。
+ルートは 3 つの形に分かれます。人だけが来るか、人とサービスの両方が来るか、サービスしか来ないかです。
 
 ```go
-role, err := serverrole.Parse(os.Getenv("SERVER_ROLE")) // go-serve-kit
 mux := http.NewServeMux()
 mux.HandleFunc(cloudrun.HealthPath, cloudrun.Health) // "/healthz" は Cloud Run に横取りされます
 mux.Handle("GET /auth/login", http.HandlerFunc(sessionHandler.Login))
@@ -130,10 +151,8 @@ mux.Handle("/private", auth.Protected(sessionHandler)(privateHandler))
 // 人もエージェントも来るルート。有効な Bearer はセッションと CSRF をバイパスし、
 // それ以外はログインへ回ります（人向けの方式が最後だから）。
 mux.Handle("/api/", auth.Protected(apiVerifier, sessionHandler)(http.HandlerFunc(apiHandler)))
-if role.ServesWorker() {
-    // サービスしか来ないルート。失敗はフォールバックせず 401/403 で止まります。
-    mux.Handle("POST /tasks/run", auth.Require(taskVerifier)(workerHandler))
-}
+// サービスしか来ないルート。失敗はフォールバックせず 401/403 で止まります。
+mux.Handle("POST /tasks/run", auth.Require(taskVerifier)(workerHandler))
 ```
 
 ### 4. 起動
@@ -144,16 +163,13 @@ ctx が終わるまで動かし、猶予内に止まらなければ強制的に�
 ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 defer stop()
 
-handler := secureheaders.Middleware(secureheaders.Config{ // go-serve-kit
-    MediaSources: []string{"https://storage.googleapis.com"}, // 署名付き URL へ 302 する場合
-})(mux)
-
-return cloudrun.Serve(ctx, cloudrun.Config{Port: os.Getenv("PORT"), Handler: handler})
+return cloudrun.Serve(ctx, cloudrun.Config{Port: os.Getenv("PORT"), Handler: mux})
 ```
 
 より詳しい例は [pkg.go.dev の Example](https://pkg.go.dev/github.com/shouni/gcp-kit) を参照してください。
 
 ---
+
 ## 🏗 プロジェクトレイアウト (Project Layout)
 
 ```text
@@ -163,8 +179,9 @@ gcp-kit/
 │   └── oidc/       # サービス: 受信 OIDC Bearer の検証
 ├── cloudlog/       # Cloud Logging 互換の slog 設定とトレース相関
 ├── cloudrun/       # /health の公開と、起動から正常停止まで
-├── tasks/          # Cloud Tasks への型安全な投入（Generics）
-└── worker/         # Cloud Tasks からの受信ハンドラー（Generics）
+├── tasks/          # Cloud Tasks への投入（Enqueuer[T]）
+├── worker/         # Cloud Tasks からの受信ハンドラー（Handler[T]）
+└── jobstatus/      # Firestore による進行状況の記録と履歴
 ```
 
 ---
@@ -173,7 +190,7 @@ gcp-kit/
 
 * `cloud.google.com/go/cloudtasks`: Cloud Tasks 操作
 * `golang.org/x/oauth2`: Google OAuth2 フロー
-* `github.com/gorilla/sessions`: セッション管理の実装
+* `cloud.google.com/go/firestore`: セッションとジョブ状態の保存
 * `google.golang.org/api/idtoken`: Google OIDC トークンの検証
 * `github.com/shouni/go-utils`: `slogctx` によるログ属性の引き回し（`cloudlog`）
 

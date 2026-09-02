@@ -172,7 +172,7 @@ func TestFetchUserEmail(t *testing.T) {
 func TestClearSessionCookie(t *testing.T) {
 	t.Parallel()
 
-	store := newTestCookieStore()
+	store := newTestStore()
 	h := &Handler{store: store, sessionName: "test-session"}
 	req := httptest.NewRequest(http.MethodGet, "/x", nil)
 	rr := httptest.NewRecorder()
@@ -202,10 +202,9 @@ func TestClearSessionCookieSaveError(t *testing.T) {
 	}
 }
 
-// TestClearSessionCookieNilSession guards against a Store implementation
-// that (unlike gorilla's own CookieStore) returns a nil session alongside an
-// error from Get: without the nil check, this would panic on
-// session.Options.MaxAge instead of returning an error.
+// TestClearSessionCookieNilSession guards against a Store that returns a nil
+// session alongside an error from Get: without the nil check this would panic
+// on session.Options.MaxAge instead of returning an error.
 func TestClearSessionCookieNilSession(t *testing.T) {
 	t.Parallel()
 
@@ -235,5 +234,118 @@ func TestRandomTokenAndGenerateState(t *testing.T) {
 	}
 	if state == "" {
 		t.Fatal("generateState() returned empty string")
+	}
+}
+
+// TestIssueSessionProducesAcceptedCookie は、IssueSession が出したクッキーを
+// Authenticate がそのまま受け付けることを確認します。この往復が IssueSession の
+// 存在理由なので、クッキーの作り方を変えたらここが壊れます。
+func TestIssueSessionProducesAcceptedCookie(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{store: newTestStore(), sessionName: "test-session", allowedDomains: testAllowedDomains()}
+
+	rr := httptest.NewRecorder()
+	if err := h.IssueSession(rr, httptest.NewRequest(http.MethodGet, "/", nil), "user@example.com"); err != nil {
+		t.Fatalf("IssueSession() error = %v", err)
+	}
+	cookies := rr.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("IssueSession() がセッションクッキーを出していません")
+	}
+	// リダイレクトを書くと、ハンドラーの前でログイン状態を作る用途に使えません。
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	ctx, err := h.Authenticate(httptest.NewRecorder(), req)
+	if err != nil {
+		t.Fatalf("Authenticate() error = %v", err)
+	}
+	if email, ok := EmailFromContext(ctx); !ok || email != "user@example.com" {
+		t.Errorf("EmailFromContext() = %q, %v; want %q, true", email, ok, "user@example.com")
+	}
+}
+
+// TestIssueSessionFailsClosed は、許可リストに無いアドレスと許可リストが空の
+// Handler の両方で、セッションを発行しないことを確認します。
+func TestIssueSessionFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		handler *Handler
+		email   string
+	}{
+		"許可リストに無いアドレス": {
+			handler: &Handler{store: newTestStore(), sessionName: "test-session", allowedDomains: testAllowedDomains()},
+			email:   "intruder@evil.example",
+		},
+		"許可リストが空": {
+			handler: &Handler{store: newTestStore(), sessionName: "test-session"},
+			email:   "user@example.com",
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			rr := httptest.NewRecorder()
+			if err := tt.handler.IssueSession(rr, httptest.NewRequest(http.MethodGet, "/", nil), tt.email); err == nil {
+				t.Fatal("セッションが発行されました")
+			}
+			if got := rr.Result().Cookies(); len(got) != 0 {
+				t.Errorf("エラーを返しつつクッキーを出しています: %v", got)
+			}
+		})
+	}
+}
+
+// TestIssueSessionRotatesSessionID は、IssueSession も Callback と同じくセッション ID を
+// 振り直すことを確認します。TestSaveSessionAndRedirectRotatesSessionID と対で、
+// 2 つの入口が同じ issueSession を通ることを振る舞いで固定します。
+func TestIssueSessionRotatesSessionID(t *testing.T) {
+	t.Parallel()
+
+	const (
+		plantedID = "attacker-known-id"
+		email     = "user@example.com"
+	)
+
+	store := newIDStore()
+	store.saved[plantedID] = map[string]string{CSRFTokenKey: "token-fixed-before-login"}
+
+	h := &Handler{store: store, sessionName: "test-session", allowedDomains: testAllowedDomains()}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: "test-session", Value: plantedID})
+
+	if err := h.IssueSession(httptest.NewRecorder(), req, email); err != nil {
+		t.Fatalf("IssueSession() error = %v", err)
+	}
+
+	if values, ok := store.saved[plantedID]; ok {
+		if _, authenticated := values[DefaultUserSessionKey]; authenticated {
+			t.Error("攻撃者が知っている ID がそのまま認証済みになりました（セッション固定）")
+		}
+	}
+
+	var newValues map[string]string
+	for id, values := range store.saved {
+		if id == plantedID {
+			continue
+		}
+		if values[DefaultUserSessionKey] == email {
+			newValues = values
+		}
+	}
+	if newValues == nil {
+		t.Fatalf("新しい ID で認証済みセッションが保存されていません: %v", store.saved)
+	}
+	if _, ok := newValues[CSRFTokenKey]; ok {
+		t.Error("ログイン前の CSRF トークンが認証済みセッションへ持ち越されました")
 	}
 }

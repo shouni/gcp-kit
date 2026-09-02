@@ -132,7 +132,7 @@ func TestLoginRejectsBackslashRedirect(t *testing.T) {
 
 	h := &Handler{
 		oauthConfig: &oauth2.Config{ClientID: "client-id"},
-		store:       newTestCookieStore(),
+		store:       newTestStore(),
 		sessionName: "test-session",
 	}
 

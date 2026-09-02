@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/gorilla/sessions"
 	"golang.org/x/oauth2"
 
 	"github.com/shouni/gcp-kit/auth"
@@ -56,6 +55,61 @@ func (h *Handler) fetchUserEmail(ctx context.Context, token *oauth2.Token) (stri
 	})
 }
 
+// IssueSession は、email を認証済みの本人としてセッションを発行します。
+// Callback がログイン成立時に行う保存と同じで、リダイレクトを書かない点だけが違います。
+//
+// 本人性は呼び出し元の責任です（ここでは検証しません）。許可リストの判定だけは
+// Callback と同じく必ず通り、許可されない相手には発行せずエラーを返します。
+//
+// 公開しているのは、認証済みの画面を確かめるテストが OAuth の往復を偽装せずに
+// ログイン状態を作れるようにするためです（WithCSRFToken と同じ理由）。
+func (h *Handler) IssueSession(w http.ResponseWriter, r *http.Request, email string) error {
+	if !h.isAuthorized(email) {
+		return fmt.Errorf("issue session: %q is not authorized", email)
+	}
+	_, err := h.issueSession(w, r, email)
+	return err
+}
+
+// issueSession は認証済みのセッションを保存し、ログイン後に戻る先を返します。
+// Callback と IssueSession でセッションの作り方が枝分かれしないよう、ここに集めます。
+func (h *Handler) issueSession(w http.ResponseWriter, r *http.Request, email string) (string, error) {
+	session, err := h.store.Get(r, h.sessionName)
+	if err != nil {
+		h.log().WarnContext(r.Context(), "セッションの取得に失敗したため、新規セッションを作成します", "error", err)
+	}
+	if session == nil {
+		return "", errors.New("session store returned nil session")
+	}
+
+	targetURL := "/"
+	if url, ok := session.Values[DefaultRedirectSessionKey]; ok {
+		delete(session.Values, DefaultRedirectSessionKey)
+		// 保存時にも検証済みですが、セッションの中身を信用せず読み出し時にも確認します。
+		if isSafeRelativePath(url) {
+			targetURL = url
+		}
+	}
+
+	// ログイン前のセッションに紐づく CSRF トークンは破棄し、認証済みセッション用に
+	// 再生成させます（ログイン前に固定されたトークンを使い回させないため）。
+	delete(session.Values, CSRFTokenKey)
+
+	// ID も捨てて振り直させます（セッション固定攻撃対策）。攻撃者が仕込んだ ID の
+	// まま認証済みにすると、その ID で被害者として振る舞えます。空の ID には Save が
+	// 新しい ID を振ります（Store を参照）。
+	//
+	// 古い実体は消しません。認証前の値しか持たず、認証済みになることもないので、
+	// TTL に任せます。
+	session.ID = ""
+
+	session.Values[DefaultUserSessionKey] = email
+	if err := h.store.Save(r, w, session); err != nil {
+		return "", fmt.Errorf("save session: %w", err)
+	}
+	return targetURL, nil
+}
+
 // isAuthorized はメールアドレスが許可リストまたは許可ドメインに含まれるか判定します。
 func (h *Handler) isAuthorized(email string) bool {
 	normalizedEmail := strings.ToLower(email)
@@ -79,7 +133,8 @@ func (h *Handler) isAuthorized(email string) bool {
 	return ok
 }
 
-// clearSessionCookie はセッションクッキーを無効化（削除）します。
+// clearSessionCookie はセッションを破棄します。MaxAge を負にして Save へ渡すので、
+// クッキーの無効化と保存された実体の削除が同時に起きます。
 func (h *Handler) clearSessionCookie(w http.ResponseWriter, r *http.Request) error {
 	session, err := h.store.Get(r, h.sessionName)
 	if err != nil {
@@ -89,11 +144,11 @@ func (h *Handler) clearSessionCookie(w http.ResponseWriter, r *http.Request) err
 		return errors.New("session store returned nil session")
 	}
 	if session.Options == nil {
-		session.Options = &sessions.Options{Path: "/"}
+		session.Options = &Options{Path: "/"}
 	}
 
 	session.Options.MaxAge = -1 // クッキーを即時期限切れにする
-	if err := session.Save(r, w); err != nil {
+	if err := h.store.Save(r, w, session); err != nil {
 		h.log().ErrorContext(r.Context(), "Failed to save session for clearing cookie", "error", err)
 		return err // エラーを呼び出し元に返す
 	}

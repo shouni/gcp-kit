@@ -4,8 +4,6 @@ import (
 	"log/slog"
 	"strings"
 	"time"
-
-	"github.com/gorilla/sessions"
 )
 
 // Option は Handler の任意設定です。
@@ -13,24 +11,21 @@ import (
 type Option func(*options)
 
 type options struct {
-	scopes        []string
-	loginPath     string
-	callbackPath  string
-	logoutPath    string
-	sessionMaxAge time.Duration
-	stateMaxAge   time.Duration
-	store         sessions.Store
-	logger        *slog.Logger
-	prompt        Prompt
+	scopes       []string
+	loginPath    string
+	callbackPath string
+	logoutPath   string
+	stateMaxAge  time.Duration
+	logger       *slog.Logger
+	prompt       Prompt
 }
 
 func newOptions(opts []Option) *options {
 	o := &options{
-		loginPath:     DefaultLoginPath,
-		callbackPath:  DefaultCallbackPath,
-		logoutPath:    DefaultLogoutPath,
-		sessionMaxAge: defaultSessionMaxAge,
-		stateMaxAge:   defaultStateMaxAge,
+		loginPath:    DefaultLoginPath,
+		callbackPath: DefaultCallbackPath,
+		logoutPath:   DefaultLogoutPath,
+		stateMaxAge:  defaultStateMaxAge,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -70,35 +65,12 @@ func WithPaths(loginPath, callbackPath, logoutPath string) Option {
 	}
 }
 
-// WithSessionMaxAge はセッションクッキーの有効期間を指定します（既定: 7日）。
-// 負値以下は無視されます。
-func WithSessionMaxAge(d time.Duration) Option {
-	return func(o *options) {
-		if d > 0 {
-			o.sessionMaxAge = d
-		}
-	}
-}
-
 // WithStateMaxAge は state / PKCE クッキーの有効期間を指定します（既定: 10分）。
 // 負値以下は無視されます。
 func WithStateMaxAge(d time.Duration) Option {
 	return func(o *options) {
 		if d > 0 {
 			o.stateMaxAge = d
-		}
-	}
-}
-
-// WithStore はセッションストアを注入します。
-//
-// 未指定の場合は Config のキーから sessions.CookieStore が生成されます。
-// クッキー自体がセッションの実体になるため、サーバー側から失効させられません。
-// ログアウトを確実に反映したい場合は Redis 等のストアを渡してください。
-func WithStore(store sessions.Store) Option {
-	return func(o *options) {
-		if store != nil {
-			o.store = store
 		}
 	}
 }

@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gorilla/sessions"
 	"golang.org/x/oauth2"
 )
 
@@ -42,7 +41,7 @@ func newCallbackTestHandler(t *testing.T, tokenHandler, userInfoHandler http.Han
 				TokenURL: server.URL + "/token",
 			},
 		},
-		store:          newTestCookieStore(),
+		store:          newTestStore(),
 		sessionName:    "test-session",
 		allowedDomains: map[string]struct{}{"example.com": {}},
 	}
@@ -68,9 +67,9 @@ func jsonUserInfoResponse(email string, verified bool) http.HandlerFunc {
 func TestLogin(t *testing.T) {
 	t.Parallel()
 
-	newHandler := func(store sessions.Store) *Handler {
+	newHandler := func(store Store) *Handler {
 		if store == nil {
-			store = newTestCookieStore()
+			store = newTestStore()
 		}
 		return &Handler{
 			oauthConfig: &oauth2.Config{
@@ -133,7 +132,7 @@ func TestLogin(t *testing.T) {
 		if err != nil {
 			t.Fatalf("store.Get() error = %v", err)
 		}
-		if got, _ := session.Values[DefaultRedirectSessionKey].(string); got != "/private" {
+		if got := session.Values[DefaultRedirectSessionKey]; got != "/private" {
 			t.Fatalf("redirect session value = %q, want %q", got, "/private")
 		}
 	})
@@ -472,7 +471,7 @@ func TestSaveSessionAndRedirect(t *testing.T) {
 
 	t.Run("defaults to root", func(t *testing.T) {
 		t.Parallel()
-		store := newTestCookieStore()
+		store := newTestStore()
 		h := &Handler{store: store, sessionName: "test-session"}
 		req := httptest.NewRequest(http.MethodGet, "/auth/callback", nil)
 		rr := httptest.NewRecorder()
@@ -490,7 +489,7 @@ func TestSaveSessionAndRedirect(t *testing.T) {
 
 	t.Run("uses and clears saved redirect target", func(t *testing.T) {
 		t.Parallel()
-		store := newTestCookieStore()
+		store := newTestStore()
 		h := &Handler{store: store, sessionName: "test-session"}
 
 		seedReq := httptest.NewRequest(http.MethodGet, "/auth/login", nil)
@@ -500,8 +499,8 @@ func TestSaveSessionAndRedirect(t *testing.T) {
 			t.Fatalf("store.Get() error = %v", err)
 		}
 		session.Values[DefaultRedirectSessionKey] = "/private"
-		if err := session.Save(seedReq, seedRR); err != nil {
-			t.Fatalf("session.Save() error = %v", err)
+		if err := h.store.Save(seedReq, seedRR, session); err != nil {
+			t.Fatalf("store.Save() error = %v", err)
 		}
 
 		req := httptest.NewRequest(http.MethodGet, "/auth/callback", nil)
@@ -559,8 +558,8 @@ func TestLogout(t *testing.T) {
 			t.Fatalf("store.Get() error = %v", err)
 		}
 		session.Values[DefaultUserSessionKey] = "user@example.com"
-		if err := session.Save(seedReq, seedRR); err != nil {
-			t.Fatalf("session.Save() error = %v", err)
+		if err := h.store.Save(seedReq, seedRR, session); err != nil {
+			t.Fatalf("store.Save() error = %v", err)
 		}
 
 		req := httptest.NewRequest(http.MethodPost, target, nil)
@@ -572,7 +571,7 @@ func TestLogout(t *testing.T) {
 
 	t.Run("expires the session cookie and redirects to login", func(t *testing.T) {
 		t.Parallel()
-		h := &Handler{store: newTestCookieStore(), sessionName: "test-session"}
+		h := &Handler{store: newTestStore(), sessionName: "test-session"}
 		req := newSeededRequest(t, h, "/auth/logout")
 		rr := httptest.NewRecorder()
 
@@ -596,7 +595,7 @@ func TestLogout(t *testing.T) {
 
 	t.Run("honours a safe redirect_to", func(t *testing.T) {
 		t.Parallel()
-		h := &Handler{store: newTestCookieStore(), sessionName: "test-session"}
+		h := &Handler{store: newTestStore(), sessionName: "test-session"}
 		req := newSeededRequest(t, h, "/auth/logout?redirect_to=/goodbye")
 		rr := httptest.NewRecorder()
 
@@ -612,7 +611,7 @@ func TestLogout(t *testing.T) {
 		t.Parallel()
 
 		for _, target := range []string{"//evil.com", "https://evil.com/x", "relative"} {
-			h := &Handler{store: newTestCookieStore(), sessionName: "test-session"}
+			h := &Handler{store: newTestStore(), sessionName: "test-session"}
 			req := httptest.NewRequest(http.MethodGet, "/auth/logout?redirect_to="+target, nil)
 			rr := httptest.NewRecorder()
 
@@ -654,7 +653,7 @@ func TestLoginPrompt(t *testing.T) {
 				ClientID: "client-id",
 				Endpoint: oauth2.Endpoint{AuthURL: "https://accounts.example.com/o/oauth2/auth"},
 			},
-			store:       newTestCookieStore(),
+			store:       newTestStore(),
 			sessionName: "test-session",
 			prompt:      prompt,
 		}
@@ -715,10 +714,8 @@ func TestWithPromptOption(t *testing.T) {
 // TestSaveSessionAndRedirectRotatesSessionID は、ログインでセッション ID が
 // 振り直されることを検証します（セッション固定攻撃対策）。
 //
-// 既定の CookieStore ではクッキー自体が中身なので固定は成立しませんが、
-// README が薦めているとおり WithStore でサーバーサイドのストアを入れると、
-// クッキーが運ぶのは ID だけになります。攻撃者が事前に仕込んだ ID のまま
-// 認証済みにすると、攻撃者はその ID で被害者として振る舞えます。
+// クッキーが運ぶのは ID だけなので、攻撃者が事前に仕込んだ ID のまま認証済みに
+// してしまうと、攻撃者はその ID で被害者として振る舞えます。
 func TestSaveSessionAndRedirectRotatesSessionID(t *testing.T) {
 	t.Parallel()
 
@@ -729,7 +726,7 @@ func TestSaveSessionAndRedirectRotatesSessionID(t *testing.T) {
 
 	store := newIDStore()
 	// 攻撃者が仕込んだセッションが、既にストアにある状態。
-	store.saved[plantedID] = map[any]any{
+	store.saved[plantedID] = map[string]string{
 		DefaultRedirectSessionKey: "/dashboard",
 		CSRFTokenKey:              "token-fixed-before-login",
 	}
@@ -756,7 +753,7 @@ func TestSaveSessionAndRedirectRotatesSessionID(t *testing.T) {
 		if id == plantedID {
 			continue
 		}
-		if got, _ := values[DefaultUserSessionKey].(string); got == email {
+		if values[DefaultUserSessionKey] == email {
 			newID = id
 		}
 	}

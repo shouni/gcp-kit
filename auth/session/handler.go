@@ -1,11 +1,18 @@
 // Package session は、人（ブラウザ）の認証を提供します。
 //
-// Google OAuth2 + PKCE でログインし、Cookie セッションで維持し、状態を変える
+// Google OAuth2 + PKCE でログインし、サーバー側のセッションで維持し、状態を変える
 // リクエストには CSRF 検証を掛けます。Handler は auth.Authenticator と
 // auth.Challenger を満たすため、サービス間検証（auth/oidc）と並べて
 // auth.Protected に渡せます。
 //
-//	handler, err := session.New(session.Config{...})
+// セッションの実体は Store にあり、クッキーが運ぶのは不透明な ID だけです。
+// だからセッション鍵を配る必要がなく、ログアウトと失効が実際に効きます。
+//
+//	store, err := session.NewFirestoreStore(session.FirestoreConfig{
+//		Client: fsClient, Collection: "sessions",
+//		StoreConfig: session.StoreConfig{Secure: true},
+//	})
+//	handler, err := session.New(session.Config{Store: store, ...})
 //	r.Use(auth.Protected(verifier, handler))
 package session
 
@@ -13,12 +20,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
-	"github.com/gorilla/sessions"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )
@@ -57,15 +62,22 @@ var defaultScopes = []string{
 // Config は Handler の必須設定です。
 // 任意の項目は Option（With で始まる関数）で指定します。
 type Config struct {
-	ClientID          string
-	ClientSecret      string
-	RedirectURL       string
-	SessionAuthKey    string // 署名用 (HMAC)
-	SessionEncryptKey string // 暗号化用 (AES)
-	SessionName       string
-	IsSecureCookie    bool
-	AllowedEmails     []string
-	AllowedDomains    []string
+	ClientID     string
+	ClientSecret string
+	RedirectURL  string
+	SessionName  string
+
+	// Store はセッションの保存先です（必須）。
+	//
+	// 既定を持たないのは、置ける既定が無いからです。プロセス内に持つと Cloud Run の
+	// インスタンスが替わるたびに利用者がログアウトされ、しかも開発中は 1 インスタンス
+	// なので気付けません。NewFirestoreStore を渡してください（テストとローカル開発には
+	// NewMemoryStore があります）。
+	Store Store
+
+	IsSecureCookie bool
+	AllowedEmails  []string
+	AllowedDomains []string
 }
 
 type googleUserInfo struct {
@@ -76,7 +88,7 @@ type googleUserInfo struct {
 // Handler は認証ロジックを保持する構造体です
 type Handler struct {
 	oauthConfig    *oauth2.Config
-	store          sessions.Store
+	store          Store
 	sessionName    string
 	isSecureCookie bool
 	allowedEmails  map[string]struct{}
@@ -108,23 +120,9 @@ func New(cfg Config, opts ...Option) (*Handler, error) {
 		oauthCfg.Scopes = defaultScopes
 	}
 
-	store := o.store
-	if store == nil {
-		// 認証キーと暗号化キーを個別に渡す
-		cookieStore := sessions.NewCookieStore([]byte(cfg.SessionAuthKey), []byte(cfg.SessionEncryptKey))
-		cookieStore.Options = &sessions.Options{
-			Path:     "/",
-			MaxAge:   int(o.sessionMaxAge.Seconds()),
-			HttpOnly: true,
-			Secure:   cfg.IsSecureCookie,
-			SameSite: http.SameSiteLaxMode,
-		}
-		store = cookieStore
-	}
-
 	return &Handler{
 		oauthConfig:     oauthCfg,
-		store:           store,
+		store:           cfg.Store,
 		sessionName:     cfg.SessionName,
 		isSecureCookie:  cfg.IsSecureCookie,
 		allowedEmails:   toLowerMap(cfg.AllowedEmails),
@@ -147,8 +145,6 @@ func validateConfig(cfg Config) error {
 		{"ClientID", cfg.ClientID},
 		{"ClientSecret", cfg.ClientSecret},
 		{"RedirectURL", cfg.RedirectURL},
-		{"SessionAuthKey", cfg.SessionAuthKey},
-		{"SessionEncryptKey", cfg.SessionEncryptKey},
 		{"SessionName", cfg.SessionName},
 	}
 
@@ -158,15 +154,9 @@ func validateConfig(cfg Config) error {
 		}
 	}
 
-	// 署名キー (HMAC) は十分な長さがあれば良いため、16バイト以上であることを確認します。
-	if authLen := len(cfg.SessionAuthKey); authLen < 16 {
-		return fmt.Errorf("auth config SessionAuthKey length is %d: must be at least 16 bytes for security", authLen)
-	}
-
-	// 暗号化キー (AES) は 16/24/32 バイトのいずれかである必要があります。
-	keyLen := len(cfg.SessionEncryptKey)
-	if keyLen != 16 && keyLen != 24 && keyLen != 32 {
-		return errors.New("auth config SessionEncryptKey must be 16, 24, or 32 bytes long")
+	// 保存先に既定は置きません（Config.Store を参照）。
+	if cfg.Store == nil {
+		return errors.New("auth config Store must not be nil")
 	}
 
 	redirectURL, err := url.Parse(cfg.RedirectURL)

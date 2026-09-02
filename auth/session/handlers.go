@@ -2,8 +2,6 @@ package session
 
 import (
 	"crypto/subtle"
-	"errors"
-	"fmt"
 	"net/http"
 
 	"golang.org/x/oauth2"
@@ -33,7 +31,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 			// 同一オリジンの相対パスのみを保存します（オープンリダイレクタ対策）。
 			if isSafeRelativePath(redirectTo) {
 				session.Values[DefaultRedirectSessionKey] = redirectTo
-				if err := session.Save(r, w); err != nil {
+				if err := h.store.Save(r, w, session); err != nil {
 					h.log().ErrorContext(r.Context(), "Failed to save session for redirect", "error", err)
 					http.Error(w, "Could not save session", http.StatusInternalServerError)
 					return
@@ -102,10 +100,12 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 // Logout はセッションを破棄し、ログインページ（または redirect_to で指定された同一オリジンの
 // パス）へリダイレクトします。
 //
-// 既定の sessions.CookieStore はクッキー自体がセッションの実体であるため、
-// これはクライアントにクッキーの破棄を指示するだけで、サーバー側での失効はできません
-// （盗まれたクッキーは有効期限まで使えます）。確実な失効が必要な場合は
-// WithStore にサーバーサイドのストアを渡してください。
+// セッションの実体はストア側にあるので、これはサーバー側の失効です。クッキーを
+// 落とすだけでなく保存された実体も消えるため、盗まれたクッキーもその時点で無効です。
+//
+// ただし消えるのはこのアプリのセッションだけです。Google 側のログインは残るので、
+// ログイン画面へ送られた時点で何も聞かれずに承認が返ります。共用端末で「ログアウト」を
+// 成立させるには WithPrompt(PromptSelectAccount) が要ります。
 func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	if err := h.clearSessionCookie(w, r); err != nil {
 		h.log().WarnContext(r.Context(), "ログアウト時のセッション破棄に失敗", "error", err)
@@ -202,43 +202,9 @@ func (h *Handler) extractEmailFromIDToken(r *http.Request, token *oauth2.Token) 
 }
 
 func (h *Handler) saveSessionAndRedirect(w http.ResponseWriter, r *http.Request, email string) error {
-	session, err := h.store.Get(r, h.sessionName)
+	targetURL, err := h.issueSession(w, r, email)
 	if err != nil {
-		h.log().WarnContext(r.Context(), "セッションの取得に失敗したため、新規セッションを作成します", "error", err)
-	}
-	if session == nil {
-		return errors.New("session store returned nil session")
-	}
-
-	targetURL := "/"
-	if url, ok := session.Values[DefaultRedirectSessionKey].(string); ok {
-		delete(session.Values, DefaultRedirectSessionKey)
-		// 保存時にも検証済みですが、セッションの中身を信用せず読み出し時にも確認します。
-		if isSafeRelativePath(url) {
-			targetURL = url
-		}
-	}
-
-	// ログイン前のセッションに紐づく CSRF トークンは破棄し、認証済みセッション用に
-	// 再生成させます（ログイン前に固定されたトークンを使い回させないため）。
-	delete(session.Values, CSRFTokenKey)
-
-	// セッション ID も捨てて振り直させます（セッション固定攻撃対策）。
-	//
-	// 既定の CookieStore に ID の概念は無く、この行は無視されます。効くのは
-	// WithStore でサーバーサイドのストアを入れた構成で、そこでは ID がセッションの
-	// 識別子になるため、攻撃者が事前に仕込んだ ID のまま認証済みにしてしまうと、
-	// 攻撃者はその ID で被害者として振る舞えます。gorilla のストアは ID が空なら
-	// Save で新しい ID を生成する約束なので、捨てるだけで振り直されます。
-	//
-	// 古い ID の中身は消しません。認証前の値しか持たず、認証済みになることも
-	// ないためです（ストアの TTL で消えます）。消しにいくと同じ名前の Set-Cookie を
-	// 2 回出すことになり、ストア実装ごとの差が表に出ます。
-	session.ID = ""
-
-	session.Values[DefaultUserSessionKey] = email
-	if err := session.Save(r, w); err != nil {
-		return fmt.Errorf("save session: %w", err)
+		return err
 	}
 
 	//nolint:gosec // G710: targetURL は isSafeRelativePath で同一オリジンの相対パスに限定済み

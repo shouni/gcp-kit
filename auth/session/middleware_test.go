@@ -6,8 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gorilla/sessions"
-
 	"github.com/shouni/gcp-kit/auth"
 )
 
@@ -15,7 +13,7 @@ func TestMiddlewareRedirectBehavior(t *testing.T) {
 	t.Parallel()
 
 	newHandler := func() *Handler {
-		store := newTestCookieStore()
+		store := newTestStore()
 		return &Handler{
 			store:       store,
 			sessionName: "test-session",
@@ -97,7 +95,7 @@ func TestMiddlewareRedirectBehavior(t *testing.T) {
 func TestMiddlewareAllowsAuthenticatedRequest(t *testing.T) {
 	t.Parallel()
 
-	store := newTestCookieStore()
+	store := newTestStore()
 	h := &Handler{store: store, sessionName: "test-session", allowedDomains: testAllowedDomains()}
 
 	// Seed a session with a logged-in user and a matching CSRF token.
@@ -109,8 +107,8 @@ func TestMiddlewareAllowsAuthenticatedRequest(t *testing.T) {
 	}
 	session.Values[DefaultUserSessionKey] = "user@example.com"
 	session.Values[CSRFTokenKey] = "csrf-token"
-	if err := session.Save(seedReq, seedRR); err != nil {
-		t.Fatalf("session.Save() error = %v", err)
+	if err := h.store.Save(seedReq, seedRR, session); err != nil {
+		t.Fatalf("store.Save() error = %v", err)
 	}
 	// httptest.ResponseRecorder.Result() is not safe to call concurrently,
 	// so extract the cookies once here rather than from inside the parallel
@@ -182,7 +180,7 @@ func TestMiddlewareAllowsAuthenticatedRequest(t *testing.T) {
 func TestMiddlewareRejectsRevokedSession(t *testing.T) {
 	t.Parallel()
 
-	store := newTestCookieStore()
+	store := newTestStore()
 
 	// セッションを作った時点では許可されていた利用者。
 	seedReq := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -192,8 +190,8 @@ func TestMiddlewareRejectsRevokedSession(t *testing.T) {
 		t.Fatalf("store.Get() error = %v", err)
 	}
 	session.Values[DefaultUserSessionKey] = "user@example.com"
-	if err := session.Save(seedReq, seedRR); err != nil {
-		t.Fatalf("session.Save() error = %v", err)
+	if err := store.Save(seedReq, seedRR, session); err != nil {
+		t.Fatalf("store.Save() error = %v", err)
 	}
 
 	// 許可リストから外した後の Handler。セッションクッキー自体は有効なままです。
@@ -258,9 +256,8 @@ func TestIsStateChangingMethod(t *testing.T) {
 func TestValidateCSRF(t *testing.T) {
 	t.Parallel()
 
-	newSession := func(token string) *sessions.Session {
-		s := sessions.NewSession(nil, "test")
-		s.Values = map[any]any{}
+	newSession := func(token string) *Session {
+		s := NewSession("test")
 		if token != "" {
 			s.Values[CSRFTokenKey] = token
 		}
@@ -353,7 +350,7 @@ func TestValidateOrigin(t *testing.T) {
 func TestMiddlewareRejectsCrossOriginPost(t *testing.T) {
 	t.Parallel()
 
-	store := newTestCookieStore()
+	store := newTestStore()
 	h := &Handler{store: store, sessionName: "test-session", allowedDomains: testAllowedDomains()}
 
 	seedReq := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -364,8 +361,8 @@ func TestMiddlewareRejectsCrossOriginPost(t *testing.T) {
 	}
 	session.Values[DefaultUserSessionKey] = "user@example.com"
 	session.Values[CSRFTokenKey] = "tok"
-	if err := session.Save(seedReq, seedRR); err != nil {
-		t.Fatalf("session.Save() error = %v", err)
+	if err := h.store.Save(seedReq, seedRR, session); err != nil {
+		t.Fatalf("store.Save() error = %v", err)
 	}
 
 	newReq := func(origin string) *http.Request {
@@ -405,7 +402,7 @@ func TestGenerateAndSaveCSRFToken(t *testing.T) {
 
 	t.Run("success", func(t *testing.T) {
 		t.Parallel()
-		store := newTestCookieStore()
+		store := newTestStore()
 		h := &Handler{store: store, sessionName: "test-session"}
 		req := httptest.NewRequest(http.MethodGet, "/x", nil)
 		rr := httptest.NewRecorder()
@@ -450,7 +447,7 @@ func TestGetCSRFTokenFromSession(t *testing.T) {
 
 	t.Run("returns saved token", func(t *testing.T) {
 		t.Parallel()
-		store := newTestCookieStore()
+		store := newTestStore()
 		h := &Handler{store: store, sessionName: "test-session"}
 
 		saveReq := httptest.NewRequest(http.MethodGet, "/x", nil)
@@ -481,7 +478,7 @@ func TestGetCSRFTokenFromSession(t *testing.T) {
 
 	t.Run("no token in session returns empty", func(t *testing.T) {
 		t.Parallel()
-		store := newTestCookieStore()
+		store := newTestStore()
 		h := &Handler{store: store, sessionName: "test-session"}
 		req := httptest.NewRequest(http.MethodGet, "/x", nil)
 		if got := h.csrfTokenFromSession(req); got != "" {

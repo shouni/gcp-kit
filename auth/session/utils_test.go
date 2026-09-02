@@ -318,7 +318,7 @@ func TestIssueSessionRotatesSessionID(t *testing.T) {
 	)
 
 	store := newIDStore()
-	store.saved[plantedID] = map[any]any{CSRFTokenKey: "token-fixed-before-login"}
+	store.saved[plantedID] = map[string]string{CSRFTokenKey: "token-fixed-before-login"}
 
 	h := &Handler{store: store, sessionName: "test-session", allowedDomains: testAllowedDomains()}
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -334,12 +334,12 @@ func TestIssueSessionRotatesSessionID(t *testing.T) {
 		}
 	}
 
-	var newValues map[any]any
+	var newValues map[string]string
 	for id, values := range store.saved {
 		if id == plantedID {
 			continue
 		}
-		if got, _ := values[DefaultUserSessionKey].(string); got == email {
+		if values[DefaultUserSessionKey] == email {
 			newValues = values
 		}
 	}

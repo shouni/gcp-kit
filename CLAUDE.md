@@ -78,7 +78,20 @@ workflow and nothing else.
   the session is missing or the address fell off the allowlist, **403 when Origin or CSRF verification
   failed**. Redirecting the latter would hide whether a forged request was rejected or waved through.
   - Authorization is re-evaluated on **every** request, not once at login (see the security invariants below
-    for why the default `CookieStore` forces this).
+    for why the default cookie store forces this).
+  - **`Store` / `Session` / `Options` are this package's own, not `gorilla/sessions`'.** The dependency is
+    `gorilla/securecookie` alone, which is the part worth keeping: hand-rolling the signing and encryption
+    of an auth cookie to save one dependency is the wrong trade. What the interface buys is that a
+    server-side store (Firestore) is an implementation rather than a fork, and `Session.Values` is
+    `map[string]string` because this package stores exactly three values, all strings — an `any` map costs
+    a gob registration per type and a type assertion per read, for generality nothing uses.
+    This changed `WithStore`'s signature, which is a breaking change that **knowingly shipped in a minor
+    version**: `gorelease` says v2, and taking it would have rewritten the import path in 7 apps and 58
+    files for an option that nothing in the fleet calls. Re-check that "nothing calls it" before using this
+    as precedent for the next one.
+  - **`NewCookieStore` must pass MaxAge to the codecs, not just to the cookie.** Setting it only on the
+    cookie leaves expiry to the browser's good behaviour, so a client that keeps sending an expired cookie
+    is still admitted; securecookie checks the timestamp it signed into the value.
   - CSRF tokens are minted on GET only. Minting on a state-changing request would hand a valid token to a
     request that arrived without one.
   - Required settings are `Config` fields; everything optional is a `With*` option, matching how

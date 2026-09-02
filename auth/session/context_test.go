@@ -52,8 +52,8 @@ func TestAuthenticateInjectsEmail(t *testing.T) {
 		t.Fatalf("store.Get() error = %v", err)
 	}
 	session.Values[DefaultUserSessionKey] = "user@example.com"
-	if err := session.Save(seedReq, seedRR); err != nil {
-		t.Fatalf("session.Save() error = %v", err)
+	if err := h.store.Save(seedReq, seedRR, session); err != nil {
+		t.Fatalf("store.Save() error = %v", err)
 	}
 
 	var gotEmail string

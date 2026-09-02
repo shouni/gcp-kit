@@ -10,8 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-
-	"github.com/gorilla/sessions"
 )
 
 const (
@@ -53,7 +51,7 @@ func (h *Handler) Authenticate(w http.ResponseWriter, r *http.Request) (context.
 		return nil, fmt.Errorf("%w: %w", errNoSession, err)
 	}
 
-	email, ok := session.Values[DefaultUserSessionKey].(string)
+	email, ok := session.Values[DefaultUserSessionKey]
 	if !ok || email == "" {
 		return nil, errNoSession
 	}
@@ -170,12 +168,12 @@ func validateOrigin(r *http.Request) bool {
 }
 
 // validateCSRF は、リクエストのトークンを検証します。
-func (h *Handler) validateCSRF(r *http.Request, session *sessions.Session) bool {
+func (h *Handler) validateCSRF(r *http.Request, session *Session) bool {
 	if session == nil {
 		return false
 	}
 
-	expected, ok := session.Values[CSRFTokenKey].(string)
+	expected, ok := session.Values[CSRFTokenKey]
 	if !ok || expected == "" {
 		return false
 	}
@@ -212,7 +210,7 @@ func (h *Handler) generateAndSaveCSRFToken(w http.ResponseWriter, r *http.Reques
 	}
 
 	session.Values[CSRFTokenKey] = token
-	if err := session.Save(r, w); err != nil {
+	if err := h.store.Save(r, w, session); err != nil {
 		return "", fmt.Errorf("CSRFトークン保存失敗: %w", err)
 	}
 
@@ -225,7 +223,7 @@ func (h *Handler) csrfTokenFromSession(r *http.Request) string {
 	if err != nil || session == nil {
 		return ""
 	}
-	token, ok := session.Values[CSRFTokenKey].(string)
+	token, ok := session.Values[CSRFTokenKey]
 	if !ok {
 		return ""
 	}

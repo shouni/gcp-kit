@@ -31,7 +31,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 			// 同一オリジンの相対パスのみを保存します（オープンリダイレクタ対策）。
 			if isSafeRelativePath(redirectTo) {
 				session.Values[DefaultRedirectSessionKey] = redirectTo
-				if err := session.Save(r, w); err != nil {
+				if err := h.store.Save(r, w, session); err != nil {
 					h.log().ErrorContext(r.Context(), "Failed to save session for redirect", "error", err)
 					http.Error(w, "Could not save session", http.StatusInternalServerError)
 					return
@@ -100,7 +100,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 // Logout はセッションを破棄し、ログインページ（または redirect_to で指定された同一オリジンの
 // パス）へリダイレクトします。
 //
-// 既定の sessions.CookieStore はクッキー自体がセッションの実体であるため、
+// 既定のクッキーストアはクッキー自体がセッションの実体であるため、
 // これはクライアントにクッキーの破棄を指示するだけで、サーバー側での失効はできません
 // （盗まれたクッキーは有効期限まで使えます）。確実な失効が必要な場合は
 // WithStore にサーバーサイドのストアを渡してください。

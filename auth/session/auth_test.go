@@ -5,8 +5,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/gorilla/sessions"
 )
 
 // validTestConfig は、必須項目だけを埋めた最小の有効な Config を返します。
@@ -115,12 +113,12 @@ func TestConfigDefaults(t *testing.T) {
 		t.Fatalf("stateCookieMaxAge() = %d, want %d", h.stateCookieMaxAge(), int(defaultStateMaxAge.Seconds()))
 	}
 
-	store, ok := h.store.(*sessions.CookieStore)
+	store, ok := h.store.(*cookieStore)
 	if !ok {
-		t.Fatalf("store type = %T, want *sessions.CookieStore", h.store)
+		t.Fatalf("store type = %T, want *cookieStore", h.store)
 	}
-	if store.Options.MaxAge != int(defaultSessionMaxAge.Seconds()) {
-		t.Fatalf("session MaxAge = %d, want %d", store.Options.MaxAge, int(defaultSessionMaxAge.Seconds()))
+	if store.options.MaxAge != int(defaultSessionMaxAge.Seconds()) {
+		t.Fatalf("session MaxAge = %d, want %d", store.options.MaxAge, int(defaultSessionMaxAge.Seconds()))
 	}
 	if len(h.oauthConfig.Scopes) != len(defaultScopes) {
 		t.Fatalf("Scopes = %v, want %v", h.oauthConfig.Scopes, defaultScopes)
@@ -146,9 +144,9 @@ func TestOptionOverrides(t *testing.T) {
 	if h.stateCookieMaxAge() != 300 {
 		t.Fatalf("stateCookieMaxAge() = %d, want 300", h.stateCookieMaxAge())
 	}
-	store := h.store.(*sessions.CookieStore)
-	if store.Options.MaxAge != 3600 {
-		t.Fatalf("session MaxAge = %d, want 3600", store.Options.MaxAge)
+	store := h.store.(*cookieStore)
+	if store.options.MaxAge != 3600 {
+		t.Fatalf("session MaxAge = %d, want 3600", store.options.MaxAge)
 	}
 	if len(h.oauthConfig.Scopes) != 1 {
 		t.Fatalf("Scopes = %v, want [openid]", h.oauthConfig.Scopes)
@@ -184,7 +182,7 @@ func TestStoreInjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	if h.store != sessions.Store(injected) {
+	if h.store != injected {
 		t.Fatal("New() did not use the injected store")
 	}
 }

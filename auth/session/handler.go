@@ -18,7 +18,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorilla/sessions"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )
@@ -76,7 +75,7 @@ type googleUserInfo struct {
 // Handler は認証ロジックを保持する構造体です
 type Handler struct {
 	oauthConfig    *oauth2.Config
-	store          sessions.Store
+	store          Store
 	sessionName    string
 	isSecureCookie bool
 	allowedEmails  map[string]struct{}
@@ -111,15 +110,13 @@ func New(cfg Config, opts ...Option) (*Handler, error) {
 	store := o.store
 	if store == nil {
 		// 認証キーと暗号化キーを個別に渡す
-		cookieStore := sessions.NewCookieStore([]byte(cfg.SessionAuthKey), []byte(cfg.SessionEncryptKey))
-		cookieStore.Options = &sessions.Options{
+		store = NewCookieStore(Options{
 			Path:     "/",
 			MaxAge:   int(o.sessionMaxAge.Seconds()),
-			HttpOnly: true,
+			HTTPOnly: true,
 			Secure:   cfg.IsSecureCookie,
 			SameSite: http.SameSiteLaxMode,
-		}
-		store = cookieStore
+		}, []byte(cfg.SessionAuthKey), []byte(cfg.SessionEncryptKey))
 	}
 
 	return &Handler{

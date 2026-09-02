@@ -11,19 +11,20 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/gorilla/sessions"
 	"golang.org/x/oauth2"
 )
 
-// testCookieKey is a fixed 16-byte key used across tests to build
-// sessions.NewCookieStore instances. Its value is irrelevant beyond meeting
-// CookieStore's minimum key-length requirements.
+// testCookieKey is a fixed 16-byte key used across tests to build cookie
+// stores. Its value is irrelevant beyond meeting the minimum key length.
 const testCookieKey = "1234567890123456"
 
-// newTestCookieStore returns a sessions.CookieStore usable in tests, backed
+// newTestCookieStore returns a cookie-backed Store usable in tests, backed
 // by a fixed (non-secret) key pair.
-func newTestCookieStore() *sessions.CookieStore {
-	return sessions.NewCookieStore([]byte(testCookieKey), []byte(testCookieKey))
+func newTestCookieStore() Store {
+	return NewCookieStore(
+		Options{Path: "/", MaxAge: 3600, HTTPOnly: true},
+		[]byte(testCookieKey), []byte(testCookieKey),
+	)
 }
 
 // testAllowedDomains returns an allowlist admitting the user@example.com
@@ -59,39 +60,28 @@ func newRewriteContext(t *testing.T, server *httptest.Server) context.Context {
 	return context.WithValue(context.Background(), oauth2.HTTPClient, httpClient)
 }
 
-// failingStore is a sessions.Store whose Get/New always succeed with a fresh
-// session but whose Save always fails, used to exercise session-save error
-// paths.
+// failingStore is a Store whose Get always succeeds with a fresh session but
+// whose Save always fails, used to exercise session-save error paths.
 type failingStore struct{}
 
-func (s failingStore) Get(r *http.Request, name string) (*sessions.Session, error) {
-	return s.New(r, name)
+func (failingStore) Get(_ *http.Request, name string) (*Session, error) {
+	return NewSession(name), nil
 }
 
-func (s failingStore) New(_ *http.Request, name string) (*sessions.Session, error) {
-	session := sessions.NewSession(s, name)
-	session.Values = map[any]any{}
-	return session, nil
-}
-
-func (s failingStore) Save(_ *http.Request, _ http.ResponseWriter, _ *sessions.Session) error {
+func (failingStore) Save(_ *http.Request, _ http.ResponseWriter, _ *Session) error {
 	return errors.New("save failed")
 }
 
-// nilSessionStore is a sessions.Store whose Get/New always fail and return a
-// nil session, simulating a third-party Store implementation that (unlike
-// gorilla's own CookieStore) doesn't guarantee a usable session on error.
+// nilSessionStore is a Store whose Get always fails and returns a nil session,
+// simulating an implementation that (unlike the cookie store here) doesn't
+// guarantee a usable session on error.
 type nilSessionStore struct{}
 
-func (nilSessionStore) Get(_ *http.Request, _ string) (*sessions.Session, error) {
+func (nilSessionStore) Get(_ *http.Request, _ string) (*Session, error) {
 	return nil, errors.New("get failed")
 }
 
-func (nilSessionStore) New(_ *http.Request, _ string) (*sessions.Session, error) {
-	return nil, errors.New("new failed")
-}
-
-func (nilSessionStore) Save(_ *http.Request, _ http.ResponseWriter, _ *sessions.Session) error {
+func (nilSessionStore) Save(_ *http.Request, _ http.ResponseWriter, _ *Session) error {
 	return nil
 }
 
@@ -128,23 +118,21 @@ func makeUnsignedJWT(claims map[string]any) string {
 	return header + "." + payload + "." + sig
 }
 
-// idStore は、サーバーサイドのセッションストア（Redis 等）の約束を最小限まねた
+// idStore は、サーバーサイドのセッションストア（Firestore 等）の約束を最小限まねた
 // テスト用ストアです。クッキーが運ぶのは ID だけで、中身はストア側が持ちます。
-// ID が空のまま Save されたら新しい ID を振ります（gorilla のストアの約束）。
+// ID が空のまま Save されたら新しい ID を振ります（Store の約束）。
 type idStore struct {
-	saved  map[string]map[any]any
+	saved  map[string]map[string]string
 	nextID int
 }
 
 func newIDStore() *idStore {
-	return &idStore{saved: map[string]map[any]any{}}
+	return &idStore{saved: map[string]map[string]string{}}
 }
 
-func (s *idStore) Get(r *http.Request, name string) (*sessions.Session, error) {
-	session := sessions.NewSession(s, name)
-	session.Values = map[any]any{}
-	session.Options = &sessions.Options{Path: "/"}
-	session.IsNew = true
+func (s *idStore) Get(r *http.Request, name string) (*Session, error) {
+	session := NewSession(name)
+	session.Options = &Options{Path: "/"}
 
 	cookie, err := r.Cookie(name)
 	if err != nil || cookie.Value == "" {
@@ -161,22 +149,18 @@ func (s *idStore) Get(r *http.Request, name string) (*sessions.Session, error) {
 	return session, nil
 }
 
-func (s *idStore) New(r *http.Request, name string) (*sessions.Session, error) {
-	return s.Get(r, name)
-}
-
-func (s *idStore) Save(_ *http.Request, w http.ResponseWriter, session *sessions.Session) error {
+func (s *idStore) Save(_ *http.Request, w http.ResponseWriter, session *Session) error {
 	if session.ID == "" {
 		s.nextID++
 		session.ID = fmt.Sprintf("sid-%d", s.nextID)
 	}
 
-	values := make(map[any]any, len(session.Values))
+	values := make(map[string]string, len(session.Values))
 	for k, v := range session.Values {
 		values[k] = v
 	}
 	s.saved[session.ID] = values
 
-	http.SetCookie(w, sessions.NewCookie(session.Name(), session.ID, session.Options))
+	http.SetCookie(w, newCookie(session.Name(), session.ID, session.Options))
 	return nil
 }

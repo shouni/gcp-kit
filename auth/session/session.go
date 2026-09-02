@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/gorilla/sessions"
 	"golang.org/x/oauth2"
 
 	"github.com/shouni/gcp-kit/auth"
@@ -84,7 +83,7 @@ func (h *Handler) issueSession(w http.ResponseWriter, r *http.Request, email str
 	}
 
 	targetURL := "/"
-	if url, ok := session.Values[DefaultRedirectSessionKey].(string); ok {
+	if url, ok := session.Values[DefaultRedirectSessionKey]; ok {
 		delete(session.Values, DefaultRedirectSessionKey)
 		// 保存時にも検証済みですが、セッションの中身を信用せず読み出し時にも確認します。
 		if isSafeRelativePath(url) {
@@ -98,19 +97,17 @@ func (h *Handler) issueSession(w http.ResponseWriter, r *http.Request, email str
 
 	// セッション ID も捨てて振り直させます（セッション固定攻撃対策）。
 	//
-	// 既定の CookieStore に ID の概念は無く、この行は無視されます。効くのは
-	// WithStore でサーバーサイドのストアを入れた構成で、そこでは ID がセッションの
-	// 識別子になるため、攻撃者が事前に仕込んだ ID のまま認証済みにしてしまうと、
-	// 攻撃者はその ID で被害者として振る舞えます。gorilla のストアは ID が空なら
-	// Save で新しい ID を生成する約束なので、捨てるだけで振り直されます。
+	// 既定のクッキーストアに ID の概念は無く、この行は無視されます。効くのは
+	// WithStore でサーバーサイドのストアを入れた構成で、そこでは ID が識別子に
+	// なるため、攻撃者が仕込んだ ID のまま認証済みにすると被害者として振る舞えます。
+	// 空の ID には Save が新しい ID を振る決まりです（Store を参照）。
 	//
 	// 古い ID の中身は消しません。認証前の値しか持たず、認証済みになることも
-	// ないためです（ストアの TTL で消えます）。消しにいくと同じ名前の Set-Cookie を
-	// 2 回出すことになり、ストア実装ごとの差が表に出ます。
+	// ないためです。消しにいくと同じ名前の Set-Cookie を 2 回出すことになります。
 	session.ID = ""
 
 	session.Values[DefaultUserSessionKey] = email
-	if err := session.Save(r, w); err != nil {
+	if err := h.store.Save(r, w, session); err != nil {
 		return "", fmt.Errorf("save session: %w", err)
 	}
 	return targetURL, nil
@@ -149,11 +146,11 @@ func (h *Handler) clearSessionCookie(w http.ResponseWriter, r *http.Request) err
 		return errors.New("session store returned nil session")
 	}
 	if session.Options == nil {
-		session.Options = &sessions.Options{Path: "/"}
+		session.Options = &Options{Path: "/"}
 	}
 
 	session.Options.MaxAge = -1 // クッキーを即時期限切れにする
-	if err := session.Save(r, w); err != nil {
+	if err := h.store.Save(r, w, session); err != nil {
 		h.log().ErrorContext(r.Context(), "Failed to save session for clearing cookie", "error", err)
 		return err // エラーを呼び出し元に返す
 	}

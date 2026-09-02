@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gorilla/sessions"
 	"golang.org/x/oauth2"
 )
 
@@ -68,7 +67,7 @@ func jsonUserInfoResponse(email string, verified bool) http.HandlerFunc {
 func TestLogin(t *testing.T) {
 	t.Parallel()
 
-	newHandler := func(store sessions.Store) *Handler {
+	newHandler := func(store Store) *Handler {
 		if store == nil {
 			store = newTestCookieStore()
 		}
@@ -133,7 +132,7 @@ func TestLogin(t *testing.T) {
 		if err != nil {
 			t.Fatalf("store.Get() error = %v", err)
 		}
-		if got, _ := session.Values[DefaultRedirectSessionKey].(string); got != "/private" {
+		if got := session.Values[DefaultRedirectSessionKey]; got != "/private" {
 			t.Fatalf("redirect session value = %q, want %q", got, "/private")
 		}
 	})
@@ -500,8 +499,8 @@ func TestSaveSessionAndRedirect(t *testing.T) {
 			t.Fatalf("store.Get() error = %v", err)
 		}
 		session.Values[DefaultRedirectSessionKey] = "/private"
-		if err := session.Save(seedReq, seedRR); err != nil {
-			t.Fatalf("session.Save() error = %v", err)
+		if err := h.store.Save(seedReq, seedRR, session); err != nil {
+			t.Fatalf("store.Save() error = %v", err)
 		}
 
 		req := httptest.NewRequest(http.MethodGet, "/auth/callback", nil)
@@ -559,8 +558,8 @@ func TestLogout(t *testing.T) {
 			t.Fatalf("store.Get() error = %v", err)
 		}
 		session.Values[DefaultUserSessionKey] = "user@example.com"
-		if err := session.Save(seedReq, seedRR); err != nil {
-			t.Fatalf("session.Save() error = %v", err)
+		if err := h.store.Save(seedReq, seedRR, session); err != nil {
+			t.Fatalf("store.Save() error = %v", err)
 		}
 
 		req := httptest.NewRequest(http.MethodPost, target, nil)
@@ -729,7 +728,7 @@ func TestSaveSessionAndRedirectRotatesSessionID(t *testing.T) {
 
 	store := newIDStore()
 	// 攻撃者が仕込んだセッションが、既にストアにある状態。
-	store.saved[plantedID] = map[any]any{
+	store.saved[plantedID] = map[string]string{
 		DefaultRedirectSessionKey: "/dashboard",
 		CSRFTokenKey:              "token-fixed-before-login",
 	}
@@ -756,7 +755,7 @@ func TestSaveSessionAndRedirectRotatesSessionID(t *testing.T) {
 		if id == plantedID {
 			continue
 		}
-		if got, _ := values[DefaultUserSessionKey].(string); got == email {
+		if values[DefaultUserSessionKey] == email {
 			newID = id
 		}
 	}

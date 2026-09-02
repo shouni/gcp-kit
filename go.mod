@@ -4,7 +4,7 @@ go 1.27
 
 require (
 	cloud.google.com/go/cloudtasks v1.19.0
-	github.com/gorilla/sessions v1.4.0
+	github.com/gorilla/securecookie v1.1.2
 	github.com/shouni/go-utils v1.7.1
 	golang.org/x/oauth2 v0.36.0
 	google.golang.org/api v0.295.0
@@ -24,7 +24,6 @@ require (
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.20 // indirect
 	github.com/googleapis/gax-go/v2 v2.24.0 // indirect
-	github.com/gorilla/securecookie v1.1.2 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.67.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.67.0 // indirect

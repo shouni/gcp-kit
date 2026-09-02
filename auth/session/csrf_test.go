@@ -100,8 +100,8 @@ func loginSessionCookie(t *testing.T, h *Handler, email string) *http.Cookie {
 		t.Fatalf("store.Get() error = %v", err)
 	}
 	session.Values[DefaultUserSessionKey] = email
-	if err := session.Save(req, rec); err != nil {
-		t.Fatalf("session.Save() error = %v", err)
+	if err := h.store.Save(req, rec, session); err != nil {
+		t.Fatalf("store.Save() error = %v", err)
 	}
 
 	cookies := rec.Result().Cookies()

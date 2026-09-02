@@ -4,6 +4,7 @@ go 1.27
 
 require (
 	cloud.google.com/go/cloudtasks v1.19.0
+	cloud.google.com/go/firestore v1.25.0
 	github.com/gorilla/securecookie v1.1.2
 	github.com/shouni/go-utils v1.7.1
 	golang.org/x/oauth2 v0.36.0
@@ -13,10 +14,12 @@ require (
 )
 
 require (
+	cloud.google.com/go v0.123.0 // indirect
 	cloud.google.com/go/auth v0.23.2 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	cloud.google.com/go/iam v1.12.0 // indirect
+	cloud.google.com/go/longrunning v1.2.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect

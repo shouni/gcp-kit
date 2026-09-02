@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-GCP Kit (`github.com/shouni/gcp-kit`) is a Go library (not a service) of seven independent packages for
+GCP Kit (`github.com/shouni/gcp-kit`) is a Go library (not a service) of eight independent packages for
 building Cloud Run + Cloud Tasks apps on GCP: Google OAuth2 session auth plus inbound OIDC verification,
-a generic Cloud Tasks enqueuer, a generic Cloud Tasks worker handler, Cloud Logging-compatible
-structured logging, and the serving lifecycle and health path. Each package is meant to be imported
-independently.
+a generic Cloud Tasks enqueuer, a generic Cloud Tasks worker handler, Firestore-backed job status and
+history, Cloud Logging-compatible structured logging, and the serving lifecycle and health path. Each
+package is meant to be imported independently.
 
 The three packages that never depended on GCP — response writing plus `Accept` negotiation, browser-facing
 response headers, and the web/worker role vocabulary — now live in `github.com/shouni/go-serve-kit`
@@ -180,6 +180,20 @@ workflow and nothing else.
   - **The pprof goroutine label goes on with `pprof.Do`, never `SetGoroutineLabels` alone.** The latter does
     not restore on return, so net/http's keep-alive connection goroutine carries the previous task's name
     into the next request — and a traceback naming the wrong task is worse than one naming none.
+- **`jobstatus`**: `Status`/`Recorder`/`StatusStore` — recording an async job's progress as a Firestore
+  document, and listing history by query. Completes the trio with `tasks` (enqueue) and `worker` (receive).
+  It was its own module, `go-job-firestore`, until it moved here: a Firestore adapter is GCP-specific, and
+  this repo's boundary rule is exactly that — the three packages that never depended on GCP were moved
+  *out*, to `go-serve-kit`.
+  - **The motive is the cost of listing, not atomicity.** It uses no transactions. With
+    `PIPELINE_TIMEOUT < dispatch deadline <= Cloud Run timeout` holding, redelivery arrives serially, so a
+    read-then-write rerun guard has no concurrent rival. What it replaces is walking a bucket prefix,
+    sorting job IDs in memory, and hiding the cost behind a cache — all workarounds for having no query.
+  - **It shares its name with `go-job-kit`'s `jobstatus`, deliberately.** They are two implementations of
+    one concept — Firestore here, object storage there — and the fleet splits cleanly along that line: the
+    apps whose artifacts live in a bucket take the go-job-kit one, the media-generation apps take this one.
+    No app uses both. Same name, different import path, is what `math/rand` and `crypto/rand` do. Check
+    that "no app uses both" still holds before adding a third.
 
 ### File layout inside `auth`
 

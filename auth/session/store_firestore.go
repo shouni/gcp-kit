@@ -18,18 +18,16 @@ type FirestoreConfig struct {
 	// Client は接続済みの Firestore クライアントです（必須）。
 	//
 	// ★ ジョブ状態とは別のデータベースを指してください。データベース名は識別子で
-	// 後から変えられないので、jobstatus 用のものを兼ねると名前が実態と合わなく
-	// なります。firestore.NewClientWithDatabase で接続先を選べます。
+	// 後から変えられないので、兼ねると片方で名前が実態と合わなくなります。
 	Client *firestore.Client
 
 	// Collection は、セッションを置くコレクション名です（必須）。
 	Collection string
 }
 
-// sessionDoc は、セッション 1 件のドキュメント表現です。
-//
-// ExpiresAt は Firestore の TTL ポリシーが見るフィールドでもあります。
-// ただし TTL の削除は最大 24 時間遅れるので、読み出し側でも必ず期限を見ます。
+// sessionDoc は、セッション 1 件のドキュメント表現です。ExpiresAt は Firestore の
+// TTL ポリシーが見るフィールドでもありますが、削除は最大 24 時間遅れるので、
+// 読み出し側でも必ず期限を見ます。
 type sessionDoc struct {
 	Values    map[string]string `firestore:"values"`
 	ExpiresAt time.Time         `firestore:"expiresAt"`
@@ -44,12 +42,9 @@ type firestoreStore struct {
 
 // NewFirestoreStore は、Firestore にセッションを保持する Store を返します。
 //
-// クッキーが運ぶのは不透明な ID だけなので、セッション鍵は要りません。
-// 代わりに、ログアウトと失効がサーバー側で実際に効きます。
-//
 // ★ 期限切れドキュメントの掃除は Firestore の TTL ポリシー（ExpiresAt が対象）に
-// 任せます。設定しないとセッションが無期限に溜まります。クッキーと違い、
-// 保存した実体は自分では消えません。
+// 任せます。設定しないとセッションが無期限に溜まります。クッキーと違い、保存した
+// 実体は自分では消えません。
 func NewFirestoreStore(cfg FirestoreConfig) (Store, error) {
 	if cfg.Client == nil {
 		return nil, errors.New("session: FirestoreConfig.Client must not be nil")

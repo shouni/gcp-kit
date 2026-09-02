@@ -35,6 +35,11 @@ build+vet+gofmt+race-tests, golangci-lint, govulncheck, and a fuzz job. **The fu
 package path in `ci.yml`** — move a fuzz test to another package and the job silently stops covering it, so
 update that list in the same commit. The Go version comes from `go.mod` (currently 1.27).
 
+**Two breaking changes shipped in minor versions**, both in `auth/session` (`WithStore`'s signature, then
+its removal along with `WithSessionMaxAge` and two `Config` fields). `gorelease` said v2 both times; taking
+it would have rewritten the import path in 7 apps and 58 files, for API that nothing in the fleet called.
+Check what actually calls the API before using this as precedent.
+
 **Run `gorelease` before tagging.** It compares the module against its last tag and says both what broke
 and what the next version has to be. v1.12.0 shipped with `session.WithCSRFToken` unexported -- the symbol
 looked unused because the count had excluded `_test.go`, and nobody saw it go until after the tag; this is
@@ -77,29 +82,22 @@ workflow and nothing else.
   (session auth, CSRF verification, CSRF context), and `Challenge` decides the response — a redirect when
   the session is missing or the address fell off the allowlist, **403 when Origin or CSRF verification
   failed**. Redirecting the latter would hide whether a forged request was rejected or waved through.
-  - Authorization is re-evaluated on **every** request, not once at login. That is now belt and braces
-    rather than the only mechanism (the store can revoke), and it stays because it costs one map lookup.
-  - **The session lives server-side; the cookie carries an opaque ID and nothing else.** That is why there
-    are no session keys to configure: no signing, no encryption, no `gorilla/securecookie`. What it buys is
-    that `Logout` and revocation actually take effect, and that the session-ID rotation below stops being a
-    no-op. `Session.Values` is `map[string]string` because this package stores exactly three values, all
-    strings — an `any` map costs a serializer registration per type and a type assertion per read, for
-    generality nothing uses.
-  - **`Config.Store` is required and has no default.** There is no default worth having: an in-process one
-    would give each Cloud Run instance its own sessions, logging users out whenever the instance changed,
-    and it would look fine in development because there is one instance. `NewMemoryStore` exists for tests
-    and local runs and says so.
-  - This removed `WithStore` and `WithSessionMaxAge` and changed `Config`, which is breaking and
-    **knowingly shipped in a minor version**: `gorelease` says v2, and taking it would have rewritten the
-    import path in 7 apps and 58 files. Re-check what actually calls the removed API before using this as
-    precedent for the next one.
-  - **The Firestore store must not adopt an ID it cannot find.** The ID arrives in a cookie, so it is
-    attacker-controlled; writing a session under an unknown ID lets an attacker pick the victim's session
-    identifier. `Get` leaves the ID empty when the document is missing and lets `Save` mint a fresh one.
-  - **Expiry is checked on read, not left to the TTL policy.** Firestore's TTL deletion runs up to 24 hours
-    late, so a document past `expiresAt` is still readable. The TTL policy is for reclaiming storage; the
-    read-side check is what actually expires a session. The policy still has to exist, or sessions
-    accumulate forever — unlike cookies, stored sessions do not expire themselves.
+  - Authorization is re-evaluated on **every** request, not once at login. It is what evicts an address
+    removed from the allowlist without having to find that person's stored session, and it costs one map
+    lookup.
+  - **The session lives server-side; the cookie carries an opaque ID and nothing else.** So there are no
+    session keys to configure and no cookie crypto to get wrong, and `Logout`, revocation and the ID
+    rotation in `issueSession` all actually take effect. `Session.Values` is `map[string]string` because
+    this package stores three values, all strings.
+  - **`Config.Store` is required and has no default.** An in-process default would give each Cloud Run
+    instance its own sessions and would look fine in development, where there is one instance.
+    `NewMemoryStore` is opt-in and says what it is for.
+  - **A store must not adopt an ID it cannot find.** The ID arrives in a cookie, so it is
+    attacker-controlled; writing a session under an unknown ID lets an attacker choose the victim's session
+    identifier. `Get` leaves the ID empty when there is no stored session and lets `Save` mint one.
+  - **Expiry is checked on read, not left to Firestore's TTL policy**, which deletes up to 24 hours late.
+    The policy still has to exist, or sessions accumulate forever — unlike cookies, stored sessions do not
+    expire themselves.
   - CSRF tokens are minted on GET only. Minting on a state-changing request would hand a valid token to a
     request that arrived without one.
   - Required settings are `Config` fields; everything optional is a `With*` option, matching how
@@ -112,15 +110,11 @@ workflow and nothing else.
   - `WithCSRFToken` is exported for tests that render a template without running a full authentication
     round-trip. It looked unused when the surface was trimmed because that count excluded `_test.go`;
     six sibling test files use it. **Count test files too before unexporting something.**
-  - **`IssueSession` is exported so no caller has to reimplement the session cookie.** It is
-    `Callback`'s save without the redirect — both entry points go through one unexported `issueSession`,
-    so the CSRF-token drop and the session-ID rotation cannot apply to one and not the other. Without it,
-    an app whose tests need a logged-in request builds its own store and writes `DefaultUserSessionKey` by
-    hand, which is a copy of this package's internal format: change how a session is written and that app's
-    tests keep passing on a cookie the real `Handler` can no longer read. adk-review had exactly that copy,
-    and it is why the module carried a direct `gorilla/sessions` requirement it did not otherwise need.
-    It does not verify identity — that is the caller's — but it does apply the allowlist, so the
-    fail-closed rule holds at both entry points.
+  - **`IssueSession` is `Callback`'s save without the redirect**, exported so no caller reimplements it.
+    Both entry points go through one unexported `issueSession`, so the CSRF-token drop and the ID rotation
+    cannot apply to one and not the other. Without it an app's tests build their own store and write
+    `DefaultUserSessionKey` by hand — a copy of this package's format that keeps passing after the format
+    changes. It does not verify identity (the caller's job) but does apply the allowlist.
 - **`auth/oidc`**: inbound OIDC Bearer verification for service-to-service calls, `Verifier`. **One type,
   not two** — `TaskVerifier` and `M2MVerifier` were two wrappers over one verifier whose only difference
   was how they were composed, and that difference now lives in `Require` vs `Protected`. It requires no

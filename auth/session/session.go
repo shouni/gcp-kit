@@ -95,15 +95,12 @@ func (h *Handler) issueSession(w http.ResponseWriter, r *http.Request, email str
 	// 再生成させます（ログイン前に固定されたトークンを使い回させないため）。
 	delete(session.Values, CSRFTokenKey)
 
-	// セッション ID も捨てて振り直させます（セッション固定攻撃対策）。
+	// ID も捨てて振り直させます（セッション固定攻撃対策）。攻撃者が仕込んだ ID の
+	// まま認証済みにすると、その ID で被害者として振る舞えます。空の ID には Save が
+	// 新しい ID を振ります（Store を参照）。
 	//
-	// 既定のクッキーストアに ID の概念は無く、この行は無視されます。効くのは
-	// WithStore でサーバーサイドのストアを入れた構成で、そこでは ID が識別子に
-	// なるため、攻撃者が仕込んだ ID のまま認証済みにすると被害者として振る舞えます。
-	// 空の ID には Save が新しい ID を振る決まりです（Store を参照）。
-	//
-	// 古い ID の中身は消しません。認証前の値しか持たず、認証済みになることも
-	// ないためです。消しにいくと同じ名前の Set-Cookie を 2 回出すことになります。
+	// 古い実体は消しません。認証前の値しか持たず、認証済みになることもないので、
+	// TTL に任せます。
 	session.ID = ""
 
 	session.Values[DefaultUserSessionKey] = email
@@ -136,7 +133,8 @@ func (h *Handler) isAuthorized(email string) bool {
 	return ok
 }
 
-// clearSessionCookie はセッションクッキーを無効化（削除）します。
+// clearSessionCookie はセッションを破棄します。MaxAge を負にして Save へ渡すので、
+// クッキーの無効化と保存された実体の削除が同時に起きます。
 func (h *Handler) clearSessionCookie(w http.ResponseWriter, r *http.Request) error {
 	session, err := h.store.Get(r, h.sessionName)
 	if err != nil {

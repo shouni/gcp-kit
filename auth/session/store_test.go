@@ -83,7 +83,6 @@ func TestMemoryStoreRoundTrip(t *testing.T) {
 //
 // ★ これがセッション固定攻撃への防御です。ID はクッキー経由で攻撃者が指定できるので、
 // 採用してしまうと「攻撃者が選んだ ID のセッションを被害者が使う」状態を作れます。
-// クッキーストアには ID の概念が無く、この防御は存在しませんでした。
 func TestMemoryStoreIgnoresUnknownID(t *testing.T) {
 	t.Parallel()
 
@@ -130,7 +129,7 @@ func TestMemoryStoreExpires(t *testing.T) {
 // TestMemoryStoreDeletes は、MaxAge が負の Save が実体ごと消すことを確認します。
 //
 // クッキーを落とすだけでは、盗まれたクッキーは有効なままです。サーバー側の実体を
-// 消すことが「本当のログアウト」の中身で、クッキーストアにはできませんでした。
+// 消すことが「本当のログアウト」の中身です。
 func TestMemoryStoreDeletes(t *testing.T) {
 	t.Parallel()
 

@@ -202,10 +202,9 @@ func TestClearSessionCookieSaveError(t *testing.T) {
 	}
 }
 
-// TestClearSessionCookieNilSession guards against a Store implementation
-// that (unlike gorilla's own CookieStore) returns a nil session alongside an
-// error from Get: without the nil check, this would panic on
-// session.Options.MaxAge instead of returning an error.
+// TestClearSessionCookieNilSession guards against a Store that returns a nil
+// session alongside an error from Get: without the nil check this would panic
+// on session.Options.MaxAge instead of returning an error.
 func TestClearSessionCookieNilSession(t *testing.T) {
 	t.Parallel()
 

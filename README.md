@@ -10,7 +10,10 @@
 
 ## 🚀 概要 (About) - Cloud Run と Cloud Tasks を使った開発を最速の軌道へ
 
-**GCP Kit** は、Cloud Run 上の Go サービスが毎回書く定型（認証・レスポンスヘッダー・起動と正常停止・Cloud Tasks の投入と受信）を引き受けるツールキットです。
+**GCP Kit** は、Cloud Run 上の Go サービスが毎回書く定型（認証・構造化ログ・起動と正常停止・Cloud Tasks の投入と受信・ジョブ状態の記録）を引き受けるツールキットです。
+
+レスポンス書き込みと `Accept` 判定・防御ヘッダー・web/worker の役割語彙は、GCP に依存しないため
+[go-serve-kit](https://github.com/shouni/go-serve-kit) にあります。
 
 ---
 
@@ -60,10 +63,8 @@
   * **デコードが既定で寛容なのは、ローリングデプロイ中の型のずれを生かすためです。** `WithStrictJSON`
     を既定にすると 400 になり、**Cloud Tasks は 4xx をリトライせずタスクを破棄**します。
 * **`jobstatus`**: Firestore による進行状況の記録と履歴（`Status` / `Recorder` / `StatusStore`）
-  * `tasks`（投入）・`worker`（受信）に対する「記録」で、三点が揃います。
-  * **動機は原子性ではなく一覧のコストです。** トランザクションを使いません。置き換えたのは、
-    バケットのプレフィックスを全走査してジョブ ID を集め、メモリ上で並べ替え、重さを短期キャッシュで
-    隠していた側です。`Where` / `OrderBy` / `Count` があれば、そのどれも要りません。
+  * `tasks`（投入）・`worker`（受信）に対する「記録」で、三点が揃います。**トランザクションは
+    使いません**（詳細は CLAUDE.md）。
   * `go-job-kit` の `jobstatus` と**同名なのは意図的です**。1 つの概念の 2 実装（Firestore とオブジェクト
     ストレージ）で、併用するアプリはありません。`math/rand` と `crypto/rand` と同じ関係です。
 

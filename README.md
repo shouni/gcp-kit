@@ -24,7 +24,9 @@
 * **`auth/session`**: Google OAuth2 ログイン（PKCE）・セッション・CSRF
   * 許可はドメイン / メールアドレスのリストで、**空のリストは「全部拒否」です**。判定は毎リクエスト
     行うため、リストから外せばその場で締め出せます。
-  * 既定は Cookie ストア。サーバー側で失効させたい場合は `WithStore` にサーバーサイドのストアを渡します。
+  * **セッションの実体はサーバー側にあり、クッキーが運ぶのは不透明な ID だけです。** 署名も暗号化も
+    要らないので、セッション鍵の設定はありません。代わりに `Logout` と失効が実際に効きます。
+    保存先は `Config.Store` で必須です（`NewFirestoreStore` / テストとローカルには `NewMemoryStore`）。
   * **`WithPrompt(session.PromptSelectAccount)` を渡さないと、ログアウトが効いて見えません。**
     `Logout` が消せるのはこのアプリのクッキーだけで、Google 側のセッションは残るためです。
 * **`auth/oidc`**: サービス間呼び出しの受信検証（`Verifier`）
@@ -97,15 +99,24 @@ Bearer だけを受けるルート（`Require`）はセッションを見ない�
 ### 1. 人（ブラウザ）を通す
 
 ```go
+// セッション用のデータベースは、ジョブ状態用とは別に取ります（名前は識別子で後から
+// 変えられないため、片方の名前がもう片方の実態と合わなくなります）。
+fsClient, err := firestore.NewClientWithDatabase(ctx, projectID, "sessions")
+
+store, err := session.NewFirestoreStore(session.FirestoreConfig{
+    Client:      fsClient,
+    Collection:  "sessions",
+    StoreConfig: session.StoreConfig{Secure: true},
+})
+
 sessionHandler, err := session.New(session.Config{
-    ClientID:          os.Getenv("GOOGLE_CLIENT_ID"),
-    ClientSecret:      os.Getenv("GOOGLE_CLIENT_SECRET"),
-    RedirectURL:       serviceURL + "/auth/callback",
-    SessionAuthKey:    os.Getenv("SESSION_SECRET"),        // 16バイト以上
-    SessionEncryptKey: os.Getenv("SESSION_ENCRYPT_KEY"),   // 16/24/32バイト
-    SessionName:       "app-session",
-    IsSecureCookie:    true,
-    AllowedDomains:    []string{"example.com"},
+    ClientID:       os.Getenv("GOOGLE_CLIENT_ID"),
+    ClientSecret:   os.Getenv("GOOGLE_CLIENT_SECRET"),
+    RedirectURL:    serviceURL + "/auth/callback",
+    SessionName:    "app-session",
+    Store:          store,
+    IsSecureCookie: true,
+    AllowedDomains: []string{"example.com"},
 })
 ```
 
@@ -168,7 +179,8 @@ gcp-kit/
 ├── cloudlog/       # Cloud Logging 互換の slog 設定とトレース相関
 ├── cloudrun/       # /health の公開と、起動から正常停止まで
 ├── tasks/          # Cloud Tasks への投入（Enqueuer[T]）
-└── worker/         # Cloud Tasks からの受信ハンドラー（Handler[T]）
+├── worker/         # Cloud Tasks からの受信ハンドラー（Handler[T]）
+└── jobstatus/      # Firestore による進行状況の記録と履歴
 ```
 
 ---
@@ -177,7 +189,7 @@ gcp-kit/
 
 * `cloud.google.com/go/cloudtasks`: Cloud Tasks 操作
 * `golang.org/x/oauth2`: Google OAuth2 フロー
-* `github.com/gorilla/sessions`: セッション管理の実装
+* `cloud.google.com/go/firestore`: セッションとジョブ状態の保存
 * `google.golang.org/api/idtoken`: Google OIDC トークンの検証
 * `github.com/shouni/go-utils`: `slogctx` によるログ属性の引き回し（`cloudlog`）
 

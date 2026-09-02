@@ -10,21 +10,15 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"golang.org/x/oauth2"
 )
 
-// testCookieKey is a fixed 16-byte key used across tests to build cookie
-// stores. Its value is irrelevant beyond meeting the minimum key length.
-const testCookieKey = "1234567890123456"
-
-// newTestCookieStore returns a cookie-backed Store usable in tests, backed
-// by a fixed (non-secret) key pair.
-func newTestCookieStore() Store {
-	return NewCookieStore(
-		Options{Path: "/", MaxAge: 3600, HTTPOnly: true},
-		[]byte(testCookieKey), []byte(testCookieKey),
-	)
+// newTestStore returns an in-process Store usable in tests. Nothing that sits
+// above the Store interface needs Firestore to be exercised.
+func newTestStore() Store {
+	return NewMemoryStore(StoreConfig{MaxAge: time.Hour})
 }
 
 // testAllowedDomains returns an allowlist admitting the user@example.com

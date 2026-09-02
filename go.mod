@@ -5,7 +5,6 @@ go 1.27
 require (
 	cloud.google.com/go/cloudtasks v1.19.0
 	cloud.google.com/go/firestore v1.25.0
-	github.com/gorilla/securecookie v1.1.2
 	github.com/shouni/go-utils v1.7.1
 	golang.org/x/oauth2 v0.36.0
 	google.golang.org/api v0.295.0

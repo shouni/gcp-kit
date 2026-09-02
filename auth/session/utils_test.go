@@ -172,7 +172,7 @@ func TestFetchUserEmail(t *testing.T) {
 func TestClearSessionCookie(t *testing.T) {
 	t.Parallel()
 
-	store := newTestCookieStore()
+	store := newTestStore()
 	h := &Handler{store: store, sessionName: "test-session"}
 	req := httptest.NewRequest(http.MethodGet, "/x", nil)
 	rr := httptest.NewRecorder()
@@ -244,7 +244,7 @@ func TestRandomTokenAndGenerateState(t *testing.T) {
 func TestIssueSessionProducesAcceptedCookie(t *testing.T) {
 	t.Parallel()
 
-	h := &Handler{store: newTestCookieStore(), sessionName: "test-session", allowedDomains: testAllowedDomains()}
+	h := &Handler{store: newTestStore(), sessionName: "test-session", allowedDomains: testAllowedDomains()}
 
 	rr := httptest.NewRecorder()
 	if err := h.IssueSession(rr, httptest.NewRequest(http.MethodGet, "/", nil), "user@example.com"); err != nil {
@@ -282,11 +282,11 @@ func TestIssueSessionFailsClosed(t *testing.T) {
 		email   string
 	}{
 		"許可リストに無いアドレス": {
-			handler: &Handler{store: newTestCookieStore(), sessionName: "test-session", allowedDomains: testAllowedDomains()},
+			handler: &Handler{store: newTestStore(), sessionName: "test-session", allowedDomains: testAllowedDomains()},
 			email:   "intruder@evil.example",
 		},
 		"許可リストが空": {
-			handler: &Handler{store: newTestCookieStore(), sessionName: "test-session"},
+			handler: &Handler{store: newTestStore(), sessionName: "test-session"},
 			email:   "user@example.com",
 		},
 	}

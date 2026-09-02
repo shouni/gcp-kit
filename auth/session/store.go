@@ -1,46 +1,50 @@
 package session
 
 import (
+	"encoding/base64"
 	"net/http"
-
-	"github.com/gorilla/securecookie"
+	"sync"
+	"time"
 )
 
 // Store は、セッションの保存先です。
 //
-// 既定はクッキー自身（NewCookieStore）です。WithStore でサーバーサイドの実装へ
-// 差し替えると、Logout が本当の失効になり、issueSession の ID 振り直しが
-// セッション固定攻撃対策として実際に効き始めます。
+// 実体はサーバー側にあり、クッキーが運ぶのは不透明な ID だけです。だから署名も
+// 暗号化も要らず、セッション鍵を配る必要もありません。代わりに、失効・ログアウト・
+// セッション固定対策が実際に効きます。
 type Store interface {
-	// Get は、リクエストのクッキーからセッションを読み出します。
-	// クッキーが無い・読めない場合も空のセッションを返し、nil は返しません。
+	// Get は、リクエストのクッキーが指すセッションを読み出します。
+	// 見つからない・期限切れの場合も空のセッションを返し、nil は返しません。
+	//
+	// ★ 保存されていない ID をそのまま採用してはいけません。ID は
+	// クッキー経由で攻撃者が指定できるので、採用すると「攻撃者が選んだ ID の
+	// セッションを被害者が使う」状態を作れます（セッション固定）。見つからない
+	// ときは ID を空のままにし、Save に振り直させてください。
 	Get(r *http.Request, name string) (*Session, error)
 
 	// Save は、セッションを保存してクッキーを応答へ書きます。
 	//
-	// s.ID が空なら、新しい ID を振ってから保存します。ログインはここで ID を
-	// 空にして振り直させるので、これが無いとセッション固定攻撃が通ります。
-	// s.Options.MaxAge が負なら、保存ではなくクッキーの破棄を指示します。
+	// s.ID が空なら、新しい ID を振ってから保存します。
+	// s.Options.MaxAge が負なら、保存ではなく破棄です（保存済みの実体も消します）。
 	Save(r *http.Request, w http.ResponseWriter, s *Session) error
 }
 
 // Session は、1 リクエスト分のセッションです。
 type Session struct {
-	// ID は、サーバーサイドのストアがセッションを識別する値です。
-	// クッキー自体がセッションである既定のストアでは使いません。
+	// ID は、ストアがセッションを識別する値です。クッキーが運ぶのはこれだけです。
 	ID string
 
 	// Values は、セッションが持つ値です。
 	//
 	// 文字列に限っているのは、この kit が保存するのがメールアドレス・CSRF トークン・
-	// ログイン後の戻り先の 3 つだけだからです。任意の型を許すと gob への型登録が要り、
-	// 読み出しは毎回型アサーションになります。
+	// ログイン後の戻り先の 3 つだけだからです。任意の型を許すと保存形式ごとの
+	// 詰め替えが要り、読み出しは毎回型アサーションになります。
 	Values map[string]string
 
 	// Options は、発行するクッキーの属性です。
 	Options *Options
 
-	// IsNew は、既存のクッキーから読めなかったことを表します。
+	// IsNew は、既存のセッションを読めなかったことを表します。
 	IsNew bool
 
 	name string
@@ -69,65 +73,55 @@ type Options struct {
 	SameSite http.SameSite
 }
 
-// cookieStore は、クッキー自身をセッションの実体とする Store です。
-type cookieStore struct {
-	codecs  []securecookie.Codec
-	options Options
+// StoreConfig は、Store 実装に共通のクッキー設定です。
+type StoreConfig struct {
+	// MaxAge はセッションの有効期間です。0 なら 7 日。
+	// クッキーの属性であると同時に、保存した実体の期限でもあります。
+	MaxAge time.Duration
+	// Secure は https 限定にするかどうかです。ローカル開発以外では true にします。
+	Secure bool
+	// Path は既定で "/" です。
+	Path string
+	// SameSite は既定で Lax です。Strict にすると、Google からのコールバックが
+	// クロスサイトのトップレベル遷移なのでクッキーが送られません。
+	SameSite http.SameSite
 }
 
-// NewCookieStore は、クッキー自身をセッションの実体とする Store を返します。
+func (c StoreConfig) options() Options {
+	maxAge := c.MaxAge
+	if maxAge <= 0 {
+		maxAge = defaultSessionMaxAge
+	}
+	path := c.Path
+	if path == "" {
+		path = "/"
+	}
+	sameSite := c.SameSite
+	// ゼロ値は「未指定」です。http.SameSite の名前付き定数は 1 から始まるので、
+	// SameSiteDefaultMode と比べると既定が一度も効かず、SameSite 属性の無い
+	// クッキーが出ます（明示された SameSiteDefaultMode はそのまま尊重します）。
+	if sameSite == 0 {
+		sameSite = http.SameSiteLaxMode
+	}
+	return Options{
+		Path:     path,
+		MaxAge:   int(maxAge.Seconds()),
+		Secure:   c.Secure,
+		HTTPOnly: true,
+		SameSite: sameSite,
+	}
+}
+
+// newSessionID は、推測できないセッション ID を返します。
 //
-// keyPairs は署名キーと暗号化キーの組です（securecookie.CodecsFromPairs と同じ並び）。
-// サーバー側に何も持たないので失効はできません。詳細は Logout を参照してください。
-func NewCookieStore(opts Options, keyPairs ...[]byte) Store {
-	codecs := securecookie.CodecsFromPairs(keyPairs...)
-	// MaxAge はコーデックにも渡します。クッキー属性だけに設定すると、有効期限は
-	// ブラウザの自己申告になり、期限切れのクッキーを送り返されても受理してしまいます
-	// （securecookie は MAC に載せたタイムスタンプで検証します）。
-	for _, c := range codecs {
-		if sc, ok := c.(*securecookie.SecureCookie); ok {
-			sc.MaxAge(opts.MaxAge)
-		}
-	}
-	return &cookieStore{codecs: codecs, options: opts}
-}
-
-func (s *cookieStore) Get(r *http.Request, name string) (*Session, error) {
-	session := NewSession(name)
-	opts := s.options
-	session.Options = &opts
-
-	c, err := r.Cookie(name)
-	if err != nil || c.Value == "" {
-		return session, nil
-	}
-	if err := securecookie.DecodeMulti(name, c.Value, &session.Values, s.codecs...); err != nil {
-		// 復号に失敗した場合も呼び出し元が触れる形で返します（鍵の入れ替え直後など）。
-		// 途中まで書き込まれている可能性があるので、値は捨て直します。
-		session.Values = map[string]string{}
-		return session, err
-	}
-	session.IsNew = false
-	return session, nil
-}
-
-func (s *cookieStore) Save(_ *http.Request, w http.ResponseWriter, session *Session) error {
-	opts := session.Options
-	if opts == nil {
-		o := s.options
-		opts = &o
-	}
-
-	encoded, err := securecookie.EncodeMulti(session.Name(), session.Values, s.codecs...)
-	if err != nil {
-		return err
-	}
-	http.SetCookie(w, newCookie(session.Name(), encoded, opts))
-	return nil
+// 中身を持たない不透明な値なので、必要な性質は「推測できないこと」だけです
+// （crypto/rand の 32 バイト）。
+func newSessionID() (string, error) {
+	return randomToken(base64.RawURLEncoding)
 }
 
 // newCookie は Options からクッキーを組み立てます。
-// MaxAge が負なら、ブラウザはその場で破棄します（Logout / clearSessionCookie）。
+// MaxAge が負なら、ブラウザはその場で破棄します。
 func newCookie(name, value string, o *Options) *http.Cookie {
 	//nolint:gosec // G124: Secure はローカル開発(http)を許容するため設定値に従う。
 	return &http.Cookie{
@@ -140,4 +134,96 @@ func newCookie(name, value string, o *Options) *http.Cookie {
 		HttpOnly: o.HTTPOnly,
 		SameSite: o.SameSite,
 	}
+}
+
+// memoryStore は、プロセス内にセッションを保持する Store です。
+type memoryStore struct {
+	opts Options
+
+	mu      sync.Mutex
+	entries map[string]memoryEntry
+}
+
+type memoryEntry struct {
+	values    map[string]string
+	expiresAt time.Time
+}
+
+// NewMemoryStore は、プロセス内にセッションを保持する Store を返します。
+//
+// ★ 本番では使えません。Cloud Run のインスタンスごとに別のストアになるため、
+// インスタンスが替わった時点で利用者はログアウトされます。ローカル開発と、
+// Firestore を立てずに認証済みの画面を確かめるテストのための実装です。
+func NewMemoryStore(cfg StoreConfig) Store {
+	return &memoryStore{opts: cfg.options(), entries: map[string]memoryEntry{}}
+}
+
+func (s *memoryStore) Get(r *http.Request, name string) (*Session, error) {
+	session := NewSession(name)
+	opts := s.opts
+	session.Options = &opts
+
+	cookie, err := r.Cookie(name)
+	if err != nil || cookie.Value == "" {
+		return session, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.entries[cookie.Value]
+	if !ok {
+		return session, nil
+	}
+	if time.Now().After(entry.expiresAt) {
+		delete(s.entries, cookie.Value)
+		return session, nil
+	}
+
+	// 実体が見つかったときだけ ID を採用します（Store の約束）。
+	session.ID = cookie.Value
+	for k, v := range entry.values {
+		session.Values[k] = v
+	}
+	session.IsNew = false
+	return session, nil
+}
+
+func (s *memoryStore) Save(_ *http.Request, w http.ResponseWriter, session *Session) error {
+	opts := session.Options
+	if opts == nil {
+		o := s.opts
+		opts = &o
+	}
+
+	if opts.MaxAge < 0 {
+		s.mu.Lock()
+		delete(s.entries, session.ID)
+		s.mu.Unlock()
+		http.SetCookie(w, newCookie(session.Name(), "", opts))
+		return nil
+	}
+
+	if session.ID == "" {
+		id, err := newSessionID()
+		if err != nil {
+			return err
+		}
+		session.ID = id
+	}
+
+	values := make(map[string]string, len(session.Values))
+	for k, v := range session.Values {
+		values[k] = v
+	}
+
+	s.mu.Lock()
+	s.entries[session.ID] = memoryEntry{
+		values:    values,
+		expiresAt: time.Now().Add(time.Duration(opts.MaxAge) * time.Second),
+	}
+	s.mu.Unlock()
+
+	http.SetCookie(w, newCookie(session.Name(), session.ID, opts))
+	return nil
 }

@@ -10,12 +10,11 @@ import (
 // validTestConfig は、必須項目だけを埋めた最小の有効な Config を返します。
 func validTestConfig() Config {
 	return Config{
-		ClientID:          "client-id",
-		ClientSecret:      "client-secret",
-		RedirectURL:       "https://example.com/auth/callback",
-		SessionAuthKey:    "1234567890123456",
-		SessionEncryptKey: "1234567890123456",
-		SessionName:       "session",
+		ClientID:     "client-id",
+		ClientSecret: "client-secret",
+		RedirectURL:  "https://example.com/auth/callback",
+		SessionName:  "session",
+		Store:        newTestStore(),
 	}
 }
 
@@ -50,14 +49,10 @@ func TestNewHandlerValidatesConfig(t *testing.T) {
 			cfg:  without(func(c *Config) { c.SessionName = "" }),
 		},
 		{
-			// 署名キーは16バイト以上が必要です。
-			name: "short auth key",
-			cfg:  without(func(c *Config) { c.SessionAuthKey = "too-short" }),
-		},
-		{
-			// 暗号化キーは 16/24/32 バイトのいずれかである必要があります。
-			name: "invalid encrypt key length",
-			cfg:  without(func(c *Config) { c.SessionEncryptKey = "12345678901234567" }),
+			// 保存先に既定は置きません。通すと、プロセス内に持つ実装へ黙って倒れ、
+			// インスタンスが替わるたびに利用者がログアウトされます。
+			name: "missing store",
+			cfg:  without(func(c *Config) { c.Store = nil }),
 		},
 	}
 
@@ -113,13 +108,6 @@ func TestConfigDefaults(t *testing.T) {
 		t.Fatalf("stateCookieMaxAge() = %d, want %d", h.stateCookieMaxAge(), int(defaultStateMaxAge.Seconds()))
 	}
 
-	store, ok := h.store.(*cookieStore)
-	if !ok {
-		t.Fatalf("store type = %T, want *cookieStore", h.store)
-	}
-	if store.options.MaxAge != int(defaultSessionMaxAge.Seconds()) {
-		t.Fatalf("session MaxAge = %d, want %d", store.options.MaxAge, int(defaultSessionMaxAge.Seconds()))
-	}
 	if len(h.oauthConfig.Scopes) != len(defaultScopes) {
 		t.Fatalf("Scopes = %v, want %v", h.oauthConfig.Scopes, defaultScopes)
 	}
@@ -130,7 +118,6 @@ func TestOptionOverrides(t *testing.T) {
 
 	h, err := New(validTestConfig(),
 		WithPaths("/signin", "/signin/callback", "/signout"),
-		WithSessionMaxAge(time.Hour),
 		WithStateMaxAge(5*time.Minute),
 		WithScopes("openid"),
 	)
@@ -143,10 +130,6 @@ func TestOptionOverrides(t *testing.T) {
 	}
 	if h.stateCookieMaxAge() != 300 {
 		t.Fatalf("stateCookieMaxAge() = %d, want 300", h.stateCookieMaxAge())
-	}
-	store := h.store.(*cookieStore)
-	if store.options.MaxAge != 3600 {
-		t.Fatalf("session MaxAge = %d, want 3600", store.options.MaxAge)
 	}
 	if len(h.oauthConfig.Scopes) != 1 {
 		t.Fatalf("Scopes = %v, want [openid]", h.oauthConfig.Scopes)
@@ -176,14 +159,16 @@ func TestCallbackPathDrivesStateCookiePath(t *testing.T) {
 func TestStoreInjection(t *testing.T) {
 	t.Parallel()
 
-	injected := newTestCookieStore()
+	injected := newTestStore()
+	cfg := validTestConfig()
+	cfg.Store = injected
 
-	h, err := New(validTestConfig(), WithStore(injected))
+	h, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 	if h.store != injected {
-		t.Fatal("New() did not use the injected store")
+		t.Fatal("New() did not use the configured store")
 	}
 }
 

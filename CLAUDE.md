@@ -77,21 +77,29 @@ workflow and nothing else.
   (session auth, CSRF verification, CSRF context), and `Challenge` decides the response — a redirect when
   the session is missing or the address fell off the allowlist, **403 when Origin or CSRF verification
   failed**. Redirecting the latter would hide whether a forged request was rejected or waved through.
-  - Authorization is re-evaluated on **every** request, not once at login (see the security invariants below
-    for why the default cookie store forces this).
-  - **`Store` / `Session` / `Options` are this package's own, not `gorilla/sessions`'.** The dependency is
-    `gorilla/securecookie` alone, which is the part worth keeping: hand-rolling the signing and encryption
-    of an auth cookie to save one dependency is the wrong trade. What the interface buys is that a
-    server-side store (Firestore) is an implementation rather than a fork, and `Session.Values` is
-    `map[string]string` because this package stores exactly three values, all strings — an `any` map costs
-    a gob registration per type and a type assertion per read, for generality nothing uses.
-    This changed `WithStore`'s signature, which is a breaking change that **knowingly shipped in a minor
-    version**: `gorelease` says v2, and taking it would have rewritten the import path in 7 apps and 58
-    files for an option that nothing in the fleet calls. Re-check that "nothing calls it" before using this
-    as precedent for the next one.
-  - **`NewCookieStore` must pass MaxAge to the codecs, not just to the cookie.** Setting it only on the
-    cookie leaves expiry to the browser's good behaviour, so a client that keeps sending an expired cookie
-    is still admitted; securecookie checks the timestamp it signed into the value.
+  - Authorization is re-evaluated on **every** request, not once at login. That is now belt and braces
+    rather than the only mechanism (the store can revoke), and it stays because it costs one map lookup.
+  - **The session lives server-side; the cookie carries an opaque ID and nothing else.** That is why there
+    are no session keys to configure: no signing, no encryption, no `gorilla/securecookie`. What it buys is
+    that `Logout` and revocation actually take effect, and that the session-ID rotation below stops being a
+    no-op. `Session.Values` is `map[string]string` because this package stores exactly three values, all
+    strings — an `any` map costs a serializer registration per type and a type assertion per read, for
+    generality nothing uses.
+  - **`Config.Store` is required and has no default.** There is no default worth having: an in-process one
+    would give each Cloud Run instance its own sessions, logging users out whenever the instance changed,
+    and it would look fine in development because there is one instance. `NewMemoryStore` exists for tests
+    and local runs and says so.
+  - This removed `WithStore` and `WithSessionMaxAge` and changed `Config`, which is breaking and
+    **knowingly shipped in a minor version**: `gorelease` says v2, and taking it would have rewritten the
+    import path in 7 apps and 58 files. Re-check what actually calls the removed API before using this as
+    precedent for the next one.
+  - **The Firestore store must not adopt an ID it cannot find.** The ID arrives in a cookie, so it is
+    attacker-controlled; writing a session under an unknown ID lets an attacker pick the victim's session
+    identifier. `Get` leaves the ID empty when the document is missing and lets `Save` mint a fresh one.
+  - **Expiry is checked on read, not left to the TTL policy.** Firestore's TTL deletion runs up to 24 hours
+    late, so a document past `expiresAt` is still readable. The TTL policy is for reclaiming storage; the
+    read-side check is what actually expires a session. The policy still has to exist, or sessions
+    accumulate forever — unlike cookies, stored sessions do not expire themselves.
   - CSRF tokens are minted on GET only. Minting on a state-changing request would hand a valid token to a
     request that arrived without one.
   - Required settings are `Config` fields; everything optional is a `With*` option, matching how
@@ -107,11 +115,10 @@ workflow and nothing else.
   - **`IssueSession` is exported so no caller has to reimplement the session cookie.** It is
     `Callback`'s save without the redirect — both entry points go through one unexported `issueSession`,
     so the CSRF-token drop and the session-ID rotation cannot apply to one and not the other. Without it,
-    an app whose tests need a logged-in request builds its own `sessions.CookieStore` from the same keys
-    and writes `DefaultUserSessionKey` by hand, which is a copy of this package's internal format:
-    change how the cookie is written and that app's tests keep passing on a cookie the real `Handler` can
-    no longer read. adk-review had exactly that copy, and it is why the module carried a direct
-    `gorilla/sessions` requirement it did not otherwise need.
+    an app whose tests need a logged-in request builds its own store and writes `DefaultUserSessionKey` by
+    hand, which is a copy of this package's internal format: change how a session is written and that app's
+    tests keep passing on a cookie the real `Handler` can no longer read. adk-review had exactly that copy,
+    and it is why the module carried a direct `gorilla/sessions` requirement it did not otherwise need.
     It does not verify identity — that is the caller's — but it does apply the allowlist, so the
     fail-closed rule holds at both entry points.
 - **`auth/oidc`**: inbound OIDC Bearer verification for service-to-service calls, `Verifier`. **One type,
@@ -221,8 +228,8 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
   `oidc.Verifier.allowed`) deny everything rather than allow everything. Preserve this when touching
   authorization logic. `toLowerMap` drops whitespace-only entries so a list can't be "non-empty but allows
   nobody".
-- **Optional settings get defaults, not errors**: what `WithPaths`, `WithSessionMaxAge`, `WithStore` and
-  `WithLogger` set is zero-value-safe. Tests build `Handler{}` struct literals directly, so read these
+- **Optional settings get defaults, not errors**: what `WithPaths`, `WithStateMaxAge` and `WithLogger` set
+  is zero-value-safe. Tests build `Handler{}` struct literals directly, so read these
   through the accessors (`h.loginPath()`, `h.log()`) rather than the raw `cfg*` fields.
 - **Config structs + `validateConfig`**: every package entry point (`session.New`, `tasks.NewEnqueuer`)
   takes a `Config` struct and validates required fields / URL shape eagerly at construction time, not at
@@ -251,11 +258,10 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
   implementation — `oidc.Verifier` — specifically so one caller shape can't be hardened while the other
   drifts. Don't reintroduce a second verification path, and don't add a third entry point.
 - **Authorization is evaluated per request, not once at login.** `Handler.Authenticate` re-checks
-  `isAuthorized(email)` on every request, not just in `Callback`. The default `CookieStore` makes the cookie
-  itself the session, so there is nothing to revoke server-side; if the allowlist were only consulted at login,
-  an address removed from `AllowedEmails`/`AllowedDomains` would keep full access until the cookie expired
-  (7 days by default). Re-checking is what makes the allowlist an actual eviction mechanism, and it costs one
-  map lookup. `TestMiddlewareRejectsRevokedSession` guards it. Tests that drive an authenticated request
+  `isAuthorized(email)` on every request, not just in `Callback`. If the allowlist were only consulted at
+  login, an address removed from `AllowedEmails`/`AllowedDomains` would keep full access until the session
+  expired (7 days by default) — deleting the stored session would work, but that requires knowing which one.
+  Re-checking is what makes the allowlist an eviction mechanism on its own, and it costs one map lookup. `TestMiddlewareRejectsRevokedSession` guards it. Tests that drive an authenticated request
   through `Authenticate` must therefore give their `Handler` an allowlist (`testAllowedDomains()`).
 - **An empty allowlist means "verify nothing successfully", not "allow everyone".** `Verifier.Configured()`
   reports false without both an audience and a non-empty allowlist, and `auth.Require` then answers
@@ -274,9 +280,8 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
   protocol-relative to browsers), plus backslashes and control characters. `FuzzIsSafeRelativePath` and
   `FuzzBuildLoginRedirectURL` guard the invariant; `auth/session/testdata/fuzz/` holds regression seeds.
 - **The session ID is dropped at login so the store issues a new one.** `saveSessionAndRedirect` sets
-  `session.ID = ""` before saving. The default `CookieStore` has no ID and ignores it; this exists for the
-  server-side store `WithStore` advertises, where the cookie carries only an ID. Keeping the ID a login
-  hands an attacker who planted one a session that is now authenticated as the victim. The old entry is
+  `session.ID = ""` before saving, and `Save` mints a new one. Keeping the ID a login hands an attacker who
+  planted one a session that is now authenticated as the victim. The old entry is
   left to expire rather than deleted — it only ever held pre-login values, and deleting it would mean
   emitting two `Set-Cookie` headers for one name, which stores handle differently.
   `TestSaveSessionAndRedirectRotatesSessionID` guards it with a store that mimics the ID contract.

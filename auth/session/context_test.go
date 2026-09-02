@@ -42,7 +42,7 @@ func TestEmailFromContext(t *testing.T) {
 func TestAuthenticateInjectsEmail(t *testing.T) {
 	t.Parallel()
 
-	store := newTestCookieStore()
+	store := newTestStore()
 	h := &Handler{store: store, sessionName: "test-session", allowedDomains: testAllowedDomains()}
 
 	seedReq := httptest.NewRequest(http.MethodGet, "/", nil)

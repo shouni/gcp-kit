@@ -100,10 +100,12 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 // Logout はセッションを破棄し、ログインページ（または redirect_to で指定された同一オリジンの
 // パス）へリダイレクトします。
 //
-// 既定のクッキーストアはクッキー自体がセッションの実体であるため、
-// これはクライアントにクッキーの破棄を指示するだけで、サーバー側での失効はできません
-// （盗まれたクッキーは有効期限まで使えます）。確実な失効が必要な場合は
-// WithStore にサーバーサイドのストアを渡してください。
+// セッションの実体はストア側にあるので、これはサーバー側の失効です。クッキーを
+// 落とすだけでなく保存された実体も消えるため、盗まれたクッキーもその時点で無効です。
+//
+// ただし消えるのはこのアプリのセッションだけです。Google 側のログインは残るので、
+// ログイン画面へ送られた時点で何も聞かれずに承認が返ります。共用端末で「ログアウト」を
+// 成立させるには WithPrompt(PromptSelectAccount) が要ります。
 func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	if err := h.clearSessionCookie(w, r); err != nil {
 		h.log().WarnContext(r.Context(), "ログアウト時のセッション破棄に失敗", "error", err)

@@ -12,7 +12,7 @@ import (
 // newCSRFTestHandler は、セッションストアだけを備えた Handler を返します。
 // OAuth 設定は CSRF の経路に関係しないため設定しません。
 func newCSRFTestHandler() *Handler {
-	return &Handler{store: newTestCookieStore(), sessionName: "test-session", allowedDomains: testAllowedDomains()}
+	return &Handler{store: newTestStore(), sessionName: "test-session", allowedDomains: testAllowedDomains()}
 }
 
 func TestAuthenticatePutsCSRFTokenOnContext(t *testing.T) {

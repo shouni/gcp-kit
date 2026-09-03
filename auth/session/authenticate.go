@@ -42,6 +42,10 @@ var (
 //
 // セッションが無いだけの場合も auth.ErrNotAttempted ではなくエラーを返します。
 // ブラウザ向けの方式は auth.Protected の最後に置かれ、そこで応答を決めるためです。
+//
+// ストアを読むのは 1 リクエストにつき 1 回だけです。取得したセッションは CSRF の
+// 検証と発行まで持ち回します。Firestore ストアでは 1 回が 1 件の課金対象の読み取りで、
+// 同じ実体を読み直すぶんだけ往復と請求が増えます。
 func (h *Handler) Authenticate(w http.ResponseWriter, r *http.Request) (context.Context, error) {
 	session, err := h.store.Get(r, h.sessionName)
 	if err != nil {
@@ -49,6 +53,10 @@ func (h *Handler) Authenticate(w http.ResponseWriter, r *http.Request) (context.
 		h.log().WarnContext(r.Context(), "セッション取得失敗。新規セッションとして扱います", "error", err)
 		h.clearSessionCookieLogged(w, r)
 		return nil, fmt.Errorf("%w: %w", errNoSession, err)
+	}
+	if session == nil {
+		// Store の約束では nil を返しませんが、外部実装を差せる以上は確かめます。
+		return nil, fmt.Errorf("%w: store returned nil session", errNoSession)
 	}
 
 	email, ok := session.Values[DefaultUserSessionKey]
@@ -76,9 +84,12 @@ func (h *Handler) Authenticate(w http.ResponseWriter, r *http.Request) (context.
 	// トークンがまだ無い GET では新規に生成してセッションへ保存します。
 	// 生成を GET に限るのは、トークンを持たない状態変更リクエストに正当なトークンを
 	// 与えてしまうと、CSRF 検証そのものが意味をなさなくなるためです。
-	token := h.csrfTokenFromSession(r)
+	//
+	// トークンは手元のセッションから読みます。ここで読み直すと、認証済みの
+	// リクエストごとにストアを 2 回叩くことになります。
+	token := session.Values[CSRFTokenKey]
 	if token == "" && r.Method == http.MethodGet {
-		generated, genErr := h.generateAndSaveCSRFToken(w, r)
+		generated, genErr := h.generateAndSaveCSRFToken(w, r, session)
 		if genErr != nil {
 			return nil, fmt.Errorf("session: CSRFトークンの自動生成に失敗しました: %w", genErr)
 		}
@@ -195,15 +206,15 @@ func (h *Handler) validateCSRF(r *http.Request, session *Session) bool {
 	return subtle.ConstantTimeCompare([]byte(token), []byte(expected)) == 1
 }
 
-// generateAndSaveCSRFToken は、URLセーフな新しいトークンを生成して保存します。
-func (h *Handler) generateAndSaveCSRFToken(w http.ResponseWriter, r *http.Request) (string, error) {
+// generateAndSaveCSRFToken は、URLセーフな新しいトークンを生成し、渡された
+// セッションへ保存します。
+//
+// セッションを引数で受け取るのは、呼び出し元が既に読み込んだものを使うためです。
+// ここで読み直すと、トークンを持たない最初の GET だけストアへの往復が 1 つ増えます。
+func (h *Handler) generateAndSaveCSRFToken(w http.ResponseWriter, r *http.Request, session *Session) (string, error) {
 	token, err := randomToken(base64.RawURLEncoding)
 	if err != nil {
 		return "", fmt.Errorf("CSRFトークン生成失敗: %w", err)
-	}
-	session, err := h.store.Get(r, h.sessionName)
-	if err != nil {
-		return "", fmt.Errorf("セッションの取得に失敗しました: %w", err)
 	}
 	if session == nil {
 		return "", errors.New("session store returned nil session")
@@ -215,19 +226,6 @@ func (h *Handler) generateAndSaveCSRFToken(w http.ResponseWriter, r *http.Reques
 	}
 
 	return token, nil
-}
-
-// csrfTokenFromSession は現在のセッションから CSRF トークンを抽出します。
-func (h *Handler) csrfTokenFromSession(r *http.Request) string {
-	session, err := h.store.Get(r, h.sessionName)
-	if err != nil || session == nil {
-		return ""
-	}
-	token, ok := session.Values[CSRFTokenKey]
-	if !ok {
-		return ""
-	}
-	return token
 }
 
 // buildLoginRedirectURL はオープンリダイレクタ脆弱性を考慮したリダイレクト先URLを構築します。

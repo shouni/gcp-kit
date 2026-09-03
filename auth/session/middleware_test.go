@@ -406,26 +406,33 @@ func TestGenerateAndSaveCSRFToken(t *testing.T) {
 		h := &Handler{store: store, sessionName: "test-session"}
 		req := httptest.NewRequest(http.MethodGet, "/x", nil)
 		rr := httptest.NewRecorder()
+		session, err := store.Get(req, h.sessionName)
+		if err != nil {
+			t.Fatalf("store.Get() error = %v", err)
+		}
 
-		token, err := h.generateAndSaveCSRFToken(rr, req)
+		token, err := h.generateAndSaveCSRFToken(rr, req, session)
 		if err != nil {
 			t.Fatalf("GenerateAndSaveCSRFToken() error = %v", err)
 		}
 		if token == "" {
 			t.Fatal("token is empty")
 		}
+		if session.Values[CSRFTokenKey] != token {
+			t.Fatalf("session token = %q, want %q", session.Values[CSRFTokenKey], token)
+		}
 		if len(rr.Result().Cookies()) == 0 {
 			t.Fatal("expected session cookie to be set")
 		}
 	})
 
-	t.Run("store get error", func(t *testing.T) {
+	t.Run("nil session", func(t *testing.T) {
 		t.Parallel()
-		h := &Handler{store: nilSessionStore{}, sessionName: "test-session"}
+		h := &Handler{store: newTestStore(), sessionName: "test-session"}
 		req := httptest.NewRequest(http.MethodGet, "/x", nil)
 		rr := httptest.NewRecorder()
 
-		if _, err := h.generateAndSaveCSRFToken(rr, req); err == nil {
+		if _, err := h.generateAndSaveCSRFToken(rr, req, nil); err == nil {
 			t.Fatal("GenerateAndSaveCSRFToken() error = nil, want error")
 		}
 	})
@@ -436,53 +443,78 @@ func TestGenerateAndSaveCSRFToken(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/x", nil)
 		rr := httptest.NewRecorder()
 
-		if _, err := h.generateAndSaveCSRFToken(rr, req); err == nil {
+		if _, err := h.generateAndSaveCSRFToken(rr, req, NewSession(h.sessionName)); err == nil {
 			t.Fatal("GenerateAndSaveCSRFToken() error = nil, want error")
 		}
 	})
 }
 
-func TestGetCSRFTokenFromSession(t *testing.T) {
+// TestAuthenticateIssuesCSRFTokenOnGet は、トークンを持たない認証済み GET が
+// トークンを発行し、それをコンテキストへ載せることを確認します。
+//
+// これが空になると、テンプレートの hidden input が空のまま描画され、その画面から
+// の POST が一律 403 になります（利用アプリはここからトークンを受け取ります）。
+func TestAuthenticateIssuesCSRFTokenOnGet(t *testing.T) {
 	t.Parallel()
 
-	t.Run("returns saved token", func(t *testing.T) {
-		t.Parallel()
-		store := newTestStore()
-		h := &Handler{store: store, sessionName: "test-session"}
+	store := newTestStore()
+	h := &Handler{store: store, sessionName: "test-session", allowedDomains: testAllowedDomains()}
+	cookies := seedAuthenticatedSession(t, h, "user@example.com")
 
-		saveReq := httptest.NewRequest(http.MethodGet, "/x", nil)
-		saveRR := httptest.NewRecorder()
-		token, err := h.generateAndSaveCSRFToken(saveRR, saveReq)
-		if err != nil {
-			t.Fatalf("GenerateAndSaveCSRFToken() error = %v", err)
-		}
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	rr := httptest.NewRecorder()
 
+	ctx, err := h.Authenticate(rr, req)
+	if err != nil {
+		t.Fatalf("Authenticate() error = %v", err)
+	}
+	token := CSRFTokenFromContext(ctx)
+	if token == "" {
+		t.Fatal("CSRF token in context is empty")
+	}
+
+	// 2 回目の GET は、発行済みのトークンをそのまま返します。
+	req2 := httptest.NewRequest(http.MethodGet, "/x", nil)
+	for _, c := range cookies {
+		req2.AddCookie(c)
+	}
+	ctx2, err := h.Authenticate(httptest.NewRecorder(), req2)
+	if err != nil {
+		t.Fatalf("Authenticate() error = %v", err)
+	}
+	if got := CSRFTokenFromContext(ctx2); got != token {
+		t.Fatalf("token = %q, want the already issued %q", got, token)
+	}
+}
+
+// TestAuthenticateReadsStoreOnce は、認証済みリクエスト 1 本につきストアの読み出しが
+// 1 回であることを固定します。
+//
+// Firestore ストアでは 1 回が 1 件の課金対象の読み取りで、しかも往復が 1 つ増えます。
+// 手元のセッションを使わずに読み直す実装へ戻ると、この数字が黙って倍になります。
+func TestAuthenticateReadsStoreOnce(t *testing.T) {
+	t.Parallel()
+
+	counting := &countingStore{inner: newTestStore()}
+	h := &Handler{store: counting, sessionName: "test-session", allowedDomains: testAllowedDomains()}
+	cookies := seedAuthenticatedSession(t, h, "user@example.com")
+
+	// 最初の GET は CSRF トークンの発行を伴うため、保存が 1 回だけ増えます。
+	for i, want := range []struct{ gets, saves int }{{1, 1}, {1, 0}} {
+		counting.reset()
 		req := httptest.NewRequest(http.MethodGet, "/x", nil)
-		for _, c := range saveRR.Result().Cookies() {
+		for _, c := range cookies {
 			req.AddCookie(c)
 		}
-
-		if got := h.csrfTokenFromSession(req); got != token {
-			t.Fatalf("GetCSRFTokenFromSession() = %q, want %q", got, token)
+		if _, err := h.Authenticate(httptest.NewRecorder(), req); err != nil {
+			t.Fatalf("GET #%d: Authenticate() error = %v", i+1, err)
 		}
-	})
-
-	t.Run("store get error returns empty", func(t *testing.T) {
-		t.Parallel()
-		h := &Handler{store: nilSessionStore{}, sessionName: "test-session"}
-		req := httptest.NewRequest(http.MethodGet, "/x", nil)
-		if got := h.csrfTokenFromSession(req); got != "" {
-			t.Fatalf("GetCSRFTokenFromSession() = %q, want empty", got)
+		if counting.gets != want.gets || counting.saves != want.saves {
+			t.Fatalf("GET #%d: store.Get=%d store.Save=%d, want Get=%d Save=%d",
+				i+1, counting.gets, counting.saves, want.gets, want.saves)
 		}
-	})
-
-	t.Run("no token in session returns empty", func(t *testing.T) {
-		t.Parallel()
-		store := newTestStore()
-		h := &Handler{store: store, sessionName: "test-session"}
-		req := httptest.NewRequest(http.MethodGet, "/x", nil)
-		if got := h.csrfTokenFromSession(req); got != "" {
-			t.Fatalf("GetCSRFTokenFromSession() = %q, want empty", got)
-		}
-	})
+	}
 }

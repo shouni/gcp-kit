@@ -54,6 +54,44 @@ func newRewriteContext(t *testing.T, server *httptest.Server) context.Context {
 	return context.WithValue(context.Background(), oauth2.HTTPClient, httpClient)
 }
 
+// countingStore counts the reads and writes an operation makes against the
+// wrapped Store. Authenticate is expected to read exactly once per request:
+// against Firestore each read is a billed round trip.
+type countingStore struct {
+	inner Store
+	gets  int
+	saves int
+}
+
+func (c *countingStore) Get(r *http.Request, name string) (*Session, error) {
+	c.gets++
+	return c.inner.Get(r, name)
+}
+
+func (c *countingStore) Save(r *http.Request, w http.ResponseWriter, s *Session) error {
+	c.saves++
+	return c.inner.Save(r, w, s)
+}
+
+func (c *countingStore) reset() { c.gets, c.saves = 0, 0 }
+
+// seedAuthenticatedSession logs email in through the handler's own IssueSession
+// and returns the cookies a browser would then carry.
+func seedAuthenticatedSession(t *testing.T, h *Handler, email string) []*http.Cookie {
+	t.Helper()
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	if err := h.IssueSession(rr, req, email); err != nil {
+		t.Fatalf("IssueSession() error = %v", err)
+	}
+	cookies := rr.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("IssueSession() set no cookie")
+	}
+	return cookies
+}
+
 // failingStore is a Store whose Get always succeeds with a fresh session but
 // whose Save always fails, used to exercise session-save error paths.
 type failingStore struct{}

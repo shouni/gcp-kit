@@ -126,7 +126,7 @@ func TestIsSafeRelativePath(t *testing.T) {
 }
 
 // TestLoginRejectsBackslashRedirect は、Login が "/\evil.com" のような
-// リダイレクト先をセッションに保存しないことを確認します。
+// リダイレクト先を戻り先クッキーに載せないことを確認します。
 func TestLoginRejectsBackslashRedirect(t *testing.T) {
 	t.Parallel()
 
@@ -141,15 +141,31 @@ func TestLoginRejectsBackslashRedirect(t *testing.T) {
 
 	h.Login(rr, req)
 
-	req2 := httptest.NewRequest(http.MethodGet, "/", nil)
 	for _, c := range rr.Result().Cookies() {
-		req2.AddCookie(c)
+		if c.Name == DefaultRedirectCookie {
+			t.Fatalf("redirect target %q was carried, want none", c.Value)
+		}
 	}
-	session, err := h.store.Get(req2, h.sessionName)
-	if err != nil {
-		t.Fatalf("store.Get() error = %v", err)
-	}
-	if got, ok := session.Values[DefaultRedirectSessionKey]; ok {
-		t.Fatalf("redirect target %v was saved, want none", got)
+}
+
+// TestRedirectTargetRejectsTamperedCookie は、戻り先クッキーが書き換えられていても
+// 外部サイトへ送らないことを確認します。クッキーは相手が差し替えられるので、
+// 書き込み時の検証だけでは足りません。
+func TestRedirectTargetRejectsTamperedCookie(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []string{
+		url.QueryEscape("//evil.com"),
+		url.QueryEscape(`/\evil.com`),
+		url.QueryEscape("https://evil.com/"),
+		"%zz",        // QueryUnescape が失敗する値
+		"//evil.com", // エスケープすらされていない値
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/auth/callback", nil)
+		req.AddCookie(&http.Cookie{Name: DefaultRedirectCookie, Value: value})
+
+		if got := redirectTarget(req); got != "/" {
+			t.Fatalf("redirectTarget(%q) = %q, want \"/\"", value, got)
+		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"golang.org/x/oauth2"
@@ -82,14 +83,7 @@ func (h *Handler) issueSession(w http.ResponseWriter, r *http.Request, email str
 		return "", errors.New("session store returned nil session")
 	}
 
-	targetURL := "/"
-	if url, ok := session.Values[DefaultRedirectSessionKey]; ok {
-		delete(session.Values, DefaultRedirectSessionKey)
-		// 保存時にも検証済みですが、セッションの中身を信用せず読み出し時にも確認します。
-		if isSafeRelativePath(url) {
-			targetURL = url
-		}
-	}
+	targetURL := redirectTarget(r)
 
 	// ログイン前のセッションに紐づく CSRF トークンは破棄し、認証済みセッション用に
 	// 再生成させます（ログイン前に固定されたトークンを使い回させないため）。
@@ -108,6 +102,22 @@ func (h *Handler) issueSession(w http.ResponseWriter, r *http.Request, email str
 		return "", fmt.Errorf("save session: %w", err)
 	}
 	return targetURL, nil
+}
+
+// redirectTarget は、ログイン後に戻る先を決めます。無ければ "/" です。
+//
+// 値は Login が発行したクッキーが運びます。書き込み時にも検証していますが、
+// クッキーは相手が書き換えられるので、読み出し時にも必ず確認します。
+func redirectTarget(r *http.Request) string {
+	cookie, err := r.Cookie(DefaultRedirectCookie)
+	if err != nil || cookie.Value == "" {
+		return "/"
+	}
+	decoded, err := url.QueryUnescape(cookie.Value)
+	if err != nil || !isSafeRelativePath(decoded) {
+		return "/"
+	}
+	return decoded
 }
 
 // isAuthorized はメールアドレスが許可リストまたは許可ドメインに含まれるか判定します。

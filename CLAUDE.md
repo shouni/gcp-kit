@@ -98,6 +98,18 @@ workflow and nothing else.
   - **Expiry is checked on read, not left to Firestore's TTL policy**, which deletes up to 24 hours late.
     The policy still has to exist, or sessions accumulate forever — unlike cookies, stored sessions do not
     expire themselves.
+  - **`Authenticate` reads the store once per request.** The session it loads is carried through CSRF
+    verification and token minting. Every extra read is a billed Firestore read plus a round trip on the
+    hot path, and re-reading looks harmless in tests because `NewMemoryStore` costs nothing.
+    `TestAuthenticateReadsStoreOnce` fixes the count.
+  - **The post-login target rides in a cookie, not the session.** `/auth/login` is open to anyone, so
+    stashing `redirect_to` in the session let an unauthenticated caller create a stored session per
+    request — a write anyone could repeat, kept for `MaxAge`. `DefaultRedirectCookie` has the same
+    lifetime and `Path` as the state and PKCE cookies, and `Login` now touches no store at all.
+    `DefaultRedirectSessionKey` went with it rather than staying as a deprecated constant plus a fallback
+    branch: nothing in the fleet ever sent `redirect_to` (the only producer is `Challenge`'s own login
+    redirect), so the fallback would only have covered a login that started on one revision and finished
+    on the next, where dropping it costs the deep link and not the login.
   - CSRF tokens are minted on GET only. Minting on a state-changing request would hand a valid token to a
     request that arrived without one.
   - Required settings are `Config` fields; everything optional is a `With*` option, matching how
@@ -293,9 +305,19 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
 
 ### Testing notes
 
-Coverage is roughly auth 90% / oidc 98% / session 91% / cloudlog 97% / cloudrun 94% / tasks 87% /
-worker 96%. The uncovered remainder in `tasks` is the thin `*cloudtasks.Client` wrapper and
+Coverage is roughly auth 91% / oidc 98% / session 82% / cloudlog 97% / cloudrun 94% / jobstatus 59% /
+tasks 87% / worker 96%. The uncovered remainder in `tasks` is the thin `*cloudtasks.Client` wrapper and
 `NewEnqueuer`, which need real GCP credentials.
+
+**`jobstatus` sits lower than the rest for the same reason, and that is the accepted position.** What is
+uncovered there is the Firestore round trip itself — `Save`/`Get`/`Delete` and the iteration inside
+`collect`/`count` — while the parts that hold judgement are covered: `filteredQuery` at 100%, `paging.go`
+at 94%. Unlike `tasks`, it binds the concrete `*firestore.Client` rather than an interface, because
+Firestore's fluent API returns concrete types at every step and a seam would mean abstracting the whole
+query builder while changing `NewStore`'s signature for five apps. Covering the round trip means the
+Firestore emulator, which needs a JRE and a gcloud component locally and has nowhere to start in the
+shared CI workflow (its only injection point is `apt-packages`). Nothing in the fleet runs it today. Read
+the number as "the I/O is untested", not as a gap to close by accident.
 
 Fuzz targets live in `auth/session/fuzz_test.go` (`FuzzIsSafeRelativePath`, `FuzzBuildLoginRedirectURL`) and
 `auth/oidc/fuzz_test.go` (`FuzzExtractBearerToken`), and run for 20s each in CI. Run them longer when

@@ -35,8 +35,9 @@ const (
 	DefaultStateCookie = "oauth_state"
 	// DefaultVerifierCookie は、PKCE の code_verifier を一時保持するクッキー名です。
 	DefaultVerifierCookie = "oauth_verifier"
-	// DefaultRedirectSessionKey は、ログイン後のリダイレクト先を保持するセッションキーです。
-	DefaultRedirectSessionKey = "redirect_after_login"
+	// DefaultRedirectCookie は、ログイン後の戻り先を一時保持するクッキー名です。
+	// state / verifier と同じ寿命・同じ Path で、コールバックで消費されます。
+	DefaultRedirectCookie = "oauth_redirect"
 
 	// DefaultLoginPath は Login ハンドラーを配置する既定パスです。
 	DefaultLoginPath = "/auth/login"

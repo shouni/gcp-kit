@@ -3,6 +3,7 @@ package session
 import (
 	"crypto/subtle"
 	"net/http"
+	"net/url"
 
 	"golang.org/x/oauth2"
 	"google.golang.org/api/idtoken"
@@ -22,23 +23,17 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	// PKCE: 認可コードの横取りに備え、code_verifier をクライアント側に保持します。
 	verifier := oauth2.GenerateVerifier()
 
-	session, err := h.store.Get(r, h.sessionName)
-	if err != nil {
-		h.log().WarnContext(r.Context(), "セッション取得失敗。リダイレクト先の保存をスキップします", "error", err)
-	}
-	if err == nil && session != nil {
-		if redirectTo := r.URL.Query().Get("redirect_to"); redirectTo != "" {
-			// 同一オリジンの相対パスのみを保存します（オープンリダイレクタ対策）。
-			if isSafeRelativePath(redirectTo) {
-				session.Values[DefaultRedirectSessionKey] = redirectTo
-				if err := h.store.Save(r, w, session); err != nil {
-					h.log().ErrorContext(r.Context(), "Failed to save session for redirect", "error", err)
-					http.Error(w, "Could not save session", http.StatusInternalServerError)
-					return
-				}
-			} else {
-				h.log().WarnContext(r.Context(), "Invalid redirect_to parameter detected", "redirectTo", redirectTo)
-			}
+	// 戻り先は state / verifier と同じ短命クッキーで運びます。セッションに置くと、
+	// ログイン画面を開いただけの未認証の相手のぶんまで保存先に実体が作られ、
+	// 誰でも好きなだけ書き込める口になります。
+	if redirectTo := r.URL.Query().Get("redirect_to"); redirectTo != "" {
+		// 同一オリジンの相対パスのみを載せます（オープンリダイレクタ対策）。
+		if isSafeRelativePath(redirectTo) {
+			// クッキー値として素直に往復させるためエスケープします。読み出し側は
+			// 復元したうえで、もう一度 isSafeRelativePath に通します。
+			h.setTemporaryCookie(w, DefaultRedirectCookie, url.QueryEscape(redirectTo))
+		} else {
+			h.log().WarnContext(r.Context(), "Invalid redirect_to parameter detected", "redirectTo", redirectTo)
 		}
 	}
 
@@ -144,10 +139,13 @@ func (h *Handler) setTemporaryCookie(w http.ResponseWriter, name, value string) 
 	})
 }
 
-// clearTemporaryCookies は state / PKCE verifier クッキーを無効化します。
+// clearTemporaryCookies は state / PKCE verifier / 戻り先クッキーを無効化します。
 // 属性（Path/SameSite など）は発行時と一致させる必要があります。
+//
+// 応答へ書くだけなので、この後で r から同じクッキーを読むことはできます
+// （Callback は戻り先をここより後で読みます）。
 func (h *Handler) clearTemporaryCookies(w http.ResponseWriter) {
-	for _, name := range []string{DefaultStateCookie, DefaultVerifierCookie} {
+	for _, name := range []string{DefaultStateCookie, DefaultVerifierCookie, DefaultRedirectCookie} {
 		//nolint:gosec // G124: Secure はローカル開発(http)を許容するため設定値に従う。HttpOnly/SameSite は常に設定済み。
 		http.SetCookie(w, &http.Cookie{
 			Name:     name,

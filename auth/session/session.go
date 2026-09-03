@@ -148,7 +148,7 @@ func (h *Handler) isAuthorized(email string) bool {
 func (h *Handler) clearSessionCookie(w http.ResponseWriter, r *http.Request) error {
 	session, err := h.store.Get(r, h.sessionName)
 	if err != nil {
-		h.log().WarnContext(r.Context(), "Failed to get session on clear, proceeding with new session", "error", err)
+		h.log().WarnContext(r.Context(), "破棄するセッションを読めませんでした。新規セッションとして続けます", "error", err)
 	}
 	if session == nil {
 		return errors.New("session store returned nil session")
@@ -159,8 +159,8 @@ func (h *Handler) clearSessionCookie(w http.ResponseWriter, r *http.Request) err
 
 	session.Options.MaxAge = -1 // クッキーを即時期限切れにする
 	if err := h.store.Save(r, w, session); err != nil {
-		h.log().ErrorContext(r.Context(), "Failed to save session for clearing cookie", "error", err)
-		return err // エラーを呼び出し元に返す
+		h.log().ErrorContext(r.Context(), "セッションの破棄に失敗", "error", err)
+		return err
 	}
 	return nil
 }

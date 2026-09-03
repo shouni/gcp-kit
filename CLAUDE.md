@@ -35,10 +35,10 @@ build+vet+gofmt+race-tests, golangci-lint, govulncheck, and a fuzz job. **The fu
 package path in `ci.yml`** — move a fuzz test to another package and the job silently stops covering it, so
 update that list in the same commit. The Go version comes from `go.mod` (currently 1.27).
 
-**Two breaking changes shipped in minor versions**, both in `auth/session` (`WithStore`'s signature, then
-its removal along with `WithSessionMaxAge` and two `Config` fields). `gorelease` said v2 both times; taking
-it would have rewritten the import path in 7 apps and 58 files, for API that nothing in the fleet called.
-Check what actually calls the API before using this as precedent.
+**Three breaking changes shipped in minor versions**, all in `auth/session`: `WithStore`'s signature, then
+its removal along with `WithSessionMaxAge` and two `Config` fields, then `DefaultRedirectSessionKey`.
+`gorelease` said v2 every time; taking it would have rewritten the import path in 7 apps and 58 files, for
+API that nothing in the fleet called. Check what actually calls the API before using this as precedent.
 
 **Run `gorelease` before tagging.** It compares the module against its last tag and says both what broke
 and what the next version has to be. v1.12.0 shipped with `session.WithCSRFToken` unexported -- the symbol
@@ -200,7 +200,7 @@ workflow and nothing else.
   - **The pprof goroutine label goes on with `pprof.Do`, never `SetGoroutineLabels` alone.** The latter does
     not restore on return, so net/http's keep-alive connection goroutine carries the previous task's name
     into the next request — and a traceback naming the wrong task is worse than one naming none.
-- **`jobstatus`**: `Status`/`Recorder`/`StatusStore` — recording an async job's progress as a Firestore
+- **`jobstatus`**: `Status`/`Store[T]`/`Recorder` — recording an async job's progress as a Firestore
   document, and listing history by query. Completes the trio with `tasks` (enqueue) and `worker` (receive).
   It was its own module, `go-job-firestore`, until it moved here: a Firestore adapter is GCP-specific, and
   this repo's boundary rule is exactly that — the three packages that never depended on GCP were moved
@@ -209,11 +209,6 @@ workflow and nothing else.
     `PIPELINE_TIMEOUT < dispatch deadline <= Cloud Run timeout` holding, redelivery arrives serially, so a
     read-then-write rerun guard has no concurrent rival. What it replaces is walking a bucket prefix,
     sorting job IDs in memory, and hiding the cost behind a cache — all workarounds for having no query.
-  - **It shares its name with `go-job-kit`'s `jobstatus`, deliberately.** They are two implementations of
-    one concept — Firestore here, object storage there — and the fleet splits cleanly along that line: the
-    apps whose artifacts live in a bucket take the go-job-kit one, the media-generation apps take this one.
-    No app uses both. Same name, different import path, is what `math/rand` and `crypto/rand` do. Check
-    that "no app uses both" still holds before adding a third.
 
 ### File layout inside `auth`
 

@@ -43,15 +43,13 @@ var (
 // セッションが無いだけの場合も auth.ErrNotAttempted ではなくエラーを返します。
 // ブラウザ向けの方式は auth.Protected の最後に置かれ、そこで応答を決めるためです。
 //
-// ストアを読むのは 1 リクエストにつき 1 回だけです。取得したセッションは CSRF の
-// 検証と発行まで持ち回します。Firestore ストアでは 1 回が 1 件の課金対象の読み取りで、
-// 同じ実体を読み直すぶんだけ往復と請求が増えます。
+// ストアを読むのは 1 リクエストにつき 1 回だけで、取得したセッションは CSRF の検証と
+// 発行まで持ち回します。Firestore ストアでは 1 回が 1 件の課金対象の読み取りです。
 func (h *Handler) Authenticate(w http.ResponseWriter, r *http.Request) (context.Context, error) {
 	session, err := h.store.Get(r, h.sessionName)
 	switch {
 	case errors.Is(err, ErrStoreUnavailable):
-		// 保存先へ到達できないだけなので、クッキーには触れません。ここで消すと
-		// バックエンドの瞬断が、その瞬間の利用者全員のログアウトになります。
+		// 到達できないだけなので、クッキーには触れません（ErrStoreUnavailable を参照）。
 		h.log().ErrorContext(r.Context(), "セッションストアへ到達できません", "error", err, "path", r.URL.Path)
 		return nil, err
 	case err != nil:
@@ -90,9 +88,6 @@ func (h *Handler) Authenticate(w http.ResponseWriter, r *http.Request) (context.
 	// トークンがまだ無い GET では新規に生成してセッションへ保存します。
 	// 生成を GET に限るのは、トークンを持たない状態変更リクエストに正当なトークンを
 	// 与えてしまうと、CSRF 検証そのものが意味をなさなくなるためです。
-	//
-	// トークンは手元のセッションから読みます。ここで読み直すと、認証済みの
-	// リクエストごとにストアを 2 回叩くことになります。
 	token := session.Values[CSRFTokenKey]
 	if token == "" && r.Method == http.MethodGet {
 		generated, genErr := h.generateAndSaveCSRFToken(w, r, session)
@@ -131,9 +126,7 @@ func (h *Handler) Challenge(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, errInvalidCSRF):
 		http.Error(w, "Invalid CSRF token", http.StatusForbidden)
 	case errors.Is(err, ErrStoreUnavailable):
-		// ログイン画面へ送ってはいけません。認証は失われておらず、送った先の
-		// ログインもストアを要求するので、利用者は往復して同じ場所に戻るだけです。
-		// 503 なら、監視にも「認証が壊れた」ではなく「依存が落ちた」として出ます。
+		// ログイン画面へ送っても、その画面が同じ保存先を要求するので直りません。
 		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
 	case errors.Is(err, errNoSession), errors.Is(err, errUnauthMail):
 		// wantsJSON は Vary: Accept も立てます。この応答は実際に Accept で
@@ -220,11 +213,8 @@ func (h *Handler) validateCSRF(r *http.Request, session *Session) bool {
 	return subtle.ConstantTimeCompare([]byte(token), []byte(expected)) == 1
 }
 
-// generateAndSaveCSRFToken は、URLセーフな新しいトークンを生成し、渡された
-// セッションへ保存します。
-//
-// セッションを引数で受け取るのは、呼び出し元が既に読み込んだものを使うためです。
-// ここで読み直すと、トークンを持たない最初の GET だけストアへの往復が 1 つ増えます。
+// generateAndSaveCSRFToken は、URLセーフな新しいトークンを生成し、渡されたセッションへ
+// 保存します。セッションを引数で受け取るのは、呼び出し元が読み込んだものを使うためです。
 func (h *Handler) generateAndSaveCSRFToken(w http.ResponseWriter, r *http.Request, session *Session) (string, error) {
 	token, err := randomToken(base64.RawURLEncoding)
 	if err != nil {

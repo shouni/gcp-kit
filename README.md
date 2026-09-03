@@ -43,8 +43,7 @@
 * **`cloudrun`**: ヘルスチェックと、起動から正常停止まで
   * ヘルスチェックは `HealthPath`（`/health`）です。**`/healthz` は `*.run.app` の GFE が横取りします。**
   * `Serve` は ctx が終わるまで動かし、猶予内に止まらなければ強制的に閉じます。
-    テストでは `Listener` にポート 0 のリスナーを渡せます（空きポートを探して接続できるまで
-    待つ、という迂回が要りません）。
+    テストには `Listener`（ポート 0 のリスナーを渡せます）があります。
   * `WriteTimeout` に既定値を置きません（worker は数分かかることがあるため）。`ReadHeaderTimeout` は 5 秒です。
 * **`tasks`**: Cloud Tasks エンキュー（`Enqueuer[T]`）
   * OIDC トークンの設定を内側に隠します。`EnqueueWithName` は決定的な名前で投入し、`ALREADY_EXISTS` を
@@ -52,21 +51,19 @@
   * **`DispatchDeadline` は「ワーカーの実行時間の実効上限」です。** 未指定だと Cloud Tasks の既定 10 分が
     上限になり、Cloud Run の `timeout` を伸ばしても超えられません。アプリ側の全体タイムアウトは
     これより短く取ってください。
-  * **`T` は `worker.Handler[T]` と揃える規約で、型による強制ではありません。** 別パッケージなので
-    コンパイラは両者を結びつけません（`worker` を独立させているのは、Worker 単体プロセスに
-    Cloud Tasks クライアントを積ませないためです）。
+  * **`T` は `worker.Handler[T]` と揃える規約で、型による強制ではありません。**
+    別パッケージなので、コンパイラは両者を結びつけません。
 * **`worker`**: Cloud Tasks 向けハンドラー（`Handler[T]`）
-  * ペイロードをデコードして `TaskExecutor[T]` へ渡し、エラーを Cloud Tasks の再試行仕様に沿った
-    状態コードへ写します。リトライしても直らない失敗は `worker.ErrPermanent` でラップして打ち切れます。
+  * エラーは Cloud Tasks の再試行仕様に沿った状態コードへ写ります。リトライしても直らない失敗は
+    `worker.ErrPermanent` でラップすると、2xx を返して打ち切れます。
   * `MetadataFromContext` で再試行回数やタスク名を参照でき、at-least-once 配信に対して冪等に書けます。
     値は Cloud Tasks が付けるヘッダーそのものなので、**呼び出し元の確認は `auth.Require` の役目**です。
   * **デコードが既定で寛容なのは、ローリングデプロイ中の型のずれを生かすためです。** `WithStrictJSON`
     を既定にすると 400 になり、**Cloud Tasks は 4xx をリトライせずタスクを破棄**します。
-* **`jobstatus`**: Firestore による進行状況の記録と履歴（`Status` / `Recorder` / `StatusStore`）
-  * `tasks`（投入）・`worker`（受信）に対する「記録」で、三点が揃います。**トランザクションは
-    使いません**（詳細は CLAUDE.md）。
-  * `go-job-kit` の `jobstatus` と**同名なのは意図的です**。1 つの概念の 2 実装（Firestore とオブジェクト
-    ストレージ）で、併用するアプリはありません。`math/rand` と `crypto/rand` と同じ関係です。
+* **`jobstatus`**: Firestore による進行状況の記録と履歴（`Status` / `Store[T]` / `Recorder`）
+  * `tasks`（投入）・`worker`（受信）に対する「記録」で、三点が揃います。
+  * **`List` のページ送りは Offset です。** Firestore は読み飛ばしたぶんも課金するので、
+    抜粋しか出さない画面では `Latest` を使ってください。
 
 ---
 
@@ -83,11 +80,9 @@
 | 検証器が未設定 | 302 / 401（ログに記録） | 500 |
 | 状態変更で Origin が一致しない | 403 `Invalid origin` | — |
 | 状態変更で CSRF トークンが不正 | 403 `Invalid CSRF token` | — |
+| セッションの保存先へ到達できない | 503（クッキーは保持） | — |
 
-**下 2 行をリダイレクトにしません。** 偽造されたリクエストが素通りしたのか拒否されたのかを、
-利用者からも運用からも区別できなくなるためです。判定は POST / PUT / DELETE / PATCH にだけ掛かり、
-Bearer だけを受けるルート（`Require`）はセッションを見ないので該当しません。
-
+下 3 行はリダイレクトしません。状態変更の判定が掛かるのは POST / PUT / DELETE / PATCH だけです。
 状態コードは RFC 6750, Section 3.1、`WWW-Authenticate` の付与は RFC 9110, Section 15.5.2 に従います。
 これ以外の予期しない失敗は 500 になります。
 

@@ -82,15 +82,14 @@ func (s *firestoreStore) Get(r *http.Request, name string) (*Session, error) {
 			// 届きます。障害ではないので、実体が無いのと同じ扱いにします。
 			return session, nil
 		}
-		// ここまで来たら Firestore へ到達できていません。壊れたセッションと同じ
-		// 扱いにするとクッキーが消され、瞬断が全利用者のログアウトになります。
+		// ここから先は Firestore へ到達できていません（ErrStoreUnavailable を参照）。
 		return session, fmt.Errorf("%w: %w", ErrStoreUnavailable, err)
 	}
 
 	var doc sessionDoc
 	if err := snap.DataTo(&doc); err != nil {
-		// 読めはしたがデコードできない実体は「壊れたセッション」です。ここは
-		// ErrStoreUnavailable ではないので、クッキーを消して作り直させます。
+		// 読めたが解釈できない実体は壊れたセッションです。ラップしないことで、
+		// 呼び出し側にクッキーを消させて作り直させます。
 		return session, err
 	}
 	// TTL の削除は遅れるので、期限は読み出し側でも見ます。

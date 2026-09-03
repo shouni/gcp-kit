@@ -106,12 +106,13 @@ type Handler struct {
 	allowedEmails  map[string]struct{}
 	allowedDomains map[string]struct{}
 
-	cfgLoginPath    string
-	cfgCallbackPath string
-	cfgLogoutPath   string
-	cfgStateMaxAge  time.Duration
-	prompt          Prompt
-	logger          *slog.Logger
+	cfgLoginPath     string
+	cfgCallbackPath  string
+	cfgLogoutPath    string
+	cfgStateMaxAge   time.Duration
+	cfgSessionMaxAge time.Duration
+	prompt           Prompt
+	logger           *slog.Logger
 }
 
 // New は設定に基づき Handler を生成します。
@@ -142,18 +143,19 @@ func New(cfg Config, opts ...Option) (*Handler, error) {
 	}
 
 	return &Handler{
-		oauthConfig:     oauthCfg,
-		store:           cfg.Store,
-		sessionName:     cfg.SessionName,
-		isSecureCookie:  strings.EqualFold(serviceURL.Scheme, "https"),
-		allowedEmails:   toLowerMap(cfg.AllowedEmails),
-		allowedDomains:  toLowerMap(cfg.AllowedDomains),
-		cfgLoginPath:    o.loginPath,
-		cfgCallbackPath: o.callbackPath,
-		cfgLogoutPath:   o.logoutPath,
-		cfgStateMaxAge:  o.stateMaxAge,
-		prompt:          o.prompt,
-		logger:          o.logger,
+		oauthConfig:      oauthCfg,
+		store:            cfg.Store,
+		sessionName:      cfg.SessionName,
+		isSecureCookie:   strings.EqualFold(serviceURL.Scheme, "https"),
+		allowedEmails:    toLowerMap(cfg.AllowedEmails),
+		allowedDomains:   toLowerMap(cfg.AllowedDomains),
+		cfgLoginPath:     o.loginPath,
+		cfgCallbackPath:  o.callbackPath,
+		cfgLogoutPath:    o.logoutPath,
+		cfgStateMaxAge:   o.stateMaxAge,
+		cfgSessionMaxAge: o.sessionMaxAge,
+		prompt:           o.prompt,
+		logger:           o.logger,
 	}, nil
 }
 
@@ -245,6 +247,14 @@ func (h *Handler) stateCookieMaxAge() int {
 		return int(h.cfgStateMaxAge.Seconds())
 	}
 	return int(defaultStateMaxAge.Seconds())
+}
+
+// sessionMaxAge はセッションの寿命です。クッキーと保存した実体の両方に同じ値を使います。
+func (h *Handler) sessionMaxAge() time.Duration {
+	if h.cfgSessionMaxAge > 0 {
+		return h.cfgSessionMaxAge
+	}
+	return defaultSessionMaxAge
 }
 
 // toLowerMap は許可リストを正規化（トリム + 小文字化）して map にします。

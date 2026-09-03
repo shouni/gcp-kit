@@ -50,7 +50,7 @@ func ExampleProtected() {
 		ClientSecret:   "secret",
 		ServiceURL:     "https://app.example.com",
 		SessionName:    "app-session",
-		Store:          session.NewMemoryStore(session.StoreConfig{Secure: true}),
+		Store:          session.NewMemoryStore(),
 		AllowedDomains: []string{"example.com"},
 	})
 	if err != nil {

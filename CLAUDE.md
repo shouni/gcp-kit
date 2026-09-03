@@ -36,7 +36,9 @@ package path in `ci.yml`** — move a fuzz test to another package and the job s
 update that list in the same commit. The Go version comes from `go.mod` (currently 1.27).
 
 **Three breaking changes shipped in minor versions**, all in `auth/session`: `WithStore`'s signature, then
-its removal along with `WithSessionMaxAge` and two `Config` fields, then `DefaultRedirectSessionKey`.
+its removal along with `WithSessionMaxAge` and two `Config` fields, then `DefaultRedirectSessionKey`
+(and, in the same series, `Config.RedirectURL`/`IsSecureCookie` → `ServiceURL`, `oidc.New` returning an error,
+and the `Store` interface itself).
 `gorelease` said v2 every time; taking it would have rewritten the import path in 7 apps and 58 files, for
 API that nothing in the fleet called. Check what actually calls the API before using this as precedent.
 
@@ -92,18 +94,26 @@ workflow and nothing else.
   - **`Config.Store` is required and has no default.** An in-process default would give each Cloud Run
     instance its own sessions and would look fine in development, where there is one instance.
     `NewMemoryStore` is opt-in and says what it is for.
-  - **A store must not adopt an ID it cannot find.** The ID arrives in a cookie, so it is
+  - **`Store` is `Load` / `Save` / `Delete` keyed by ID, and never sees HTTP.** It used to issue the
+    cookie too, which put `Secure` in two places (Handler for the state cookies, Store for the session
+    cookie), made "MaxAge < 0 means delete" a convention both implementations had to know, and meant a fake
+    needed `httptest`. The Handler now owns the cookie — name, `Path=/`, `HttpOnly`, `SameSite=Lax`,
+    `Secure` from `ServiceURL`, lifetime from `WithSessionMaxAge` — and a store fake is ten lines over a map.
+    `WithSessionMaxAge` was removed once as unused; it returns because the lifetime has to live somewhere
+    and the Handler is now the only party that knows it.
+  - **The Handler adopts a cookie's ID only when `Load` finds it.** The ID arrives in a cookie, so it is
     attacker-controlled; writing a session under an unknown ID lets an attacker choose the victim's session
-    identifier. `Get` leaves the ID empty when there is no stored session and lets `Save` mint one.
-  - **The same ID is checked for shape before it becomes a document path.** The Firestore store hands it to
-    `Doc()`, which reads `/` as a separator, so an unchecked cookie can address a document outside the
-    collection — `isValidSessionID` admits only what `newSessionID` mints and `Get` drops anything else
-    before the RPC. Validating against our own shape rather than enumerating Firestore's rules is what
-    makes it hold: 43 base64url characters cannot be `.`, `..`, or over the 1500-byte limit. The one
-    exception is the reserved `__…__` form, which the shape does allow, so `newSessionID` mints until it
-    passes — a random ID lands there about once in 17 million, and that login would fail to save with
-    nothing to reproduce. `TestIsValidSessionID` and `TestNewSessionIDIsAlwaysValid` hold both ends
-    together.
+    identifier. `loadSession` leaves `id` empty on `ErrNotFound` and lets `saveSession` mint one. The
+    fixation tests plant a *well-formed* ID for this reason — a malformed one never reaches the store.
+  - **The ID is checked for shape twice: by the Handler before `Load`, and by the Firestore store before
+    it becomes a document path.** `Doc()` reads `/` as a separator, so an unchecked cookie can address a
+    document outside the collection. `isValidSessionID` admits only what `newSessionID` mints; validating
+    against our own shape rather than enumerating Firestore's rules is what makes it hold: 43 base64url
+    characters cannot be `.`, `..`, or over the 1500-byte limit. The one exception is the reserved `__…__`
+    form, which the shape does allow, so `newSessionID` mints until it passes — a random ID lands there
+    about once in 17 million, and that login would fail to save with nothing to reproduce. The Handler's
+    check is what keeps the memory and Firestore stores behaving the same for junk cookies; the store's
+    check is there because `Store` is public API and the Handler is not its only possible caller.
   - **Expiry is checked on read, not left to Firestore's TTL policy**, which deletes up to 24 hours late.
     The policy still has to exist, or sessions accumulate forever — unlike cookies, stored sessions do not
     expire themselves.
@@ -356,7 +366,7 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
 
 ### Testing notes
 
-Coverage is roughly auth 91% / oidc 98% / session 84% / cloudlog 97% / cloudrun 94% / jobstatus 59% /
+Coverage is roughly auth 91% / oidc 98% / session 87% / cloudlog 97% / cloudrun 94% / jobstatus 59% /
 tasks 87% / worker 96%. The uncovered remainder in `tasks` is the thin `*cloudtasks.Client` wrapper and
 `NewEnqueuer`, which need real GCP credentials.
 

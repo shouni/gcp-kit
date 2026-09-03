@@ -46,31 +46,27 @@ var (
 // ストアを読むのは 1 リクエストにつき 1 回だけで、取得したセッションは CSRF の検証と
 // 発行まで持ち回します。Firestore ストアでは 1 回が 1 件の課金対象の読み取りです。
 func (h *Handler) Authenticate(w http.ResponseWriter, r *http.Request) (context.Context, error) {
-	session, err := h.store.Get(r, h.sessionName)
+	session, err := h.loadSession(r)
 	switch {
 	case errors.Is(err, ErrStoreUnavailable):
 		// 到達できないだけなので、クッキーには触れません（ErrStoreUnavailable を参照）。
 		h.log().ErrorContext(r.Context(), "セッションストアへ到達できません", "error", err, "path", r.URL.Path)
 		return nil, err
 	case err != nil:
-		// 実体が壊れている場合は、クッキーを消して次のログインで作り直させます。
+		// 実体が壊れている場合は、実体ごと消して次のログインで作り直させます。
 		h.log().WarnContext(r.Context(), "セッション取得失敗。新規セッションとして扱います", "error", err)
-		h.clearSessionCookieLogged(w, r)
+		h.clearSessionLogged(w, r, session)
 		return nil, fmt.Errorf("%w: %w", errNoSession, err)
 	}
-	if session == nil {
-		// Store の約束では nil を返しませんが、外部実装を差せる以上は確かめます。
-		return nil, fmt.Errorf("%w: store returned nil session", errNoSession)
-	}
 
-	email, ok := session.Values[DefaultUserSessionKey]
+	email, ok := session.values[DefaultUserSessionKey]
 	if !ok || email == "" {
 		return nil, errNoSession
 	}
 
 	if !h.isAuthorized(email) {
 		h.log().WarnContext(r.Context(), "許可リストにないセッション", "email", email, "path", r.URL.Path)
-		h.clearSessionCookieLogged(w, r)
+		h.clearSessionLogged(w, r, session)
 		return nil, fmt.Errorf("%w: %q", errUnauthMail, email)
 	}
 
@@ -88,7 +84,7 @@ func (h *Handler) Authenticate(w http.ResponseWriter, r *http.Request) (context.
 	// トークンがまだ無い GET では新規に生成してセッションへ保存します。
 	// 生成を GET に限るのは、トークンを持たない状態変更リクエストに正当なトークンを
 	// 与えてしまうと、CSRF 検証そのものが意味をなさなくなるためです。
-	token := session.Values[CSRFTokenKey]
+	token := session.values[CSRFTokenKey]
 	if token == "" && r.Method == http.MethodGet {
 		generated, genErr := h.generateAndSaveCSRFToken(w, r, session)
 		if genErr != nil {
@@ -155,10 +151,10 @@ func wantsJSON(w http.ResponseWriter, r *http.Request) bool {
 	return strings.Contains(strings.ToLower(r.Header.Get("Accept")), "application/json")
 }
 
-// clearSessionCookieLogged はクッキーの破棄を試み、失敗しても処理を止めません。
-func (h *Handler) clearSessionCookieLogged(w http.ResponseWriter, r *http.Request) {
-	if err := h.clearSessionCookie(w, r); err != nil {
-		h.log().WarnContext(r.Context(), "セッションクッキーのクリアに失敗", "error", err)
+// clearSessionLogged はセッションの破棄を試み、失敗しても処理を止めません。
+func (h *Handler) clearSessionLogged(w http.ResponseWriter, r *http.Request, s *session) {
+	if err := h.clearSession(w, r, s); err != nil {
+		h.log().WarnContext(r.Context(), "セッションの破棄に失敗", "error", err)
 	}
 }
 
@@ -186,12 +182,12 @@ func validateOrigin(r *http.Request) bool {
 }
 
 // validateCSRF は、リクエストのトークンを検証します。
-func (h *Handler) validateCSRF(r *http.Request, session *Session) bool {
+func (h *Handler) validateCSRF(r *http.Request, session *session) bool {
 	if session == nil {
 		return false
 	}
 
-	expected, ok := session.Values[CSRFTokenKey]
+	expected, ok := session.values[CSRFTokenKey]
 	if !ok || expected == "" {
 		return false
 	}
@@ -215,17 +211,17 @@ func (h *Handler) validateCSRF(r *http.Request, session *Session) bool {
 
 // generateAndSaveCSRFToken は、URLセーフな新しいトークンを生成し、渡されたセッションへ
 // 保存します。セッションを引数で受け取るのは、呼び出し元が読み込んだものを使うためです。
-func (h *Handler) generateAndSaveCSRFToken(w http.ResponseWriter, r *http.Request, session *Session) (string, error) {
+func (h *Handler) generateAndSaveCSRFToken(w http.ResponseWriter, r *http.Request, session *session) (string, error) {
 	token, err := randomToken(base64.RawURLEncoding)
 	if err != nil {
 		return "", fmt.Errorf("CSRFトークン生成失敗: %w", err)
 	}
 	if session == nil {
-		return "", errors.New("session store returned nil session")
+		return "", errors.New("session: no session to store the CSRF token in")
 	}
 
-	session.Values[CSRFTokenKey] = token
-	if err := h.store.Save(r, w, session); err != nil {
+	session.values[CSRFTokenKey] = token
+	if err := h.saveSession(w, r, session); err != nil {
 		return "", fmt.Errorf("CSRFトークン保存失敗: %w", err)
 	}
 

@@ -30,6 +30,8 @@
   * **セッションの実体はサーバー側にあり、クッキーが運ぶのは不透明な ID だけです。** 署名も暗号化も
     要らないので、セッション鍵の設定はありません。代わりに `Logout` と失効が実際に効きます。
     保存先は `Config.Store` で必須です（`NewFirestoreStore` / テストとローカルには `NewMemoryStore`）。
+    `Store` は ID をキーにした `Load` / `Save` / `Delete` だけで、HTTP には触れません。寿命は
+    `WithSessionMaxAge`（既定 7 日）です。
   * **`WithPrompt(session.PromptSelectAccount)` を渡さないと、ログアウトが効いて見えません。**
     `Logout` が消せるのはこのアプリのクッキーだけで、Google 側のセッションは残るためです。
 * **`auth/oidc`**: サービス間呼び出しの受信検証（`Verifier`）
@@ -104,10 +106,10 @@
 // 変えられないため、片方の名前がもう片方の実態と合わなくなります）。
 fsClient, err := firestore.NewClientWithDatabase(ctx, projectID, "sessions")
 
+// Store は値の永続化だけを持ちます。クッキーの属性と寿命は Handler 側です。
 store, err := session.NewFirestoreStore(session.FirestoreConfig{
-    Client:      fsClient,
-    Collection:  "sessions",
-    StoreConfig: session.StoreConfig{Secure: true},
+    Client:     fsClient,
+    Collection: "sessions",
 })
 
 // リダイレクト先とクッキーの Secure 属性は ServiceURL から導出されます。

@@ -1,6 +1,8 @@
 package session
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -8,148 +10,158 @@ import (
 	"time"
 )
 
-// saveNew は、空のセッションに値を入れて保存し、発行されたクッキーを返します。
-func saveNew(t *testing.T, store Store, values map[string]string) *http.Cookie {
-	t.Helper()
+// TestMemoryStoreRoundTrip は、保存した値が同じ ID で読み戻せること、返る map が
+// 保存側と共有されていないことを確認します。
+func TestMemoryStoreRoundTrip(t *testing.T) {
+	t.Parallel()
 
-	session, err := store.Get(httptest.NewRequest(http.MethodGet, "/", nil), "s")
-	if err != nil {
-		t.Fatalf("Get() error = %v", err)
-	}
-	for k, v := range values {
-		session.Values[k] = v
-	}
+	store := NewMemoryStore()
+	ctx := context.Background()
+	values := map[string]string{DefaultUserSessionKey: "user@example.com"}
 
-	rr := httptest.NewRecorder()
-	if err := store.Save(httptest.NewRequest(http.MethodGet, "/", nil), rr, session); err != nil {
+	if err := store.Save(ctx, "id-1", values, time.Hour); err != nil {
 		t.Fatalf("Save() error = %v", err)
+	}
+	values[DefaultUserSessionKey] = "changed-after-save"
+
+	back, err := store.Load(ctx, "id-1")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if back[DefaultUserSessionKey] != "user@example.com" {
+		t.Errorf("Load() = %v, want the values as saved（保存後の変更が漏れています）", back)
+	}
+	back[DefaultUserSessionKey] = "changed-after-load"
+	if again, _ := store.Load(ctx, "id-1"); again[DefaultUserSessionKey] != "user@example.com" {
+		t.Error("Load() が返した map を書き換えると保存側が変わります")
+	}
+}
+
+// TestMemoryStoreNotFound は、無い ID が ErrNotFound になることを確認します。
+// Handler はこれを「実体が無い」と読んでクッキーの ID を採用しません。
+func TestMemoryStoreNotFound(t *testing.T) {
+	t.Parallel()
+
+	if _, err := NewMemoryStore().Load(context.Background(), "never-saved"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Load() error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestMemoryStoreExpires は、期限を過ぎた実体が読めないことを確認します。
+func TestMemoryStoreExpires(t *testing.T) {
+	t.Parallel()
+
+	store := NewMemoryStore()
+	ctx := context.Background()
+	if err := store.Save(ctx, "id-1", map[string]string{"k": "v"}, time.Nanosecond); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	time.Sleep(time.Millisecond)
+
+	if _, err := store.Load(ctx, "id-1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Load() error = %v, want ErrNotFound for an expired session", err)
+	}
+}
+
+// TestMemoryStoreDeletes は、Delete が実体を消し、無い ID でもエラーにしないことを確認します。
+func TestMemoryStoreDeletes(t *testing.T) {
+	t.Parallel()
+
+	store := NewMemoryStore()
+	ctx := context.Background()
+	if err := store.Save(ctx, "id-1", map[string]string{"k": "v"}, time.Hour); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	if err := store.Delete(ctx, "id-1"); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if _, err := store.Load(ctx, "id-1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Load() after Delete = %v, want ErrNotFound", err)
+	}
+	if err := store.Delete(ctx, "id-1"); err != nil {
+		t.Fatalf("Delete() of a missing ID error = %v, want nil", err)
+	}
+}
+
+// TestSessionCookieAttributes は、Handler が発行するセッションクッキーに防御属性が
+// 載ることを確認します。属性は落ちても機能が動くので気付けません。HttpOnly が外れた
+// クッキーでもログインは通り、壊れているのは XSS に対する防御だけです。
+func TestSessionCookieAttributes(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{store: newTestStore(), sessionName: "s", isSecureCookie: true, cfgSessionMaxAge: time.Hour}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	s := newSession()
+	s.values[DefaultUserSessionKey] = "user@example.com"
+
+	if err := h.saveSession(rr, req, s); err != nil {
+		t.Fatalf("saveSession() error = %v", err)
 	}
 	cookies := rr.Result().Cookies()
 	if len(cookies) != 1 {
 		t.Fatalf("cookies = %d, want 1", len(cookies))
 	}
-	return cookies[0]
-}
-
-// getWith は、クッキーを付けてセッションを読み出します。
-func getWith(t *testing.T, store Store, c *http.Cookie) *Session {
-	t.Helper()
-
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.AddCookie(c)
-	session, err := store.Get(req, "s")
-	if err != nil {
-		t.Fatalf("Get() error = %v", err)
-	}
-	if session == nil {
-		t.Fatal("Get() は nil を返さない約束です")
-	}
-	return session
-}
-
-// TestMemoryStoreRoundTrip は、保存した値が読み戻せることと、発行したクッキーに
-// 防御属性が載ることを確認します。
-//
-// 属性は落ちても機能が動くので気付けません。HttpOnly が外れたクッキーでも
-// ログインは通り、壊れているのは XSS に対する防御だけです。
-func TestMemoryStoreRoundTrip(t *testing.T) {
-	t.Parallel()
-
-	store := NewMemoryStore(StoreConfig{MaxAge: time.Hour, Secure: true})
-
-	got := saveNew(t, store, map[string]string{DefaultUserSessionKey: "user@example.com"})
-
+	got := cookies[0]
 	if !got.HttpOnly || !got.Secure || got.SameSite != http.SameSiteLaxMode || got.Path != "/" || got.MaxAge != 3600 {
 		t.Errorf("cookie attributes = %+v", got)
 	}
 	// クッキーが運ぶのは不透明な ID だけで、中身は載りません。
-	if got.Value == "" || got.Value == "user@example.com" {
-		t.Errorf("cookie value = %q（ID ではありません）", got.Value)
-	}
-
-	back := getWith(t, store, got)
-	if back.IsNew {
-		t.Error("保存済みのセッションを読んだのに IsNew が true です")
-	}
-	if back.Values[DefaultUserSessionKey] != "user@example.com" {
-		t.Errorf("Values = %v", back.Values)
-	}
-	if back.ID != got.Value {
-		t.Errorf("ID = %q, want %q", back.ID, got.Value)
+	if got.Value != s.id || !isValidSessionID(got.Value) || strings.Contains(got.Value, "example.com") {
+		t.Errorf("cookie value = %q（発行した ID ではありません）", got.Value)
 	}
 }
 
-// TestMemoryStoreIgnoresUnknownID は、保存されていない ID を採用しないことを
-// 確認します。
+// TestLoadSessionIgnoresUnknownID は、保存されていない ID を採用しないことを確認します。
 //
 // ★ これがセッション固定攻撃への防御です。ID はクッキー経由で攻撃者が指定できるので、
 // 採用してしまうと「攻撃者が選んだ ID のセッションを被害者が使う」状態を作れます。
-func TestMemoryStoreIgnoresUnknownID(t *testing.T) {
+// 形の合う ID で試すのは、形の合わないものは Load の手前で捨てられるためです。
+func TestLoadSessionIgnoresUnknownID(t *testing.T) {
 	t.Parallel()
 
-	store := NewMemoryStore(StoreConfig{MaxAge: time.Hour})
-	planted := &http.Cookie{Name: "s", Value: "attacker-known-id"}
-
-	session := getWith(t, store, planted)
-	if !session.IsNew {
-		t.Error("保存されていない ID が既存セッションとして扱われました")
+	h := &Handler{store: newTestStore(), sessionName: "s"}
+	planted, err := newSessionID()
+	if err != nil {
+		t.Fatalf("newSessionID() error = %v", err)
 	}
-	if session.ID != "" {
-		t.Errorf("ID = %q、保存されていない ID を採用しています", session.ID)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: "s", Value: planted})
+
+	s, err := h.loadSession(req)
+	if err != nil {
+		t.Fatalf("loadSession() error = %v", err)
+	}
+	if s.id != "" {
+		t.Fatalf("id = %q、保存されていない ID を採用しています", s.id)
 	}
 
 	// 保存すると、攻撃者の知らない ID が振られること。
-	session.Values[DefaultUserSessionKey] = "user@example.com"
 	rr := httptest.NewRecorder()
-	if err := store.Save(httptest.NewRequest(http.MethodGet, "/", nil), rr, session); err != nil {
-		t.Fatalf("Save() error = %v", err)
+	if err := h.saveSession(rr, req, s); err != nil {
+		t.Fatalf("saveSession() error = %v", err)
 	}
-	if session.ID == "" || session.ID == planted.Value {
-		t.Errorf("ID = %q, want 新しい ID", session.ID)
-	}
-	if got := rr.Result().Cookies()[0].Value; got == planted.Value {
-		t.Error("仕込まれた ID がそのままクッキーへ返されました")
+	if s.id == "" || s.id == planted {
+		t.Errorf("id = %q, want 新しい ID", s.id)
 	}
 }
 
-// TestMemoryStoreExpires は、期限を過ぎたセッションが読めないことを確認します。
-func TestMemoryStoreExpires(t *testing.T) {
+// TestLoadSessionRejectsMalformedIDBeforeTheStore は、形の合わない ID がストアへ
+// 渡らないことを確認します。unavailableStore は呼ばれれば必ずエラーを返すので、
+// エラー無しで戻れば呼ばれていません。
+func TestLoadSessionRejectsMalformedIDBeforeTheStore(t *testing.T) {
 	t.Parallel()
 
-	store := NewMemoryStore(StoreConfig{MaxAge: time.Nanosecond})
-	c := saveNew(t, store, map[string]string{DefaultUserSessionKey: "user@example.com"})
+	h := &Handler{store: unavailableStore{}, sessionName: "s"}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: "s", Value: "sessions/../other/doc"})
 
-	time.Sleep(time.Millisecond)
-
-	session := getWith(t, store, c)
-	if !session.IsNew || len(session.Values) != 0 {
-		t.Errorf("期限切れのセッションが読めています: %+v", session)
+	s, err := h.loadSession(req)
+	if err != nil {
+		t.Fatalf("loadSession() error = %v, want nil（ストアに触れていない）", err)
 	}
-}
-
-// TestMemoryStoreDeletes は、MaxAge が負の Save が実体ごと消すことを確認します。
-//
-// クッキーを落とすだけでは、盗まれたクッキーは有効なままです。サーバー側の実体を
-// 消すことが「本当のログアウト」の中身です。
-func TestMemoryStoreDeletes(t *testing.T) {
-	t.Parallel()
-
-	store := NewMemoryStore(StoreConfig{MaxAge: time.Hour})
-	c := saveNew(t, store, map[string]string{DefaultUserSessionKey: "user@example.com"})
-
-	session := getWith(t, store, c)
-	session.Options.MaxAge = -1
-	rr := httptest.NewRecorder()
-	if err := store.Save(httptest.NewRequest(http.MethodGet, "/", nil), rr, session); err != nil {
-		t.Fatalf("Save() error = %v", err)
-	}
-	if got := rr.Result().Cookies()[0].MaxAge; got != -1 {
-		t.Errorf("cookie MaxAge = %d, want -1", got)
-	}
-
-	// 同じクッキーをもう一度出しても、実体が無いので通らないこと。
-	if back := getWith(t, store, c); !back.IsNew {
-		t.Error("削除したはずのセッションが、元のクッキーで読めています")
+	if s.id != "" {
+		t.Fatalf("id = %q, want empty", s.id)
 	}
 }
 
@@ -206,41 +218,25 @@ func TestNewSessionIDIsAlwaysValid(t *testing.T) {
 	}
 }
 
-// TestFirestoreStoreRejectsMalformedIDBeforeTheRPC は、形の合わない ID が
-// Firestore へ渡らないことを確認します。
+// TestFirestoreStoreRejectsMalformedIDBeforeTheRPC は、形の合わない ID が Firestore へ
+// 渡らないことを確認します。Handler も手前で捨てますが、Store は公開 API なので
+// 自分でも確かめます。
 //
 // client を nil にしてあるのが検証そのものです。問い合わせに進めば nil 参照で
 // パニックするので、素通りするようになれば必ずここで落ちます。
 func TestFirestoreStoreRejectsMalformedIDBeforeTheRPC(t *testing.T) {
 	t.Parallel()
 
-	store := &firestoreStore{collection: "sessions", opts: StoreConfig{MaxAge: time.Hour}.options()}
+	store := &firestoreStore{collection: "sessions"}
+	ctx := context.Background()
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.AddCookie(&http.Cookie{Name: "s", Value: "sessions/../other/doc"})
-
-	session, err := store.Get(req, "s")
-	if err != nil {
-		t.Fatalf("Get() error = %v、want nil（実体が無いのと同じ扱い）", err)
+	if _, err := store.Load(ctx, "sessions/../other/doc"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Load() error = %v, want ErrNotFound（実体が無いのと同じ扱い）", err)
 	}
-	if !session.IsNew || session.ID != "" {
-		t.Fatalf("IsNew = %v, ID = %q、形の合わない ID を採用しています", session.IsNew, session.ID)
+	if err := store.Save(ctx, "sessions/../other/doc", map[string]string{}, time.Hour); err == nil {
+		t.Fatal("Save() error = nil, want error: 手で入れた ID を書いてはいけない")
 	}
-}
-
-// TestFirestoreStoreRefusesForeignID は、手で入れた ID をそのまま書かないことを
-// 確認します。Get が採用する ID は検証済みなので、ここへ来るのは呼び出し側が
-// 組み立てた値だけです。
-func TestFirestoreStoreRefusesForeignID(t *testing.T) {
-	t.Parallel()
-
-	store := &firestoreStore{collection: "sessions", opts: StoreConfig{MaxAge: time.Hour}.options()}
-
-	session := NewSession("s")
-	session.ID = "sessions/../other/doc"
-
-	err := store.Save(httptest.NewRequest(http.MethodGet, "/", nil), httptest.NewRecorder(), session)
-	if err == nil {
-		t.Fatal("Save() error = nil、want error")
+	if err := store.Delete(ctx, "sessions/../other/doc"); err == nil {
+		t.Fatal("Delete() error = nil, want error")
 	}
 }

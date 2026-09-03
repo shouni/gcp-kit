@@ -20,7 +20,7 @@ func newTestSession(t *testing.T) *session.Handler {
 		ClientSecret:   "secret",
 		ServiceURL:     "https://app.example.com",
 		SessionName:    "s",
-		Store:          session.NewMemoryStore(session.StoreConfig{}),
+		Store:          session.NewMemoryStore(),
 		AllowedDomains: []string{"example.com"},
 	})
 	if err != nil {

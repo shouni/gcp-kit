@@ -93,22 +93,7 @@ func TestAuthenticatePutsCSRFTokenOnContext(t *testing.T) {
 func loginSessionCookie(t *testing.T, h *Handler, email string) *http.Cookie {
 	t.Helper()
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	rec := httptest.NewRecorder()
-	session, err := h.store.Get(req, h.sessionName)
-	if err != nil {
-		t.Fatalf("store.Get() error = %v", err)
-	}
-	session.Values[DefaultUserSessionKey] = email
-	if err := h.store.Save(req, rec, session); err != nil {
-		t.Fatalf("store.Save() error = %v", err)
-	}
-
-	cookies := rec.Result().Cookies()
-	if len(cookies) == 0 {
-		t.Fatal("セッションクッキーが生成されていない")
-	}
-	return cookies[0]
+	return seedSession(t, h.store, h.sessionName, map[string]string{DefaultUserSessionKey: email})
 }
 
 // CSRFTokenFromContext は、値が無いコンテキストでも空文字を返すこと。

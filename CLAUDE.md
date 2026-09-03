@@ -190,6 +190,15 @@ workflow and nothing else.
   client), so nothing stops `NewEnqueuer[A]` from being paired with `NewHandler[B]`. What `T` does buy is
   a fixed payload type inside the app. Do not "fix" this by having `worker` import `tasks`; the realistic
   failure is revision skew between the two Cloud Run services, which no type parameter can catch.
+  - **`WorkerPath` exists because the target URL has to match the worker's route byte for byte.** Cloud
+    Tasks delivers to exactly the string it was given, and chi matches exactly the pattern it registered, so
+    a trailing slash turns every task into a 404 with nothing in the enqueue path to say so. Five apps
+    carried the same 20-line `WorkerTaskURL` — join, don't double an existing suffix, drop the trailing
+    slash — and it now lives here, resolved once at construction. `Audience` still defaults to the bare
+    `WorkerURL`, because the receiving side compares against the service URL, not the route.
+  - **`Queue[T]` is the interface `*Enqueuer[T]` satisfies**, so an app's port can embed it instead of
+    writing a wrapper whose only job is to exist as an interface. Three apps had three differently shaped
+    ones.
   - **`EnqueueWithName` treats `ALREADY_EXISTS` as success**, so a retried enqueue creates one task. That
     covers duplicate *creation* only — delivery is still at-least-once, which the worker has to handle.
   - **`DispatchDeadline` is the worker's effective run-time limit, not a wait.** Unset means Cloud Tasks'

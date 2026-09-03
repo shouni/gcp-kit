@@ -112,6 +112,16 @@ func TestValidateConfig(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name:    "worker path without leading slash",
+			cfg:     func() Config { c := validConfig(); c.WorkerPath = "tasks/run"; return c }(),
+			wantErr: true,
+		},
+		{
+			name:    "worker path with query",
+			cfg:     func() Config { c := validConfig(); c.WorkerPath = "/tasks/run?x=1"; return c }(),
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -349,6 +359,55 @@ func TestEnqueueWithNameRejectsInvalidTaskIDBeforeCallingAPI(t *testing.T) {
 	}
 	if client.req != nil {
 		t.Fatal("CreateTask must not be called for an invalid taskID")
+	}
+}
+
+// TestWorkerPathBuildsTheTarget は、WorkerURL と WorkerPath から配送先が組み立てられ、
+// 末尾スラッシュや二重の継ぎ足しが正規化されることを確認します。配送先はルータの
+// 登録と一字一句一致していないと届かないので、この正規化が要ります。
+func TestWorkerPathBuildsTheTarget(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		workerURL  string
+		workerPath string
+		want       string
+	}{
+		{name: "no path keeps the url", workerURL: "https://w.run.app/tasks/run", workerPath: "", want: "https://w.run.app/tasks/run"},
+		{name: "joins onto a bare service url", workerURL: "https://w.run.app", workerPath: "/tasks/run", want: "https://w.run.app/tasks/run"},
+		{name: "joins onto a trailing slash", workerURL: "https://w.run.app/", workerPath: "/tasks/run", want: "https://w.run.app/tasks/run"},
+		{name: "does not double an existing path", workerURL: "https://w.run.app/tasks/run", workerPath: "/tasks/run", want: "https://w.run.app/tasks/run"},
+		{name: "drops a trailing slash after the path", workerURL: "https://w.run.app/tasks/run/", workerPath: "/tasks/run", want: "https://w.run.app/tasks/run"},
+		{name: "keeps a base path prefix", workerURL: "https://w.run.app/api", workerPath: "/tasks/run", want: "https://w.run.app/api/tasks/run"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := validConfig()
+			cfg.WorkerURL = tt.workerURL
+			cfg.WorkerPath = tt.workerPath
+			cfg.Audience = ""
+
+			client := &fakeTaskClient{}
+			enqueuer, err := newEnqueuerWithClient[samplePayload](cfg, client)
+			if err != nil {
+				t.Fatalf("newEnqueuerWithClient() returned error: %v", err)
+			}
+			if err := enqueuer.Enqueue(context.Background(), samplePayload{}); err != nil {
+				t.Fatalf("Enqueue() returned error: %v", err)
+			}
+
+			if got := client.req.GetTask().GetHttpRequest().GetUrl(); got != tt.want {
+				t.Fatalf("target URL = %q, want %q", got, tt.want)
+			}
+			// Audience の既定は継ぎ足す前の WorkerURL のままです（受信側はサービスの URL で照合します）。
+			if got := client.req.GetTask().GetHttpRequest().GetOidcToken().GetAudience(); got != tt.workerURL {
+				t.Fatalf("Audience = %q, want the bare WorkerURL %q", got, tt.workerURL)
+			}
+		})
 	}
 }
 

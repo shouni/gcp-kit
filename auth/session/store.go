@@ -5,6 +5,7 @@ import (
 	"errors"
 	"maps"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -119,10 +120,59 @@ func (c StoreConfig) options() Options {
 	}
 }
 
+// sessionIDLen は newSessionID が返す長さです（32 バイトを base64 RawURL で表した 43 文字）。
+const sessionIDLen = 43
+
 // newSessionID は、推測できないセッション ID を返します。中身を持たない値なので、
 // 必要な性質は推測できないことだけです（crypto/rand の 32 バイト）。
+//
+// 発行したものが isValidSessionID を通ることを、ここで確かめてから返します。乱数が
+// "__…__"（Firestore の予約形）を引く確率は 6×10⁻⁸ ほどですが、引いた回だけ保存が
+// 失敗してログインが 500 になるうえ、再現しないので原因にたどり着けません。
 func newSessionID() (string, error) {
-	return randomToken(base64.RawURLEncoding)
+	for range 4 {
+		id, err := randomToken(base64.RawURLEncoding)
+		if err != nil {
+			return "", err
+		}
+		if isValidSessionID(id) {
+			return id, nil
+		}
+	}
+	return "", errors.New("session: could not mint a usable session ID")
+}
+
+// isValidSessionID は、newSessionID が発行しうる形かどうかを返します。
+//
+// ID はクッキーで届くので、中身は相手が決められます。それを保存先の識別子に使う
+// 実装（Firestore ストアはドキュメントのパスに使います）では、形を確かめてから
+// 渡してください。"/" を含む値は Doc() がサブコレクションのパスとして解釈するため、
+// 素通しにすると本来のコレクションの外を指せます。
+//
+// 判定は発行側の形そのもの（43 文字の base64 RawURL）に固定します。保存先ごとの
+// 禁則を数え上げるより、自分が出す形だけを通すほうが取りこぼしません。43 文字である
+// 時点で Firestore の "."、".."、1500 バイト上限は満たせなくなります。
+//
+// ただし "__…__" だけは長さでも文字種でも排除できないので、明示的に落とします。
+// newSessionID もこの判定を通るまで振り直すので、発行と検証が食い違いません。
+func isValidSessionID(id string) bool {
+	if len(id) != sessionIDLen {
+		return false
+	}
+	if strings.HasPrefix(id, "__") && strings.HasSuffix(id, "__") {
+		return false
+	}
+	for _, r := range id {
+		if !isSessionIDChar(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// isSessionIDChar は base64 RawURL の文字集合です。
+func isSessionIDChar(r rune) bool {
+	return r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_'
 }
 
 // newCookie は Options からクッキーを組み立てます。

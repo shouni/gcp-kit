@@ -3,6 +3,7 @@ package session
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -149,5 +150,97 @@ func TestMemoryStoreDeletes(t *testing.T) {
 	// 同じクッキーをもう一度出しても、実体が無いので通らないこと。
 	if back := getWith(t, store, c); !back.IsNew {
 		t.Error("削除したはずのセッションが、元のクッキーで読めています")
+	}
+}
+
+// TestIsValidSessionID は、発行した形の ID だけを通すことを確認します。
+//
+// ID はクッキーで届く＝相手が決められる値で、Firestore ストアはそれをドキュメントの
+// パスに使います。"/" を通してしまうと、Doc() がサブコレクションのパスとして解釈し、
+// 本来のコレクションの外を指せます。
+func TestIsValidSessionID(t *testing.T) {
+	t.Parallel()
+
+	minted, err := newSessionID()
+	if err != nil {
+		t.Fatalf("newSessionID() error = %v", err)
+	}
+	if !isValidSessionID(minted) {
+		t.Fatalf("発行した ID %q が弾かれました", minted)
+	}
+
+	for _, id := range []string{
+		"",
+		"attacker-known-id",                   // 長さが違う
+		minted[:len(minted)-1],                // 1 文字短い
+		minted + "x",                          // 1 文字長い
+		strings.Repeat("a", 42) + "/",         // サブコレクションへのパス
+		strings.Repeat("a", 41) + "/./",       // 同上（相対パス片）
+		strings.Repeat("a", 42) + ".",         // Firestore の禁則
+		strings.Repeat("_", 43),               // Firestore が予約する "__…__"
+		"__" + strings.Repeat("a", 39) + "__", // 同上（文字種と長さは正しい）
+		strings.Repeat("a", 42) + " ",         // 空白
+		strings.Repeat("a", 42) + "\n",        // 制御文字
+		strings.Repeat("a", 42) + "\u00e3",    // 非 ASCII
+	} {
+		if isValidSessionID(id) {
+			t.Errorf("isValidSessionID(%q) = true、want false", id)
+		}
+	}
+}
+
+// TestNewSessionIDIsAlwaysValid は、発行した ID が必ず自分の検証を通ることを
+// 確認します。通らない ID を発行すると、その回だけ保存が失敗し、しかも乱数由来なので
+// 再現しません。
+func TestNewSessionIDIsAlwaysValid(t *testing.T) {
+	t.Parallel()
+
+	for range 1000 {
+		id, err := newSessionID()
+		if err != nil {
+			t.Fatalf("newSessionID() error = %v", err)
+		}
+		if !isValidSessionID(id) {
+			t.Fatalf("発行した ID %q が自分の検証を通りません", id)
+		}
+	}
+}
+
+// TestFirestoreStoreRejectsMalformedIDBeforeTheRPC は、形の合わない ID が
+// Firestore へ渡らないことを確認します。
+//
+// client を nil にしてあるのが検証そのものです。問い合わせに進めば nil 参照で
+// パニックするので、素通りするようになれば必ずここで落ちます。
+func TestFirestoreStoreRejectsMalformedIDBeforeTheRPC(t *testing.T) {
+	t.Parallel()
+
+	store := &firestoreStore{collection: "sessions", opts: StoreConfig{MaxAge: time.Hour}.options()}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: "s", Value: "sessions/../other/doc"})
+
+	session, err := store.Get(req, "s")
+	if err != nil {
+		t.Fatalf("Get() error = %v、want nil（実体が無いのと同じ扱い）", err)
+	}
+	if !session.IsNew || session.ID != "" {
+		t.Fatalf("IsNew = %v, ID = %q、形の合わない ID を採用しています", session.IsNew, session.ID)
+	}
+}
+
+// TestFirestoreStoreRefusesForeignID は、手で入れた ID をそのまま書かないことを
+// 確認します。Get が採用する ID は検証済みなので、ここへ来るのは呼び出し側が
+// 組み立てた値だけです。
+func TestFirestoreStoreRefusesForeignID(t *testing.T) {
+	t.Parallel()
+
+	store := &firestoreStore{collection: "sessions", opts: StoreConfig{MaxAge: time.Hour}.options()}
+
+	session := NewSession("s")
+	session.ID = "sessions/../other/doc"
+
+	err := store.Save(httptest.NewRequest(http.MethodGet, "/", nil), httptest.NewRecorder(), session)
+	if err == nil {
+		t.Fatal("Save() error = nil、want error")
 	}
 }

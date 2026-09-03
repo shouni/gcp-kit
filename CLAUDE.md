@@ -95,6 +95,15 @@ workflow and nothing else.
   - **A store must not adopt an ID it cannot find.** The ID arrives in a cookie, so it is
     attacker-controlled; writing a session under an unknown ID lets an attacker choose the victim's session
     identifier. `Get` leaves the ID empty when there is no stored session and lets `Save` mint one.
+  - **The same ID is checked for shape before it becomes a document path.** The Firestore store hands it to
+    `Doc()`, which reads `/` as a separator, so an unchecked cookie can address a document outside the
+    collection — `isValidSessionID` admits only what `newSessionID` mints and `Get` drops anything else
+    before the RPC. Validating against our own shape rather than enumerating Firestore's rules is what
+    makes it hold: 43 base64url characters cannot be `.`, `..`, or over the 1500-byte limit. The one
+    exception is the reserved `__…__` form, which the shape does allow, so `newSessionID` mints until it
+    passes — a random ID lands there about once in 17 million, and that login would fail to save with
+    nothing to reproduce. `TestIsValidSessionID` and `TestNewSessionIDIsAlwaysValid` hold both ends
+    together.
   - **Expiry is checked on read, not left to Firestore's TTL policy**, which deletes up to 24 hours late.
     The policy still has to exist, or sessions accumulate forever — unlike cookies, stored sessions do not
     expire themselves.
@@ -307,7 +316,7 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
 
 ### Testing notes
 
-Coverage is roughly auth 91% / oidc 98% / session 82% / cloudlog 97% / cloudrun 94% / jobstatus 59% /
+Coverage is roughly auth 91% / oidc 98% / session 84% / cloudlog 97% / cloudrun 94% / jobstatus 59% /
 tasks 87% / worker 96%. The uncovered remainder in `tasks` is the thin `*cloudtasks.Client` wrapper and
 `NewEnqueuer`, which need real GCP credentials.
 

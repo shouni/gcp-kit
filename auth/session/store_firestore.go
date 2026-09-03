@@ -70,6 +70,12 @@ func (s *firestoreStore) Get(r *http.Request, name string) (*Session, error) {
 	if err != nil || cookie.Value == "" {
 		return session, nil
 	}
+	// 発行した形でない ID は、Firestore へ問い合わせる前に捨てます。実体が
+	// あるはずもなく、そのまま渡すとドキュメントのパスを相手に決めさせることに
+	// なるためです（isValidSessionID を参照）。
+	if !isValidSessionID(cookie.Value) {
+		return session, nil
+	}
 
 	snap, err := s.client.Collection(s.collection).Doc(cookie.Value).Get(r.Context())
 	if err != nil {
@@ -104,6 +110,12 @@ func (s *firestoreStore) Get(r *http.Request, name string) (*Session, error) {
 }
 
 func (s *firestoreStore) Save(r *http.Request, w http.ResponseWriter, session *Session) error {
+	// Get が採用する ID は検証済みで、空なら下で振り直します。ここへ来る他の値は
+	// 呼び出し側が手で入れたものなので、書く前に止めます。
+	if session.ID != "" && !isValidSessionID(session.ID) {
+		return errors.New("session: refusing to write a session ID that was not minted here")
+	}
+
 	opts := session.Options
 	if opts == nil {
 		o := s.opts

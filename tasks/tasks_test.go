@@ -476,6 +476,38 @@ func TestEnqueueWithOptions(t *testing.T) {
 	}
 }
 
+// TestValidateDeadlines は、パイプライン上限が Cloud Tasks の打ち切りより手前に
+// 来ることの検査を固定します。等号を通さないのは、同時に切れるとアプリが失敗を記録する
+// 前に接続が閉じるためです。
+func TestValidateDeadlines(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		pipeline time.Duration
+		dispatch time.Duration
+		wantErr  bool
+	}{
+		{name: "shorter than the deadline", pipeline: 20 * time.Minute, dispatch: 25 * time.Minute},
+		{name: "shorter than the default deadline", pipeline: 9 * time.Minute, dispatch: 0},
+		{name: "equal to the deadline", pipeline: 25 * time.Minute, dispatch: 25 * time.Minute, wantErr: true},
+		{name: "equal to the default deadline", pipeline: 10 * time.Minute, dispatch: 0, wantErr: true},
+		{name: "longer than the deadline", pipeline: 30 * time.Minute, dispatch: 25 * time.Minute, wantErr: true},
+		{name: "non-positive pipeline", pipeline: 0, dispatch: 25 * time.Minute, wantErr: true},
+		{name: "deadline out of range", pipeline: 1 * time.Minute, dispatch: time.Hour, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateDeadlines(tt.pipeline, tt.dispatch)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ValidateDeadlines(%v, %v) error = %v, wantErr %v", tt.pipeline, tt.dispatch, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 // TestConfigDispatchDeadlineAppliesToEveryTask は、キュー共通の応答待ち時間が
 // オプション無しの投入にも乗ることを確認します。長時間ジョブでは Cloud Tasks の
 // 既定 10 分が実行時間の実効上限になってしまうため、ここが効かないと

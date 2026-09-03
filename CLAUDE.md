@@ -214,7 +214,12 @@ workflow and nothing else.
   - **`EnqueueWithName` treats `ALREADY_EXISTS` as success**, so a retried enqueue creates one task. That
     covers duplicate *creation* only — delivery is still at-least-once, which the worker has to handle.
   - **`DispatchDeadline` is the worker's effective run-time limit, not a wait.** Unset means Cloud Tasks'
-    10-minute default, and no amount of Cloud Run `timeout` gets past it.
+    10-minute default (`DefaultDispatchDeadline`), and no amount of Cloud Run `timeout` gets past it.
+    `ValidateDeadlines` checks that the app's own pipeline timeout lands strictly before it — equality
+    fails, because when both fire together Cloud Tasks closes the connection before the app records the
+    failure and the task is redelivered with no record. Enqueue and worker are separate processes, so the
+    only place that knows both numbers is the config; three apps had written this check with the same
+    message.
   - The CreateTask RPC is given its own 20s deadline because Cloud Tasks rejects a request whose deadline is
     more than 30s out, and callers naturally pass the long job-lifetime context straight in.
 - **`worker`**: `Handler[T]` — generic HTTP handler (implements `http.Handler`) that decodes a JSON body into
@@ -230,6 +235,10 @@ workflow and nothing else.
     anything that sets `X-CloudTasks-TaskName`, so it says what the request claims, not who sent it.
     Confirming the caller is `auth.Require`'s job; treat `TaskName` as an idempotency key only on a route
     that verification already covers.
+  - **`WithTimeout` is applied inside the kit so a timeout is logged as a timeout.** Two apps wrapped
+    `Execute` in `context.WithTimeout` themselves, and when it fired the log line was whatever the executor
+    returned — indistinguishable from a real failure. The handler now knows it set the deadline and says so;
+    the response is still 500, because slow is not the same as permanent.
   - **The pprof goroutine label goes on with `pprof.Do`, never `SetGoroutineLabels` alone.** The latter does
     not restore on return, so net/http's keep-alive connection goroutine carries the previous task's name
     into the next request — and a traceback naming the wrong task is worse than one naming none.

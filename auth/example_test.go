@@ -48,10 +48,9 @@ func ExampleProtected() {
 	handler, err := session.New(session.Config{
 		ClientID:       "xxxxx.apps.googleusercontent.com",
 		ClientSecret:   "secret",
-		RedirectURL:    "https://app.example.com/auth/callback",
+		ServiceURL:     "https://app.example.com",
 		SessionName:    "app-session",
 		Store:          session.NewMemoryStore(session.StoreConfig{Secure: true}),
-		IsSecureCookie: true,
 		AllowedDomains: []string{"example.com"},
 	})
 	if err != nil {

@@ -18,7 +18,7 @@ func newTestSession(t *testing.T) *session.Handler {
 	h, err := session.New(session.Config{
 		ClientID:       "id",
 		ClientSecret:   "secret",
-		RedirectURL:    "https://app.example.com/auth/callback",
+		ServiceURL:     "https://app.example.com",
 		SessionName:    "s",
 		Store:          session.NewMemoryStore(session.StoreConfig{}),
 		AllowedDomains: []string{"example.com"},

@@ -65,8 +65,20 @@ var defaultScopes = []string{
 type Config struct {
 	ClientID     string
 	ClientSecret string
-	RedirectURL  string
-	SessionName  string
+
+	// ServiceURL は、このアプリがブラウザから見えるオリジンです（例: https://app.example.com）。
+	// パスは持てません。
+	//
+	// ここから 2 つを導出します。OAuth のリダイレクト先（ServiceURL + callbackPath()）と、
+	// クッキーの Secure 属性（スキームが https かどうか）です。呼び出し側に組み立てさせて
+	// いた頃は、"/auth/callback" というリテラルがルート登録と別の場所にもう 1 つあり、
+	// WithPaths を変えても片方だけが動いてビルドは通りました。
+	//
+	// Secure をスキームだけで決めるのは、それがクッキーの問い（TLS か）そのものだから
+	// です。「開発機なら http でもよいか」は設定値の妥当性の問いで、別の場所の判断です。
+	ServiceURL string
+
+	SessionName string
 
 	// Store はセッションの保存先です（必須）。
 	//
@@ -76,7 +88,6 @@ type Config struct {
 	// NewMemoryStore があります）。
 	Store Store
 
-	IsSecureCookie bool
 	AllowedEmails  []string
 	AllowedDomains []string
 }
@@ -109,11 +120,20 @@ func New(cfg Config, opts ...Option) (*Handler, error) {
 		return nil, err
 	}
 	o := newOptions(opts)
+	if err := validatePaths(o.loginPath, o.callbackPath, o.logoutPath); err != nil {
+		return nil, err
+	}
+
+	serviceURL, _ := url.Parse(cfg.ServiceURL) // validateConfig が形を確かめています
+	redirectURL, err := url.JoinPath(cfg.ServiceURL, o.callbackPath)
+	if err != nil {
+		return nil, fmt.Errorf("auth config: cannot build the redirect URL: %w", err)
+	}
 
 	oauthCfg := &oauth2.Config{
 		ClientID:     cfg.ClientID,
 		ClientSecret: cfg.ClientSecret,
-		RedirectURL:  cfg.RedirectURL,
+		RedirectURL:  redirectURL,
 		Scopes:       o.scopes,
 		Endpoint:     google.Endpoint,
 	}
@@ -125,7 +145,7 @@ func New(cfg Config, opts ...Option) (*Handler, error) {
 		oauthConfig:     oauthCfg,
 		store:           cfg.Store,
 		sessionName:     cfg.SessionName,
-		isSecureCookie:  cfg.IsSecureCookie,
+		isSecureCookie:  strings.EqualFold(serviceURL.Scheme, "https"),
 		allowedEmails:   toLowerMap(cfg.AllowedEmails),
 		allowedDomains:  toLowerMap(cfg.AllowedDomains),
 		cfgLoginPath:    o.loginPath,
@@ -145,7 +165,7 @@ func validateConfig(cfg Config) error {
 	}{
 		{"ClientID", cfg.ClientID},
 		{"ClientSecret", cfg.ClientSecret},
-		{"RedirectURL", cfg.RedirectURL},
+		{"ServiceURL", cfg.ServiceURL},
 		{"SessionName", cfg.SessionName},
 	}
 
@@ -160,11 +180,36 @@ func validateConfig(cfg Config) error {
 		return errors.New("auth config Store must not be nil")
 	}
 
-	redirectURL, err := url.Parse(cfg.RedirectURL)
-	if err != nil || redirectURL.Scheme == "" || redirectURL.Host == "" {
-		return errors.New("auth config RedirectURL must be an absolute URL")
+	serviceURL, err := url.Parse(cfg.ServiceURL)
+	if err != nil || serviceURL.Scheme == "" || serviceURL.Host == "" {
+		return errors.New("auth config ServiceURL must be an absolute URL")
+	}
+	// パスを許すと、リダイレクト先には付くのに Routes の照合には付かない、という
+	// ずれが生まれます。オリジンだけを受け、パスは WithPaths に一本化します。
+	if (serviceURL.Path != "" && serviceURL.Path != "/") || serviceURL.RawQuery != "" || serviceURL.Fragment != "" {
+		return errors.New("auth config ServiceURL must be an origin without path, query or fragment")
 	}
 
+	return nil
+}
+
+// validatePaths は、3 つのマウント先が Routes で衝突しないことを確かめます。
+// 同じパスを 2 つ登録すると http.ServeMux は panic するので、先に読める形で止めます。
+func validatePaths(loginPath, callbackPath, logoutPath string) error {
+	// エラー文を再現可能にするため、順序の定まったスライスで見ます。
+	named := []struct{ name, path string }{
+		{"login", loginPath}, {"callback", callbackPath}, {"logout", logoutPath},
+	}
+	seen := map[string]string{}
+	for _, n := range named {
+		if !strings.HasPrefix(n.path, "/") {
+			return fmt.Errorf("auth config: %s path %q must start with /", n.name, n.path)
+		}
+		if other, dup := seen[n.path]; dup {
+			return fmt.Errorf("auth config: %s and %s share the path %q", other, n.name, n.path)
+		}
+		seen[n.path] = n.name
+	}
 	return nil
 }
 

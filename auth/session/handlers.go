@@ -11,6 +11,23 @@ import (
 	"github.com/shouni/gcp-kit/auth"
 )
 
+// Routes は Login / Callback / Logout を、それぞれ loginPath() / callbackPath() /
+// logoutPath() で受ける http.Handler を返します。
+//
+// 照合はリクエストの完全なパスに対して行うので、どのプレフィックスの下に置いても
+// 同じです（chi なら r.Handle("/auth/*", h.Routes())、標準の mux なら
+// mux.Handle("/auth/", h.Routes())）。3 つのパスを個別にマウントしていた頃は、
+// リダイレクト先を組み立てる側にも同じリテラルがあり、片方だけ変えてもビルドが通りました。
+//
+// Login と Callback は GET だけを受けます。Logout はメソッドを限りません（Logout を参照）。
+func (h *Handler) Routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET "+h.loginPath(), h.Login)
+	mux.HandleFunc("GET "+h.callbackPath(), h.Callback)
+	mux.HandleFunc(h.logoutPath(), h.Logout)
+	return mux
+}
+
 // Login は OAuth2 のログインを開始します。state と PKCE の verifier、
 // および redirect_to があれば戻り先を短命クッキーに残し、Google へ送ります。
 //

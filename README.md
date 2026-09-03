@@ -107,13 +107,13 @@ store, err := session.NewFirestoreStore(session.FirestoreConfig{
     StoreConfig: session.StoreConfig{Secure: true},
 })
 
+// リダイレクト先とクッキーの Secure 属性は ServiceURL から導出されます。
 sessionHandler, err := session.New(session.Config{
     ClientID:       os.Getenv("GOOGLE_CLIENT_ID"),
     ClientSecret:   os.Getenv("GOOGLE_CLIENT_SECRET"),
-    RedirectURL:    serviceURL + "/auth/callback",
+    ServiceURL:     serviceURL, // https://app.example.com（パス無し）
     SessionName:    "app-session",
     Store:          store,
-    IsSecureCookie: true,
     AllowedDomains: []string{"example.com"},
 })
 ```
@@ -138,8 +138,7 @@ taskVerifier, err := oidc.New(workerURL, allowedCallerSAs)
 ```go
 mux := http.NewServeMux()
 mux.HandleFunc(cloudrun.HealthPath, cloudrun.Health) // "/healthz" は Cloud Run に横取りされます
-mux.Handle("GET /auth/login", http.HandlerFunc(sessionHandler.Login))
-mux.Handle("GET /auth/callback", http.HandlerFunc(sessionHandler.Callback))
+mux.Handle("/auth/", sessionHandler.Routes()) // login / callback / logout（chi なら r.Handle("/auth/*", ...)）
 
 // 人だけが来るルート
 mux.Handle("/private", auth.Protected(sessionHandler)(privateHandler))

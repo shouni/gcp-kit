@@ -118,6 +118,18 @@ workflow and nothing else.
     verification and token minting. Every extra read is a billed Firestore read plus a round trip on the
     hot path, and re-reading looks harmless in tests because `NewMemoryStore` costs nothing.
     `TestAuthenticateReadsStoreOnce` fixes the count.
+  - **`Config.ServiceURL` is the one URL, and `Routes()` is the one place the paths are registered.**
+    Six apps built `RedirectURL` as `ServiceURL + "/auth/callback"` and mounted the same literal on their
+    router — two copies that `WithPaths` could only move one of, with the build still passing. The kit now
+    derives the redirect from `ServiceURL + callbackPath()` and registers `Routes()` from the same
+    accessors, so the literal exists once. `ServiceURL` must be an origin: a path there would reach the
+    redirect but not the route match. `Routes()` had existed and was removed in 89d13bd as unused; the
+    count that justified removing it is the count that brings it back.
+  - **The cookie's `Secure` flag comes from `ServiceURL`'s scheme, and only from that.** Apps were passing
+    netarmor's `IsSecureServiceURL`, which answers a different question — "is http acceptable here?" (yes on
+    localhost and a few dev hosts) — and it only worked because browsers treat localhost as a secure
+    context. `Secure` asks whether the transport is TLS; `scheme == https` is the whole answer, so the kit
+    neither imports netarmor nor copies it. `IsSecureCookie` is gone from `Config`.
   - **The post-login target rides in a cookie, not the session.** `/auth/login` is open to anyone, so
     stashing `redirect_to` in the session let an unauthenticated caller create a stored session per
     request — a write anyone could repeat, kept for `MaxAge`. `DefaultRedirectCookie` has the same
@@ -237,7 +249,7 @@ Three packages, and the dependency runs one way only: `session` → `auth` ← `
 
 - `auth/`: `auth.go` (the contract and both composers), `claims.go` (the shared `email_verified` gate).
 - `auth/session/`: `handler.go` (Config/Handler construction + allowlist normalisation), `options.go`
-  (every optional setting), `handlers.go` (OAuth login/callback/logout), `session.go` (session cookie,
+  (every optional setting), `handlers.go` (OAuth login/callback/logout and `Routes`), `session.go` (session cookie,
   UserInfo lookup, authorization check, random tokens), `authenticate.go` (`Authenticate` / `Challenge`
   and what they need: origin check, CSRF verification, login redirect), `context.go` (context keys).
 - `auth/oidc/`: `oidc.go` (the verifier and bearer extraction), `context.go` (the payload key).

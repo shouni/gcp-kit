@@ -75,6 +75,31 @@ func (c *countingStore) Save(r *http.Request, w http.ResponseWriter, s *Session)
 
 func (c *countingStore) reset() { c.gets, c.saves = 0, 0 }
 
+// unavailableStore is a Store that cannot reach its backing service, the way a
+// Firestore store reports a transient outage.
+type unavailableStore struct{}
+
+func (unavailableStore) Get(_ *http.Request, name string) (*Session, error) {
+	return NewSession(name), fmt.Errorf("%w: deadline exceeded", ErrStoreUnavailable)
+}
+
+func (unavailableStore) Save(_ *http.Request, _ http.ResponseWriter, _ *Session) error {
+	return fmt.Errorf("%w: deadline exceeded", ErrStoreUnavailable)
+}
+
+// brokenStore is a Store that reaches its backing service but cannot make sense
+// of what it read (a stored session that no longer decodes, say).
+type brokenStore struct{}
+
+func (brokenStore) Get(_ *http.Request, name string) (*Session, error) {
+	return NewSession(name), errors.New("decode stored session: unexpected shape")
+}
+
+func (brokenStore) Save(_ *http.Request, w http.ResponseWriter, s *Session) error {
+	http.SetCookie(w, newCookie(s.Name(), "", s.Options))
+	return nil
+}
+
 // seedAuthenticatedSession logs email in through the handler's own IssueSession
 // and returns the cookies a browser would then carry.
 func seedAuthenticatedSession(t *testing.T, h *Handler, email string) []*http.Cookie {

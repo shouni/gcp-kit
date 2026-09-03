@@ -174,6 +174,71 @@ func TestMiddlewareAllowsAuthenticatedRequest(t *testing.T) {
 	})
 }
 
+// TestStoreUnavailableKeepsTheSession は、保存先へ到達できないだけのときに
+// セッションクッキーを消さないことを確認します。
+//
+// 一時障害を「壊れたセッション」と同じ扱いにすると、Firestore の瞬断がその瞬間に
+// アクセスしていた利用者全員のログアウトになり、復旧しても元に戻りません。
+// 応答は 503 で、ログイン画面へは送りません（送っても直らないためです）。
+func TestStoreUnavailableKeepsTheSession(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{
+		store:          unavailableStore{},
+		sessionName:    "test-session",
+		allowedDomains: testAllowedDomains(),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/private", nil)
+	req.AddCookie(&http.Cookie{Name: "test-session", Value: "existing-session-id"})
+	rr := httptest.NewRecorder()
+
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("next handler must not be called while the store is unreachable")
+	})
+	auth.Require(h)(next).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusServiceUnavailable)
+	}
+	if got := rr.Result().Cookies(); len(got) != 0 {
+		t.Fatalf("response set %d cookies (%v), want none: the session must survive the outage",
+			len(got), got)
+	}
+}
+
+// TestBrokenSessionClearsTheCookie は、保存先には届いたが実体を解釈できない場合に、
+// 従来どおりクッキーを消してログイン画面へ送ることを確認します。
+// こちらは作り直せば直るので、消すのが正しい処置です。
+func TestBrokenSessionClearsTheCookie(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{
+		store:          brokenStore{},
+		sessionName:    "test-session",
+		allowedDomains: testAllowedDomains(),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/private", nil)
+	req.AddCookie(&http.Cookie{Name: "test-session", Value: "unreadable"})
+	rr := httptest.NewRecorder()
+
+	auth.Require(h)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d (login redirect)", rr.Code, http.StatusFound)
+	}
+	var cleared bool
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == "test-session" && c.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatal("a session that cannot be read must be cleared, so the next login can replace it")
+	}
+}
+
 // TestMiddlewareRejectsRevokedSession は、許可リストから外れたアドレスのセッションが
 // 有効期限内でも通らないことを確認します。認可をログイン時に一度きりしか評価しないと、
 // 許可リストから削除してもクッキーの有効期限まで通り続けてしまいます。

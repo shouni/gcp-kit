@@ -2,16 +2,31 @@ package session
 
 import (
 	"encoding/base64"
+	"errors"
+	"maps"
 	"net/http"
 	"sync"
 	"time"
 )
+
+// ErrStoreUnavailable は、保存先そのものへ到達できなかったことを示します
+// （Firestore の一時障害など）。Store の実装は、この種の失敗を返すときだけ
+// これでラップしてください。
+//
+// 壊れたセッションと区別するのは、処置が正反対だからです。壊れた実体はクッキーを
+// 消せば次のログインで直りますが、到達できないだけの相手に同じことをすると、
+// バックエンドの瞬断がその瞬間の利用者全員のログアウトになります。しかも復旧後も
+// 元に戻りません。Handler.Challenge はこれを 503 で返し、クッキーには触れません。
+var ErrStoreUnavailable = errors.New("session: session store is unavailable")
 
 // Store は、セッションの保存先です。実体はサーバー側にあり、クッキーが運ぶのは
 // 不透明な ID だけです。
 type Store interface {
 	// Get は、リクエストのクッキーが指すセッションを読み出します。
 	// 見つからない・期限切れの場合も空のセッションを返し、nil は返しません。
+	//
+	// ★ 保存先へ到達できなかった場合は ErrStoreUnavailable でラップしてください。
+	// ラップしないエラーは「実体が壊れている」と解釈され、クッキーが破棄されます。
 	//
 	// ★ 保存されていない ID を採用してはいけません。ID はクッキー経由で攻撃者が
 	// 指定できるので、採用すると攻撃者が被害者のセッション識別子を選べます
@@ -172,9 +187,7 @@ func (s *memoryStore) Get(r *http.Request, name string) (*Session, error) {
 
 	// 実体が見つかったときだけ ID を採用します（Store の約束）。
 	session.ID = cookie.Value
-	for k, v := range entry.values {
-		session.Values[k] = v
-	}
+	maps.Copy(session.Values, entry.values)
 	session.IsNew = false
 	return session, nil
 }
@@ -202,14 +215,9 @@ func (s *memoryStore) Save(_ *http.Request, w http.ResponseWriter, session *Sess
 		session.ID = id
 	}
 
-	values := make(map[string]string, len(session.Values))
-	for k, v := range session.Values {
-		values[k] = v
-	}
-
 	s.mu.Lock()
 	s.entries[session.ID] = memoryEntry{
-		values:    values,
+		values:    maps.Clone(session.Values),
 		expiresAt: time.Now().Add(time.Duration(opts.MaxAge) * time.Second),
 	}
 	s.mu.Unlock()

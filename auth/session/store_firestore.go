@@ -2,6 +2,8 @@ package session
 
 import (
 	"errors"
+	"fmt"
+	"maps"
 	"net/http"
 	"strings"
 	"time"
@@ -71,15 +73,24 @@ func (s *firestoreStore) Get(r *http.Request, name string) (*Session, error) {
 
 	snap, err := s.client.Collection(s.collection).Doc(cookie.Value).Get(r.Context())
 	if err != nil {
-		if status.Code(err) == codes.NotFound {
+		switch status.Code(err) {
+		case codes.NotFound:
 			// 保存されていない ID は採用しません（Store の約束）。
 			return session, nil
+		case codes.InvalidArgument:
+			// ID はクッキーで運ばれる以上、ドキュメント ID として成立しない値も
+			// 届きます。障害ではないので、実体が無いのと同じ扱いにします。
+			return session, nil
 		}
-		return session, err
+		// ここまで来たら Firestore へ到達できていません。壊れたセッションと同じ
+		// 扱いにするとクッキーが消され、瞬断が全利用者のログアウトになります。
+		return session, fmt.Errorf("%w: %w", ErrStoreUnavailable, err)
 	}
 
 	var doc sessionDoc
 	if err := snap.DataTo(&doc); err != nil {
+		// 読めはしたがデコードできない実体は「壊れたセッション」です。ここは
+		// ErrStoreUnavailable ではないので、クッキーを消して作り直させます。
 		return session, err
 	}
 	// TTL の削除は遅れるので、期限は読み出し側でも見ます。
@@ -88,9 +99,7 @@ func (s *firestoreStore) Get(r *http.Request, name string) (*Session, error) {
 	}
 
 	session.ID = cookie.Value
-	for k, v := range doc.Values {
-		session.Values[k] = v
-	}
+	maps.Copy(session.Values, doc.Values)
 	session.IsNew = false
 	return session, nil
 }
@@ -108,7 +117,7 @@ func (s *firestoreStore) Save(r *http.Request, w http.ResponseWriter, session *S
 			// ログアウトが失敗したのにクッキーだけ残る形になります。
 			if _, err := s.client.Collection(s.collection).Doc(session.ID).Delete(r.Context()); err != nil {
 				http.SetCookie(w, newCookie(session.Name(), "", opts))
-				return err
+				return fmt.Errorf("%w: %w", ErrStoreUnavailable, err)
 			}
 		}
 		http.SetCookie(w, newCookie(session.Name(), "", opts))
@@ -128,7 +137,7 @@ func (s *firestoreStore) Save(r *http.Request, w http.ResponseWriter, session *S
 		ExpiresAt: time.Now().Add(time.Duration(opts.MaxAge) * time.Second),
 	}
 	if _, err := s.client.Collection(s.collection).Doc(session.ID).Set(r.Context(), doc); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrStoreUnavailable, err)
 	}
 
 	http.SetCookie(w, newCookie(session.Name(), session.ID, opts))

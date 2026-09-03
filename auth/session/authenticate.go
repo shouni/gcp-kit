@@ -48,8 +48,14 @@ var (
 // 同じ実体を読み直すぶんだけ往復と請求が増えます。
 func (h *Handler) Authenticate(w http.ResponseWriter, r *http.Request) (context.Context, error) {
 	session, err := h.store.Get(r, h.sessionName)
-	if err != nil {
-		// セッション解析に失敗した場合（署名キー変更時など）は詳細を記録しクッキーをクリア
+	switch {
+	case errors.Is(err, ErrStoreUnavailable):
+		// 保存先へ到達できないだけなので、クッキーには触れません。ここで消すと
+		// バックエンドの瞬断が、その瞬間の利用者全員のログアウトになります。
+		h.log().ErrorContext(r.Context(), "セッションストアへ到達できません", "error", err, "path", r.URL.Path)
+		return nil, err
+	case err != nil:
+		// 実体が壊れている場合は、クッキーを消して次のログインで作り直させます。
 		h.log().WarnContext(r.Context(), "セッション取得失敗。新規セッションとして扱います", "error", err)
 		h.clearSessionCookieLogged(w, r)
 		return nil, fmt.Errorf("%w: %w", errNoSession, err)
@@ -112,6 +118,9 @@ func (h *Handler) Authenticate(w http.ResponseWriter, r *http.Request) (context.
 // 返り、相手はそれを解釈できません。Rails・Spring Security・ASP.NET Core など、
 // 混在ルートを扱う実装はいずれも同じ出し分けをしています。
 //
+// セッションの保存先へ到達できなかった場合だけは 503 です。認証が足りないのでは
+// なく依存が落ちているので、ログイン画面へ送っても直りません。
+//
 // なお 401 に WWW-Authenticate を添えないのは、クッキーによる認証に対応する
 // 認証スキームが登録されていないためです。Bearer のチャレンジは、それを
 // 受け付ける auth/oidc の側が返します。
@@ -121,6 +130,11 @@ func (h *Handler) Challenge(w http.ResponseWriter, r *http.Request, err error) {
 		http.Error(w, "Invalid origin", http.StatusForbidden)
 	case errors.Is(err, errInvalidCSRF):
 		http.Error(w, "Invalid CSRF token", http.StatusForbidden)
+	case errors.Is(err, ErrStoreUnavailable):
+		// ログイン画面へ送ってはいけません。認証は失われておらず、送った先の
+		// ログインもストアを要求するので、利用者は往復して同じ場所に戻るだけです。
+		// 503 なら、監視にも「認証が壊れた」ではなく「依存が落ちた」として出ます。
+		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
 	case errors.Is(err, errNoSession), errors.Is(err, errUnauthMail):
 		// wantsJSON は Vary: Accept も立てます。この応答は実際に Accept で
 		// 変わるため、キャッシュへ伝える必要があります。

@@ -98,6 +98,13 @@ workflow and nothing else.
   - **Expiry is checked on read, not left to Firestore's TTL policy**, which deletes up to 24 hours late.
     The policy still has to exist, or sessions accumulate forever — unlike cookies, stored sessions do not
     expire themselves.
+  - **A store that cannot be reached is not a broken session.** `ErrStoreUnavailable` splits the two
+    because the right response is opposite: a stored session that no longer decodes is cleared so the next
+    login replaces it, while a Firestore blip must leave the cookie alone — clearing it turns a few seconds
+    of backend trouble into a logout for everyone who happened to be browsing, and recovery does not undo
+    it. `Challenge` answers 503 rather than a login redirect (the login page needs the same store), so the
+    outage shows up in monitoring as a failing dependency instead of as silent churn.
+    `TestStoreUnavailableKeepsTheSession` and `TestBrokenSessionClearsTheCookie` pin both halves.
   - **`Authenticate` reads the store once per request.** The session it loads is carried through CSRF
     verification and token minting. Every extra read is a billed Firestore read plus a round trip on the
     hot path, and re-reading looks harmless in tests because `NewMemoryStore` costs nothing.

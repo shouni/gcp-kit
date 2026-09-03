@@ -49,20 +49,36 @@ var (
 // allowedServiceAccounts が空の場合、検証は安全側に倒して常に失敗します（fail-closed）。
 // 「許可リストが空 = 誰でも通す」にすると、設定を1つ書き忘れただけで
 // 内部エンドポイントが開くためです。
-func New(audience string, allowedServiceAccounts []string) *Verifier {
-	return &Verifier{
-		audience: audience,
+//
+// どちらかが欠けていれば、何が欠けているかを添えて auth.ErrNotConfigured を返します。
+// 起動時に落とすためで、未設定のまま動かすと全ての呼び出しがセッション認証へ
+// フォールバックし、設定漏れが分かりにくい形で現れます。
+//
+// 検証が任意のルート（機械からの呼び出しを受けなくてもよい Web 面など）では、
+// このエラーで止めるのではなく nil の *Verifier を auth.Protected に渡してください。
+// nil の方式は飛ばされます。
+func New(audience string, allowedServiceAccounts []string) (*Verifier, error) {
+	v := &Verifier{
+		audience: strings.TrimSpace(audience),
 		allowed:  toLowerMap(allowedServiceAccounts),
 		validate: idtoken.Validate,
 	}
+	switch {
+	case v.audience == "" && len(v.allowed) == 0:
+		return nil, fmt.Errorf("%w: oidc: audience and allowed service accounts are both empty", auth.ErrNotConfigured)
+	case v.audience == "":
+		return nil, fmt.Errorf("%w: oidc: audience is empty", auth.ErrNotConfigured)
+	case len(v.allowed) == 0:
+		return nil, fmt.Errorf("%w: oidc: allowed service accounts are empty", auth.ErrNotConfigured)
+	}
+	return v, nil
 }
 
-// Configured は、検証に必要な設定（audience と許可リスト）が揃っているかを返します。
-//
-// 起動時に落とせるよう公開しています。未設定のまま動かすと全ての呼び出しが
-// セッション認証へフォールバックし、設定漏れが分かりにくい形で現れます。
-func (v *Verifier) Configured() bool {
-	return v != nil && strings.TrimSpace(v.audience) != "" && len(v.allowed) > 0
+// configured は、検証に必要な設定が揃っているかを返します。New はこれを満たさない
+// Verifier を返しませんが、ゼロ値や nil で組み立てられた場合にも fail-closed で
+// 応えるため、Authenticate は毎回確かめます。
+func (v *Verifier) configured() bool {
+	return v != nil && v.audience != "" && len(v.allowed) > 0
 }
 
 // Authenticate は auth.Authenticator を実装します。
@@ -74,7 +90,7 @@ func (v *Verifier) Configured() bool {
 // w は使いません。応答へ書き込む必要がある方式（セッションの更新など）と
 // 口を揃えるために受け取っています。
 func (v *Verifier) Authenticate(_ http.ResponseWriter, r *http.Request) (context.Context, error) {
-	if !v.Configured() {
+	if !v.configured() {
 		return nil, auth.ErrNotConfigured
 	}
 

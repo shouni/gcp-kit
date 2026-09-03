@@ -34,7 +34,7 @@
     `Logout` が消せるのはこのアプリのクッキーだけで、Google 側のセッションは残るためです。
 * **`auth/oidc`**: サービス間呼び出しの受信検証（`Verifier`）
   * audience は誰でも指定できる文字列なので、**サービスアカウント許可リストまで照合**します。
-    両方揃わないと常に検証失敗で、設定漏れは `Configured()` が起動時に検出できます。
+    両方揃わないと `New` がエラーを返すので、設定漏れは起動時に止まります。
   * OAuth 設定は要りません。Web UI を持たない Worker が、クライアントシークレット無しで検証できます。
 * **`cloudlog`**: Cloud Logging 互換の構造化ログ
   * `NewHandler(w, level)` が組み立てを持ちます（`slogctx` で包み忘れると context 属性が黙って消えます）。
@@ -118,18 +118,16 @@ sessionHandler, err := session.New(session.Config{
 
 ### 2. サービスを通す
 
-audience と許可 SA は両方が必須です。片方だけでは常に検証失敗になります。
+audience と許可 SA は両方が必須です。片方でも欠けると `New` がエラーを返します（リクエスト時に
+気付く形だと、Cloud Tasks がリトライを重ねた末にタスクを破棄してしまいます）。
 
 ```go
-apiVerifier := oidc.New(serviceURL, allowedCallerSAs)
-taskVerifier := oidc.New(workerURL, allowedCallerSAs)
-
-// 設定漏れは起動時に落とします（リクエスト時だと、Cloud Tasks がリトライを
-// 重ねた末にタスクを破棄してしまいます）。
-if !taskVerifier.Configured() || !apiVerifier.Configured() {
-    return errors.New("OIDC verification is not configured")
-}
+apiVerifier, err := oidc.New(serviceURL, allowedCallerSAs)
+taskVerifier, err := oidc.New(workerURL, allowedCallerSAs)
 ```
+
+機械からの呼び出しを受けなくてもよいルートでは、エラーで止めずに `nil` を `auth.Protected` へ
+渡してください。`nil` の方式は飛ばされます。
 
 ### 3. ルーティング
 

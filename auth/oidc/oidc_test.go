@@ -31,27 +31,41 @@ func stubValidate(email string, err error) validateFunc {
 	}
 }
 
-func TestVerifierConfigured(t *testing.T) {
+// newTestVerifier は、New の検査を通さずに Verifier を組み立てます。
+// 未設定の Verifier に対する Authenticate / Challenge の挙動を試すためです。
+func newTestVerifier(allowed []string, validate validateFunc) *Verifier {
+	return &Verifier{audience: testAudience, allowed: toLowerMap(allowed), validate: validate}
+}
+
+// TestNewRequiresAudienceAndAllowlist は、設定が欠けた Verifier を New が返さないことを
+// 確認します。「許可リストが空 = 誰でも通す」にしないための入口です。
+func TestNewRequiresAudienceAndAllowlist(t *testing.T) {
 	t.Parallel()
+
+	if _, err := New(testAudience, []string{testAccount}); err != nil {
+		t.Fatalf("New() error = %v, want nil", err)
+	}
 
 	tests := []struct {
 		name     string
-		verifier *Verifier
-		want     bool
+		audience string
+		allowed  []string
 	}{
-		{name: "nil verifier", verifier: nil, want: false},
-		{name: "audience and allowlist", verifier: New(testAudience, []string{testAccount}), want: true},
-		// 許可リストが空の場合は fail-closed のため未設定として扱います。
-		{name: "empty allowlist", verifier: New(testAudience, nil), want: false},
-		{name: "blank entries only", verifier: New(testAudience, []string{"", "  "}), want: false},
-		{name: "missing audience", verifier: New("  ", []string{testAccount}), want: false},
+		{name: "empty allowlist", audience: testAudience, allowed: nil},
+		{name: "blank entries only", audience: testAudience, allowed: []string{"", "  "}},
+		{name: "missing audience", audience: "  ", allowed: []string{testAccount}},
+		{name: "both missing", audience: "", allowed: nil},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := tt.verifier.Configured(); got != tt.want {
-				t.Fatalf("Configured() = %v, want %v", got, tt.want)
+			v, err := New(tt.audience, tt.allowed)
+			if !errors.Is(err, auth.ErrNotConfigured) {
+				t.Fatalf("New() error = %v, want auth.ErrNotConfigured", err)
+			}
+			if v != nil {
+				t.Fatal("New() returned a Verifier alongside the error")
 			}
 		})
 	}
@@ -149,8 +163,7 @@ func TestVerifierAuthenticate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			v := New(testAudience, tt.allowed)
-			v.validate = tt.validate
+			v := newTestVerifier(tt.allowed, tt.validate)
 
 			req := httptest.NewRequest(http.MethodPost, "/tasks", nil)
 			if tt.authz != "" {
@@ -197,9 +210,6 @@ func TestVerifierNilReceiver(t *testing.T) {
 	t.Parallel()
 
 	var v *Verifier
-	if v.Configured() {
-		t.Fatal("Configured() = true, want false for a nil verifier")
-	}
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	if _, err := v.Authenticate(httptest.NewRecorder(), req); !errors.Is(err, auth.ErrNotConfigured) {
@@ -248,8 +258,7 @@ func TestVerifierChallenge(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			v := New(testAudience, tt.allowed)
-			v.validate = tt.validate
+			v := newTestVerifier(tt.allowed, tt.validate)
 
 			req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
 			if tt.authz != "" {

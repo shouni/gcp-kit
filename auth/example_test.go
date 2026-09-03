@@ -18,13 +18,13 @@ import (
 // oidc は OAuth 設定を要求しないため、Web UI を持たない Worker プロセスでも使えます。
 // 使いもしない OAuth シークレットへのアクセス権を配らずに済みます。
 func ExampleRequire() {
-	verifier := oidc.New(
+	// 設定漏れはリクエスト時ではなく起動時に落とします。
+	verifier, err := oidc.New(
 		"https://worker.example.com",
 		[]string{"tasks@my-project.iam.gserviceaccount.com"},
 	)
-	// 設定漏れはリクエスト時ではなく起動時に落とします。
-	if !verifier.Configured() {
-		slog.Error("task verification is not configured")
+	if err != nil {
+		slog.Error("task verification is not configured", "error", err)
 		return
 	}
 
@@ -59,10 +59,14 @@ func ExampleProtected() {
 		return
 	}
 
-	verifier := oidc.New(
+	verifier, err := oidc.New(
 		"https://app.example.com",
 		[]string{"caller@other-project.iam.gserviceaccount.com"},
 	)
+	if err != nil {
+		slog.Error("failed to build verifier", "error", err)
+		return
+	}
 
 	page := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// CSRF トークンはセッション経路でのみコンテキストに載ります。

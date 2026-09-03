@@ -147,7 +147,10 @@ workflow and nothing else.
   not two** — `TaskVerifier` and `M2MVerifier` were two wrappers over one verifier whose only difference
   was how they were composed, and that difference now lives in `Require` vs `Protected`. It requires no
   OAuth2 config, so a worker-only process verifies inbound tokens without ever holding client secrets.
-  An empty allowlist is `ErrNotConfigured`, never "allow everyone".
+  An empty allowlist is `ErrNotConfigured`, never "allow everyone" — and `New` returns that error rather
+  than a `Verifier`, so the six apps stop copying the same `Configured()` check and message. A route where
+  machine callers are optional passes `nil` to `Protected`, which skips nil authenticators; that replaces
+  the one app that logged and carried on.
 - **`cloudlog`**: Cloud Logging-compatible `slog.HandlerOptions`, plus the trace-correlation middleware.
   slog's default `level`/`msg` keys are not the ones Cloud Logging reads (`severity`/`message`), so without
   `HandlerOptions` every entry shows as INFO in Logs Explorer and `slog.Error` never reaches a log-based
@@ -280,10 +283,11 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
   expired (7 days by default) — deleting the stored session would work, but that requires knowing which one.
   Re-checking is what makes the allowlist an eviction mechanism on its own, and it costs one map lookup. `TestMiddlewareRejectsRevokedSession` guards it. Tests that drive an authenticated request
   through `Authenticate` must therefore give their `Handler` an allowlist (`testAllowedDomains()`).
-- **An empty allowlist means "verify nothing successfully", not "allow everyone".** `Verifier.Configured()`
-  reports false without both an audience and a non-empty allowlist, and `auth.Require` then answers
-  500 rather than letting the request through. Callers check `Verifier.Configured()` at startup so a
-  misconfiguration surfaces before Cloud Tasks retries a task to exhaustion and drops it.
+- **An empty allowlist means "verify nothing successfully", not "allow everyone".** `oidc.New` refuses to
+  build a `Verifier` without both an audience and a non-empty allowlist, so a misconfiguration surfaces at
+  startup rather than after Cloud Tasks retries a task to exhaustion and drops it. `Authenticate` still
+  re-checks (`configured()`), because a zero-value or nil `Verifier` can be composed without `New`, and it
+  must answer `ErrNotConfigured` — 500 under `Require` — rather than let the request through.
 - **`email_verified` is required everywhere** an email is accepted as an identity — ID token login, UserInfo
   API fallback, and OIDC verification. `auth.VerifiedEmail` is the single gate, and all three paths **call
   it** rather than restate it. They did not always: `fetchUserEmail` used to check `u.VerifiedEmail` on its

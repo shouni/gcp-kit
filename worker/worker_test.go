@@ -132,10 +132,37 @@ func TestProcessTask_Success(t *testing.T) {
 
 // TestProcessTask_PermanentError は、リトライしても無意味な失敗を 2xx で打ち切り、
 // Cloud Tasks が最大試行数まで再送し続けるのを防いでいることを確認します。
+// TestPermanent は、Permanent が印だけを足して文面を変えないことを確認します。
+func TestPermanent(t *testing.T) {
+	t.Parallel()
+
+	if Permanent(nil) != nil {
+		t.Fatal("Permanent(nil) != nil")
+	}
+
+	cause := errors.New("unknown command")
+	err := Permanent(cause)
+
+	if !errors.Is(err, ErrPermanent) {
+		t.Error("errors.Is(err, ErrPermanent) = false")
+	}
+	if !errors.Is(err, cause) {
+		t.Error("errors.Is(err, cause) = false: the cause must stay reachable")
+	}
+	// センチネルの文言が記録や通知に漏れないこと。
+	if got := err.Error(); got != cause.Error() {
+		t.Errorf("Error() = %q, want the cause's text %q", got, cause.Error())
+	}
+	// 一段包んでも印は残ること。
+	if !errors.Is(fmt.Errorf("run job: %w", err), ErrPermanent) {
+		t.Error("the mark must survive further wrapping")
+	}
+}
+
 func TestProcessTask_PermanentError(t *testing.T) {
 	t.Parallel()
 
-	exec := &executorMock{err: fmt.Errorf("%w: unknown command", ErrPermanent)}
+	exec := &executorMock{err: Permanent(errors.New("unknown command"))}
 	h := NewHandler[samplePayload](exec)
 
 	rr := newRecorder()

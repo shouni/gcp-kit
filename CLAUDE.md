@@ -198,7 +198,7 @@ workflow and nothing else.
     more than 30s out, and callers naturally pass the long job-lifetime context straight in.
 - **`worker`**: `Handler[T]` — generic HTTP handler (implements `http.Handler`) that decodes a JSON body into
   `T` and calls a user-supplied `TaskExecutor[T]`. Deliberately has no dependency on `tasks` or `auth` — a
-  worker endpoint is typically wrapped in `auth.Require(verifier)` at the router level, not internally. Executor errors wrapping `worker.ErrPermanent` return 2xx so Cloud Tasks stops retrying;
+  worker endpoint is typically wrapped in `auth.Require(verifier)` at the router level, not internally. Executor errors marked with `worker.Permanent` (matching `ErrPermanent`) return 2xx so Cloud Tasks stops retrying;
   everything else returns 500 to trigger backoff.
   - **Decoding is lenient by default and `WithStrictJSON` must not become the default.** Web and worker are
     separate Cloud Run services, so during a rolling deploy the newer side sends fields the older side does

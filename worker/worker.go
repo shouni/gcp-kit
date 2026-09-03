@@ -15,14 +15,39 @@ import (
 
 // ErrPermanent は、リトライしても成功し得ない恒久的な失敗を示すセンチネルエラーです。
 //
-// TaskExecutor がこのエラーでラップしたエラーを返した場合、Handler は 2xx を返して
+// TaskExecutor が errors.Is でこれに一致するエラーを返した場合、Handler は 2xx を返して
 // Cloud Tasks にタスクを完了扱いさせ、無駄なリトライを止めます（内容は ERROR ログに残ります）。
 // 一時的な失敗（外部APIのタイムアウト等）では返さないでください。
 //
+// 印を付けるには Permanent を使います。
+//
 //	if errors.Is(err, domain.ErrInvalidInput) {
-//	    return fmt.Errorf("%w: %v", worker.ErrPermanent, err)
+//	    return worker.Permanent(err)
 //	}
 var ErrPermanent = errors.New("worker: permanent failure, task must not be retried")
+
+// Permanent は、err に「再配信しても直らない」印を付けて返します。err が nil なら nil です。
+//
+// fmt.Errorf("%w: %v", ErrPermanent, err) と違い、Error() は原因の文面のままです。
+// センチネルの文言は実装都合で、ジョブ状態の記録や通知にそのまま出ると利用者には
+// 意味がありません。恒久かどうかは Handler が構造化ログの permanent フィールドへ
+// 別に出すので、文面に混ぜる必要もありません。
+//
+// errors.Is(err, ErrPermanent) は true、Unwrap は原因を返すので、原因側の判定
+// （errors.Is / errors.As）はそのまま効きます。
+func Permanent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return permanentError{cause: err}
+}
+
+// permanentError は Permanent が返す印です。
+type permanentError struct{ cause error }
+
+func (e permanentError) Error() string        { return e.cause.Error() }
+func (e permanentError) Unwrap() error        { return e.cause }
+func (e permanentError) Is(target error) bool { return target == ErrPermanent }
 
 // defaultMaxBodyBytes は受け付けるリクエストボディの既定上限です。
 // Cloud Tasks の HTTP ターゲットはタスク全体で 1MB 上限のため、既定値もそれに合わせます。

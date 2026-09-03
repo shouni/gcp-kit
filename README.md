@@ -55,7 +55,7 @@
     別パッケージなので、コンパイラは両者を結びつけません。
 * **`worker`**: Cloud Tasks 向けハンドラー（`Handler[T]`）
   * エラーは Cloud Tasks の再試行仕様に沿った状態コードへ写ります。リトライしても直らない失敗は
-    `worker.ErrPermanent` でラップすると、2xx を返して打ち切れます。
+    `worker.Permanent(err)` で印を付けると、2xx を返して打ち切れます（文面は原因のままです）。
   * `MetadataFromContext` で再試行回数やタスク名を参照でき、at-least-once 配信に対して冪等に書けます。
     値は Cloud Tasks が付けるヘッダーそのものなので、**呼び出し元の確認は `auth.Require` の役目**です。
   * **デコードが既定で寛容なのは、ローリングデプロイ中の型のずれを生かすためです。** `WithStrictJSON`

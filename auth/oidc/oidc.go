@@ -29,12 +29,31 @@ import (
 type Verifier struct {
 	audience string
 	allowed  map[string]struct{}
-	validate validateFunc
+	validate ValidateFunc
 }
 
-// validateFunc は idtoken.Validate と同じシグネチャです。
-// テストで差し替えるために関数フィールドとして保持します。
-type validateFunc func(ctx context.Context, token, audience string) (*idtoken.Payload, error)
+// ValidateFunc は idtoken.Validate と同じシグネチャです。差し替えは WithValidator で行います。
+type ValidateFunc func(ctx context.Context, token, audience string) (*idtoken.Payload, error)
+
+// Option は New の任意設定です。
+type Option func(*Verifier)
+
+// WithValidator は、署名と audience の検証を行う関数を差し替えます。テスト専用です。
+//
+// 利用側のルータテストは、これが無いと Bearer 経路を通せません。実際には、未設定の
+// Verifier を渡して ErrNotConfigured の経路でフォールバックだけを確かめている
+// テストが書かれていました。それは設定漏れの経路であって、Bearer が届いたときの
+// 経路ではありません。
+//
+// 本番で idtoken.Validate 以外を渡す理由はありません。署名を確かめない関数を渡せば、
+// 誰でも任意の email を名乗れます。nil は無視され、idtoken.Validate のままです。
+func WithValidator(fn ValidateFunc) Option {
+	return func(v *Verifier) {
+		if fn != nil {
+			v.validate = fn
+		}
+	}
+}
 
 // 検証失敗の種類。RFC 6750, Section 3.1 の error コードと状態コードに対応させるために分けています。
 // トークンが壊れている（401・取り直せば直る）のと、呼び出し元が許可されていない
@@ -57,11 +76,16 @@ var (
 // 検証が任意のルート（機械からの呼び出しを受けなくてもよい Web 面など）では、
 // このエラーで止めるのではなく nil の *Verifier を auth.Protected に渡してください。
 // nil の方式は飛ばされます。
-func New(audience string, allowedServiceAccounts []string) (*Verifier, error) {
+func New(audience string, allowedServiceAccounts []string, opts ...Option) (*Verifier, error) {
 	v := &Verifier{
 		audience: strings.TrimSpace(audience),
 		allowed:  toLowerMap(allowedServiceAccounts),
 		validate: idtoken.Validate,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(v)
+		}
 	}
 	switch {
 	case v.audience == "" && len(v.allowed) == 0:

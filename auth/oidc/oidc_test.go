@@ -19,7 +19,7 @@ const (
 
 // stubValidate は idtoken.Validate を差し替え、指定した email を持つ
 // 検証済みペイロードを返します。err が非 nil ならそれを返します。
-func stubValidate(email string, err error) validateFunc {
+func stubValidate(email string, err error) ValidateFunc {
 	return func(context.Context, string, string) (*idtoken.Payload, error) {
 		if err != nil {
 			return nil, err
@@ -33,8 +33,40 @@ func stubValidate(email string, err error) validateFunc {
 
 // newTestVerifier は、New の検査を通さずに Verifier を組み立てます。
 // 未設定の Verifier に対する Authenticate / Challenge の挙動を試すためです。
-func newTestVerifier(allowed []string, validate validateFunc) *Verifier {
+func newTestVerifier(allowed []string, validate ValidateFunc) *Verifier {
 	return &Verifier{audience: testAudience, allowed: toLowerMap(allowed), validate: validate}
+}
+
+// TestWithValidatorDrivesAuthenticate は、WithValidator で差し替えた検証関数が Authenticate
+// の Bearer 経路にそのまま効くことを確認します。利用側がこれで Bearer 経路を端から端まで
+// 試せることが目的です。
+func TestWithValidatorDrivesAuthenticate(t *testing.T) {
+	t.Parallel()
+
+	v, err := New(testAudience, []string{testAccount}, WithValidator(stubValidate(testAccount, nil)))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api", nil)
+	req.Header.Set("Authorization", "Bearer any-token")
+	ctx, err := v.Authenticate(httptest.NewRecorder(), req)
+	if err != nil {
+		t.Fatalf("Authenticate() error = %v", err)
+	}
+	payload, ok := PayloadFromContext(ctx)
+	if !ok || payload.Claims["email"] != testAccount {
+		t.Fatalf("payload in context = %+v, ok = %v", payload, ok)
+	}
+
+	// nil は無視され、既定（idtoken.Validate）のままです。
+	v, err = New(testAudience, []string{testAccount}, WithValidator(nil), nil)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if v.validate == nil {
+		t.Fatal("WithValidator(nil) removed the default validator")
+	}
 }
 
 // TestNewRequiresAudienceAndAllowlist は、設定が欠けた Verifier を New が返さないことを
@@ -78,7 +110,7 @@ func TestVerifierAuthenticate(t *testing.T) {
 		name     string
 		allowed  []string
 		authz    string
-		validate validateFunc
+		validate ValidateFunc
 		wantErr  error // errors.Is で比較。nil なら成功を期待する
 	}{
 		{
@@ -227,7 +259,7 @@ func TestVerifierChallenge(t *testing.T) {
 		name       string
 		allowed    []string
 		authz      string
-		validate   validateFunc
+		validate   ValidateFunc
 		wantStatus int
 		wantWWW    string
 	}{

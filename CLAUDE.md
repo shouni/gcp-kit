@@ -163,6 +163,12 @@ workflow and nothing else.
   than a `Verifier`, so the six apps stop copying the same `Configured()` check and message. A route where
   machine callers are optional passes `nil` to `Protected`, which skips nil authenticators; that replaces
   the one app that logged and carried on.
+  - **`WithValidator` exists so an app's tests can exercise the Bearer path at all.** The `validate` field
+    was unexported, and the apps' router tests worked around it by handing `Protected` an unconfigured
+    verifier — which meant every test request went through the `ErrNotConfigured` branch, logged a
+    misconfiguration, and never once ran the path a real Bearer takes. It is a test seam, documented as one;
+    a production caller has nothing to gain and everything to lose from a validator that does not check
+    signatures.
 - **`cloudlog`**: Cloud Logging-compatible `slog.HandlerOptions`, plus the trace-correlation middleware.
   slog's default `level`/`msg` keys are not the ones Cloud Logging reads (`severity`/`message`), so without
   `HandlerOptions` every entry shows as INFO in Logs Explorer and `slog.Error` never reaches a log-based

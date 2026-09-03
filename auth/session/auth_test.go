@@ -12,7 +12,7 @@ func validTestConfig() Config {
 	return Config{
 		ClientID:     "client-id",
 		ClientSecret: "client-secret",
-		RedirectURL:  "https://example.com/auth/callback",
+		ServiceURL:   "https://example.com",
 		SessionName:  "session",
 		Store:        newTestStore(),
 	}
@@ -41,8 +41,13 @@ func TestNewHandlerValidatesConfig(t *testing.T) {
 			cfg:  without(func(c *Config) { c.ClientSecret = "" }),
 		},
 		{
-			name: "relative redirect url",
-			cfg:  without(func(c *Config) { c.RedirectURL = "/auth/callback" }),
+			name: "relative service url",
+			cfg:  without(func(c *Config) { c.ServiceURL = "/app" }),
+		},
+		{
+			// パスを許すと、リダイレクト先には付くのに Routes の照合には付きません。
+			name: "service url with a path",
+			cfg:  without(func(c *Config) { c.ServiceURL = "https://example.com/app" }),
 		},
 		{
 			name: "missing session name",
@@ -136,6 +141,99 @@ func TestOptionOverrides(t *testing.T) {
 	}
 }
 
+// TestRedirectURLFollowsCallbackPath は、OAuth のリダイレクト先が ServiceURL と
+// callbackPath() から組み立てられることを確認します。呼び出し側に組ませていた頃は、
+// WithPaths を変えてもリダイレクト先だけが古いままになれました。
+func TestRedirectURLFollowsCallbackPath(t *testing.T) {
+	t.Parallel()
+
+	h, err := New(validTestConfig())
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if got := h.oauthConfig.RedirectURL; got != "https://example.com"+DefaultCallbackPath {
+		t.Fatalf("RedirectURL = %q, want ServiceURL + DefaultCallbackPath", got)
+	}
+
+	h, err = New(validTestConfig(), WithPaths("", "/signin/callback", ""))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if got := h.oauthConfig.RedirectURL; got != "https://example.com/signin/callback" {
+		t.Fatalf("RedirectURL = %q, want the WithPaths callback", got)
+	}
+}
+
+// TestSecureCookieFollowsScheme は、Secure 属性が ServiceURL のスキームだけで決まることを
+// 確認します。TLS でない通信に Secure を立てても守られるものは無く、開発機の http では
+// ブラウザ次第でクッキーが捨てられます。
+func TestSecureCookieFollowsScheme(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		serviceURL string
+		want       bool
+	}{
+		{"https://example.com", true},
+		{"HTTPS://example.com", true},
+		{"http://localhost:8080", false},
+		{"http://example.com", false},
+	} {
+		cfg := validTestConfig()
+		cfg.ServiceURL = tt.serviceURL
+		h, err := New(cfg)
+		if err != nil {
+			t.Fatalf("New(%q) error = %v", tt.serviceURL, err)
+		}
+		if h.isSecureCookie != tt.want {
+			t.Errorf("ServiceURL %q: secure = %v, want %v", tt.serviceURL, h.isSecureCookie, tt.want)
+		}
+	}
+}
+
+// TestNewRejectsCollidingPaths は、同じパスを 2 つの役に割り当てた設定を New が
+// 止めることを確認します。Routes まで進めば http.ServeMux が panic します。
+func TestNewRejectsCollidingPaths(t *testing.T) {
+	t.Parallel()
+
+	if _, err := New(validTestConfig(), WithPaths("/auth", "/auth", "")); err == nil {
+		t.Fatal("New() error = nil, want an error for login and callback sharing a path")
+	}
+	if _, err := New(validTestConfig(), WithPaths("auth/login", "", "")); err == nil {
+		t.Fatal("New() error = nil, want an error for a path without a leading slash")
+	}
+}
+
+// TestRoutes は、Routes が 3 つのハンドラーを設定どおりのパスとメソッドで受けることを
+// 確認します。プレフィックスの下に置いても完全なパスで照合します。
+func TestRoutes(t *testing.T) {
+	t.Parallel()
+
+	h, err := New(validTestConfig(), WithPaths("/signin", "/signin/callback", "/signout"))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	routes := h.Routes()
+
+	for _, tt := range []struct {
+		method, path string
+		want         int
+	}{
+		{http.MethodGet, "/signin", http.StatusTemporaryRedirect},   // Google へ
+		{http.MethodPost, "/signin", http.StatusMethodNotAllowed},   // GET のみ
+		{http.MethodGet, "/signin/callback", http.StatusBadRequest}, // state 無し
+		{http.MethodGet, "/signout", http.StatusSeeOther},           // ログインへ
+		{http.MethodPost, "/signout", http.StatusSeeOther},          // メソッドを限らない
+		{http.MethodGet, DefaultLoginPath, http.StatusNotFound},     // 既定パスは登録されない
+	} {
+		rr := newRecorderForCookies()
+		routes.ServeHTTP(rr, newRequestForRoutes(tt.method, tt.path))
+		if rr.Code != tt.want {
+			t.Errorf("%s %s = %d, want %d", tt.method, tt.path, rr.Code, tt.want)
+		}
+	}
+}
+
 // TestCallbackPathDrivesStateCookiePath は、CallbackPath を変えると state/PKCE
 // クッキーの Path も追随することを確認します（一致していないとコールバック時に
 // クッキーが送信されず、ログインが必ず失敗します）。
@@ -173,7 +271,6 @@ func TestStoreInjection(t *testing.T) {
 }
 
 // ログアウトはセッションを破棄してログインページへ 303 を返します。
-// Routes() は廃止したため、利用側と同じくハンドラーを直接叩いて確認します。
 func TestLogoutRedirectsToLogin(t *testing.T) {
 	t.Parallel()
 

@@ -11,21 +11,23 @@ import (
 type Option func(*options)
 
 type options struct {
-	scopes       []string
-	loginPath    string
-	callbackPath string
-	logoutPath   string
-	stateMaxAge  time.Duration
-	logger       *slog.Logger
-	prompt       Prompt
+	scopes        []string
+	loginPath     string
+	callbackPath  string
+	logoutPath    string
+	stateMaxAge   time.Duration
+	sessionMaxAge time.Duration
+	logger        *slog.Logger
+	prompt        Prompt
 }
 
 func newOptions(opts []Option) *options {
 	o := &options{
-		loginPath:    DefaultLoginPath,
-		callbackPath: DefaultCallbackPath,
-		logoutPath:   DefaultLogoutPath,
-		stateMaxAge:  defaultStateMaxAge,
+		loginPath:     DefaultLoginPath,
+		callbackPath:  DefaultCallbackPath,
+		logoutPath:    DefaultLogoutPath,
+		stateMaxAge:   defaultStateMaxAge,
+		sessionMaxAge: defaultSessionMaxAge,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -61,6 +63,19 @@ func WithPaths(loginPath, callbackPath, logoutPath string) Option {
 		}
 		if p := strings.TrimSpace(logoutPath); p != "" {
 			o.logoutPath = p
+		}
+	}
+}
+
+// WithSessionMaxAge はセッションの有効期間を指定します（既定: 7 日）。
+// クッキーの寿命であると同時に、保存した実体の期限でもあります。0 以下は無視されます。
+//
+// 以前は Store 側の設定でした。クッキーを Handler が一手に持つようになったので、
+// 寿命もここで決めます。
+func WithSessionMaxAge(d time.Duration) Option {
+	return func(o *options) {
+		if d > 0 {
+			o.sessionMaxAge = d
 		}
 	}
 }

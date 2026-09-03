@@ -112,7 +112,7 @@ func TestLogin(t *testing.T) {
 		}
 	})
 
-	t.Run("saves valid redirect_to in session", func(t *testing.T) {
+	t.Run("carries valid redirect_to in a temporary cookie", func(t *testing.T) {
 		t.Parallel()
 		h := newHandler(nil)
 		req := httptest.NewRequest(http.MethodGet, "/auth/login?redirect_to=/private", nil)
@@ -124,16 +124,22 @@ func TestLogin(t *testing.T) {
 			t.Fatalf("status = %d, want %d", rr.Code, http.StatusTemporaryRedirect)
 		}
 
-		req2 := httptest.NewRequest(http.MethodGet, "/", nil)
+		var redirect *http.Cookie
 		for _, c := range rr.Result().Cookies() {
-			req2.AddCookie(c)
+			if c.Name == DefaultRedirectCookie {
+				redirect = c
+			}
 		}
-		session, err := h.store.Get(req2, h.sessionName)
-		if err != nil {
-			t.Fatalf("store.Get() error = %v", err)
+		if redirect == nil {
+			t.Fatal("redirect cookie was not set")
 		}
-		if got := session.Values[DefaultRedirectSessionKey]; got != "/private" {
-			t.Fatalf("redirect session value = %q, want %q", got, "/private")
+		if got, err := url.QueryUnescape(redirect.Value); err != nil || got != "/private" {
+			t.Fatalf("redirect cookie = %q (err %v), want %q", redirect.Value, err, "/private")
+		}
+		// コールバックへ届く必要があるので、属性は state / verifier と同じです。
+		if redirect.Path != DefaultCallbackPath || !redirect.HttpOnly {
+			t.Fatalf("redirect cookie Path = %q HttpOnly = %v, want %q and true",
+				redirect.Path, redirect.HttpOnly, DefaultCallbackPath)
 		}
 	})
 
@@ -149,15 +155,18 @@ func TestLogin(t *testing.T) {
 			t.Fatalf("status = %d, want %d", rr.Code, http.StatusTemporaryRedirect)
 		}
 		for _, c := range rr.Result().Cookies() {
-			if c.Name == h.sessionName {
-				t.Fatal("session cookie should not be set when redirect_to is unsafe")
+			if c.Name == DefaultRedirectCookie {
+				t.Fatalf("redirect cookie was set to %q for an unsafe target", c.Value)
 			}
 		}
 	})
 
-	t.Run("proceeds when session store Get fails", func(t *testing.T) {
+	// ログイン画面は誰でも開けます。ここでセッションの実体を作ると、未認証の
+	// 相手が保存先へ書き込めることになるので、ストアには触れません。
+	t.Run("does not touch the session store", func(t *testing.T) {
 		t.Parallel()
-		h := newHandler(nilSessionStore{})
+		counting := &countingStore{inner: newTestStore()}
+		h := newHandler(counting)
 		req := httptest.NewRequest(http.MethodGet, "/auth/login?redirect_to=/private", nil)
 		rr := httptest.NewRecorder()
 
@@ -166,18 +175,9 @@ func TestLogin(t *testing.T) {
 		if rr.Code != http.StatusTemporaryRedirect {
 			t.Fatalf("status = %d, want %d", rr.Code, http.StatusTemporaryRedirect)
 		}
-	})
-
-	t.Run("500 when session save fails", func(t *testing.T) {
-		t.Parallel()
-		h := newHandler(failingStore{})
-		req := httptest.NewRequest(http.MethodGet, "/auth/login?redirect_to=/private", nil)
-		rr := httptest.NewRecorder()
-
-		h.Login(rr, req)
-
-		if rr.Code != http.StatusInternalServerError {
-			t.Fatalf("status = %d, want %d", rr.Code, http.StatusInternalServerError)
+		if counting.gets != 0 || counting.saves != 0 {
+			t.Fatalf("store.Get=%d store.Save=%d, want no store access at all",
+				counting.gets, counting.saves)
 		}
 	})
 }
@@ -219,11 +219,11 @@ func TestClearTemporaryCookies(t *testing.T) {
 	h.clearTemporaryCookies(rr)
 
 	cookies := rr.Result().Cookies()
-	if len(cookies) != 2 {
-		t.Fatalf("got %d cookies, want 2", len(cookies))
+	if len(cookies) != 3 {
+		t.Fatalf("got %d cookies, want 3", len(cookies))
 	}
 	for _, c := range cookies {
-		if c.Name != DefaultStateCookie && c.Name != DefaultVerifierCookie {
+		if c.Name != DefaultStateCookie && c.Name != DefaultVerifierCookie && c.Name != DefaultRedirectCookie {
 			t.Fatalf("unexpected cookie %q", c.Name)
 		}
 		if c.MaxAge != -1 {
@@ -487,24 +487,18 @@ func TestSaveSessionAndRedirect(t *testing.T) {
 		}
 	})
 
-	t.Run("uses and clears saved redirect target", func(t *testing.T) {
+	// Login が発行したクッキーが、そのままコールバックの戻り先になります。
+	t.Run("uses the redirect cookie left by Login", func(t *testing.T) {
 		t.Parallel()
-		store := newTestStore()
-		h := &Handler{store: store, sessionName: "test-session"}
+		h := &Handler{store: newTestStore(), sessionName: "test-session"}
 
-		seedReq := httptest.NewRequest(http.MethodGet, "/auth/login", nil)
-		seedRR := httptest.NewRecorder()
-		session, err := h.store.Get(seedReq, h.sessionName)
-		if err != nil {
-			t.Fatalf("store.Get() error = %v", err)
-		}
-		session.Values[DefaultRedirectSessionKey] = "/private"
-		if err := h.store.Save(seedReq, seedRR, session); err != nil {
-			t.Fatalf("store.Save() error = %v", err)
-		}
+		loginRR := httptest.NewRecorder()
+		loginReq := httptest.NewRequest(http.MethodGet, "/auth/login?redirect_to=/private%3Fpage%3D2", nil)
+		h.oauthConfig = &oauth2.Config{ClientID: "client-id"}
+		h.Login(loginRR, loginReq)
 
 		req := httptest.NewRequest(http.MethodGet, "/auth/callback", nil)
-		for _, c := range seedRR.Result().Cookies() {
+		for _, c := range loginRR.Result().Cookies() {
 			req.AddCookie(c)
 		}
 		rr := httptest.NewRecorder()
@@ -512,14 +506,14 @@ func TestSaveSessionAndRedirect(t *testing.T) {
 		if err := h.saveSessionAndRedirect(rr, req, "user@example.com"); err != nil {
 			t.Fatalf("saveSessionAndRedirect() error = %v", err)
 		}
-		if loc := rr.Header().Get("Location"); loc != "/private" {
-			t.Fatalf("Location = %q, want %q", loc, "/private")
+		if loc := rr.Header().Get("Location"); loc != "/private?page=2" {
+			t.Fatalf("Location = %q, want %q", loc, "/private?page=2")
 		}
 	})
 
-	t.Run("nil session returns error", func(t *testing.T) {
+	t.Run("unreachable store returns error", func(t *testing.T) {
 		t.Parallel()
-		h := &Handler{store: nilSessionStore{}, sessionName: "test-session"}
+		h := &Handler{store: unavailableStore{}, sessionName: "test-session"}
 		req := httptest.NewRequest(http.MethodGet, "/auth/callback", nil)
 		rr := httptest.NewRecorder()
 
@@ -551,21 +545,10 @@ func TestLogout(t *testing.T) {
 	newSeededRequest := func(t *testing.T, h *Handler, target string) *http.Request {
 		t.Helper()
 
-		seedReq := httptest.NewRequest(http.MethodGet, "/", nil)
-		seedRR := httptest.NewRecorder()
-		session, err := h.store.Get(seedReq, h.sessionName)
-		if err != nil {
-			t.Fatalf("store.Get() error = %v", err)
-		}
-		session.Values[DefaultUserSessionKey] = "user@example.com"
-		if err := h.store.Save(seedReq, seedRR, session); err != nil {
-			t.Fatalf("store.Save() error = %v", err)
-		}
+		seeded := seedSession(t, h.store, h.sessionName, map[string]string{DefaultUserSessionKey: "user@example.com"})
 
 		req := httptest.NewRequest(http.MethodPost, target, nil)
-		for _, c := range seedRR.Result().Cookies() {
-			req.AddCookie(c)
-		}
+		req.AddCookie(seeded)
 		return req
 	}
 
@@ -623,10 +606,10 @@ func TestLogout(t *testing.T) {
 		}
 	})
 
-	// セッションが壊れていてもログアウト自体は成立させます。
+	// 保存先へ届かなくてもログアウト自体は成立させます（クッキーは落ちます）。
 	t.Run("redirects even when the session cannot be cleared", func(t *testing.T) {
 		t.Parallel()
-		h := &Handler{store: nilSessionStore{}, sessionName: "test-session"}
+		h := &Handler{store: unavailableStore{}, sessionName: "test-session"}
 		req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
 		rr := httptest.NewRecorder()
 
@@ -715,25 +698,26 @@ func TestWithPromptOption(t *testing.T) {
 // 振り直されることを検証します（セッション固定攻撃対策）。
 //
 // クッキーが運ぶのは ID だけなので、攻撃者が事前に仕込んだ ID のまま認証済みに
-// してしまうと、攻撃者はその ID で被害者として振る舞えます。
+// してしまうと、攻撃者はその ID で被害者として振る舞えます。仕込む ID は発行と同じ
+// 形にします。形の合わない ID は読み出しの手前で捨てられるので、それでは
+// 「実体があるのに採用しない」ことを試せません。
 func TestSaveSessionAndRedirectRotatesSessionID(t *testing.T) {
 	t.Parallel()
 
-	const (
-		plantedID = "attacker-known-id"
-		email     = "user@example.com"
-	)
+	const email = "user@example.com"
+	store := newTestStore()
 
-	store := newIDStore()
 	// 攻撃者が仕込んだセッションが、既にストアにある状態。
-	store.saved[plantedID] = map[string]string{
-		DefaultRedirectSessionKey: "/dashboard",
-		CSRFTokenKey:              "token-fixed-before-login",
-	}
+	planted := seedSession(t, store, "test-session", map[string]string{
+		CSRFTokenKey: "token-fixed-before-login",
+	})
+	plantedID := planted.Value
 
 	h := &Handler{store: store, sessionName: "test-session"}
 	req := httptest.NewRequest(http.MethodGet, "/auth/callback", nil)
-	req.AddCookie(&http.Cookie{Name: "test-session", Value: plantedID})
+	req.AddCookie(planted)
+	// ログイン前に控えた遷移先。Login が発行するクッキーと同じ形です。
+	req.AddCookie(&http.Cookie{Name: DefaultRedirectCookie, Value: url.QueryEscape("/dashboard")})
 	rr := httptest.NewRecorder()
 
 	if err := h.saveSessionAndRedirect(rr, req, email); err != nil {
@@ -741,47 +725,36 @@ func TestSaveSessionAndRedirectRotatesSessionID(t *testing.T) {
 	}
 
 	// 仕込まれた ID が認証済みになっていないこと。
-	if values, ok := store.saved[plantedID]; ok {
+	if values, err := store.Load(context.Background(), plantedID); err == nil {
 		if _, authenticated := values[DefaultUserSessionKey]; authenticated {
 			t.Error("攻撃者が知っている ID がそのまま認証済みになりました（セッション固定）")
 		}
 	}
 
-	// 別の ID の下に認証済みセッションが入っていること。
-	var newID string
-	for id, values := range store.saved {
-		if id == plantedID {
-			continue
-		}
-		if values[DefaultUserSessionKey] == email {
-			newID = id
-		}
-	}
-	if newID == "" {
-		t.Fatalf("新しい ID で認証済みセッションが保存されていません: %v", store.saved)
-	}
-
-	// ログイン前の CSRF トークンは持ち越さない。
-	if _, ok := store.saved[newID][CSRFTokenKey]; ok {
-		t.Error("ログイン前の CSRF トークンが新しいセッションへ持ち越されています")
-	}
-
-	// ID を振り直しても、ログイン前に控えた遷移先は失わない。
-	if got := rr.Header().Get("Location"); got != "/dashboard" {
-		t.Errorf("Location = %q, want /dashboard", got)
-	}
-
-	// ブラウザへ渡すクッキーが新しい ID になっていること。
+	// ブラウザへ渡すクッキーが新しい ID で、その下に認証済みセッションがあること。
 	var cookieValue string
 	for _, c := range rr.Result().Cookies() {
 		if c.Name == "test-session" {
 			cookieValue = c.Value
 		}
 	}
-	if cookieValue == plantedID {
-		t.Error("応答のクッキーが仕込まれた ID のままです")
+	if cookieValue == "" || cookieValue == plantedID {
+		t.Fatalf("応答のクッキー = %q、仕込まれた ID のままか空です", cookieValue)
 	}
-	if cookieValue != newID {
-		t.Errorf("クッキー = %q, want %q（保存された新しい ID）", cookieValue, newID)
+	values, err := store.Load(context.Background(), cookieValue)
+	if err != nil {
+		t.Fatalf("新しい ID の実体が読めません: %v", err)
+	}
+	if values[DefaultUserSessionKey] != email {
+		t.Errorf("新しいセッションの email = %q, want %q", values[DefaultUserSessionKey], email)
+	}
+	// ログイン前の CSRF トークンは持ち越さない。
+	if _, ok := values[CSRFTokenKey]; ok {
+		t.Error("ログイン前の CSRF トークンが新しいセッションへ持ち越されています")
+	}
+
+	// ID を振り直しても、ログイン前に控えた遷移先は失わない。
+	if got := rr.Header().Get("Location"); got != "/dashboard" {
+		t.Errorf("Location = %q, want /dashboard", got)
 	}
 }

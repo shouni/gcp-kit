@@ -99,21 +99,10 @@ func TestMiddlewareAllowsAuthenticatedRequest(t *testing.T) {
 	h := &Handler{store: store, sessionName: "test-session", allowedDomains: testAllowedDomains()}
 
 	// Seed a session with a logged-in user and a matching CSRF token.
-	seedReq := httptest.NewRequest(http.MethodGet, "/", nil)
-	seedRR := httptest.NewRecorder()
-	session, err := h.store.Get(seedReq, h.sessionName)
-	if err != nil {
-		t.Fatalf("store.Get() error = %v", err)
-	}
-	session.Values[DefaultUserSessionKey] = "user@example.com"
-	session.Values[CSRFTokenKey] = "csrf-token"
-	if err := h.store.Save(seedReq, seedRR, session); err != nil {
-		t.Fatalf("store.Save() error = %v", err)
-	}
-	// httptest.ResponseRecorder.Result() is not safe to call concurrently,
-	// so extract the cookies once here rather than from inside the parallel
-	// subtests below.
-	seedCookies := seedRR.Result().Cookies()
+	seedCookies := []*http.Cookie{seedSession(t, store, h.sessionName, map[string]string{
+		DefaultUserSessionKey: "user@example.com",
+		CSRFTokenKey:          "csrf-token",
+	})}
 
 	t.Run("GET without CSRF token succeeds", func(t *testing.T) {
 		t.Parallel()
@@ -174,6 +163,86 @@ func TestMiddlewareAllowsAuthenticatedRequest(t *testing.T) {
 	})
 }
 
+// TestStoreUnavailableKeepsTheSession は、保存先へ到達できないだけのときに
+// セッションクッキーを消さないことを確認します。
+//
+// 一時障害を「壊れたセッション」と同じ扱いにすると、Firestore の瞬断がその瞬間に
+// アクセスしていた利用者全員のログアウトになり、復旧しても元に戻りません。
+// 応答は 503 で、ログイン画面へは送りません（送っても直らないためです）。
+func TestStoreUnavailableKeepsTheSession(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{
+		store:          unavailableStore{},
+		sessionName:    "test-session",
+		allowedDomains: testAllowedDomains(),
+	}
+
+	// 形の合う ID でないと Load に届かず、ストアの障害に当たる前に「セッション無し」になります。
+	id, err := newSessionID()
+	if err != nil {
+		t.Fatalf("newSessionID() error = %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/private", nil)
+	req.AddCookie(&http.Cookie{Name: "test-session", Value: id})
+	rr := httptest.NewRecorder()
+
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("next handler must not be called while the store is unreachable")
+	})
+	auth.Require(h)(next).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusServiceUnavailable)
+	}
+	if got := rr.Result().Cookies(); len(got) != 0 {
+		t.Fatalf("response set %d cookies (%v), want none: the session must survive the outage",
+			len(got), got)
+	}
+}
+
+// TestBrokenSessionClearsTheCookie は、保存先には届いたが実体を解釈できない場合に、
+// クッキーを消してログイン画面へ送り、壊れた実体も消すことを確認します。
+// こちらは作り直せば直るので、消すのが正しい処置です。
+func TestBrokenSessionClearsTheCookie(t *testing.T) {
+	t.Parallel()
+
+	store := &brokenStore{}
+	h := &Handler{
+		store:          store,
+		sessionName:    "test-session",
+		allowedDomains: testAllowedDomains(),
+	}
+
+	// 形の合わない ID は Load の手前で捨てられるので、壊れた実体を読む経路には
+	// 発行と同じ形の ID で入ります。
+	id, err := newSessionID()
+	if err != nil {
+		t.Fatalf("newSessionID() error = %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/private", nil)
+	req.AddCookie(&http.Cookie{Name: "test-session", Value: id})
+	rr := httptest.NewRecorder()
+
+	auth.Require(h)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d (login redirect)", rr.Code, http.StatusFound)
+	}
+	var cleared bool
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == "test-session" && c.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatal("a session that cannot be read must be cleared, so the next login can replace it")
+	}
+	if len(store.deleted) != 1 || store.deleted[0] != id {
+		t.Fatalf("deleted = %v, want the broken entity %q to be removed", store.deleted, id)
+	}
+}
+
 // TestMiddlewareRejectsRevokedSession は、許可リストから外れたアドレスのセッションが
 // 有効期限内でも通らないことを確認します。認可をログイン時に一度きりしか評価しないと、
 // 許可リストから削除してもクッキーの有効期限まで通り続けてしまいます。
@@ -183,16 +252,7 @@ func TestMiddlewareRejectsRevokedSession(t *testing.T) {
 	store := newTestStore()
 
 	// セッションを作った時点では許可されていた利用者。
-	seedReq := httptest.NewRequest(http.MethodGet, "/", nil)
-	seedRR := httptest.NewRecorder()
-	session, err := store.Get(seedReq, "test-session")
-	if err != nil {
-		t.Fatalf("store.Get() error = %v", err)
-	}
-	session.Values[DefaultUserSessionKey] = "user@example.com"
-	if err := store.Save(seedReq, seedRR, session); err != nil {
-		t.Fatalf("store.Save() error = %v", err)
-	}
+	seeded := seedSession(t, store, "test-session", map[string]string{DefaultUserSessionKey: "user@example.com"})
 
 	// 許可リストから外した後の Handler。セッションクッキー自体は有効なままです。
 	revoked := &Handler{
@@ -205,9 +265,7 @@ func TestMiddlewareRejectsRevokedSession(t *testing.T) {
 	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { nextCalled = true })
 
 	req := httptest.NewRequest(http.MethodGet, "/private", nil)
-	for _, c := range seedRR.Result().Cookies() {
-		req.AddCookie(c)
-	}
+	req.AddCookie(seeded)
 	rr := httptest.NewRecorder()
 	auth.Require(revoked)(next).ServeHTTP(rr, req)
 
@@ -256,10 +314,10 @@ func TestIsStateChangingMethod(t *testing.T) {
 func TestValidateCSRF(t *testing.T) {
 	t.Parallel()
 
-	newSession := func(token string) *Session {
-		s := NewSession("test")
+	newSession := func(token string) *session {
+		s := newSession()
 		if token != "" {
-			s.Values[CSRFTokenKey] = token
+			s.values[CSRFTokenKey] = token
 		}
 		return s
 	}
@@ -353,17 +411,10 @@ func TestMiddlewareRejectsCrossOriginPost(t *testing.T) {
 	store := newTestStore()
 	h := &Handler{store: store, sessionName: "test-session", allowedDomains: testAllowedDomains()}
 
-	seedReq := httptest.NewRequest(http.MethodGet, "/", nil)
-	seedRR := httptest.NewRecorder()
-	session, err := store.Get(seedReq, h.sessionName)
-	if err != nil {
-		t.Fatalf("store.Get() error = %v", err)
-	}
-	session.Values[DefaultUserSessionKey] = "user@example.com"
-	session.Values[CSRFTokenKey] = "tok"
-	if err := h.store.Save(seedReq, seedRR, session); err != nil {
-		t.Fatalf("store.Save() error = %v", err)
-	}
+	seeded := seedSession(t, store, h.sessionName, map[string]string{
+		DefaultUserSessionKey: "user@example.com",
+		CSRFTokenKey:          "tok",
+	})
 
 	newReq := func(origin string) *http.Request {
 		req := httptest.NewRequest(http.MethodPost, "https://app.example.com/private", nil)
@@ -372,9 +423,7 @@ func TestMiddlewareRejectsCrossOriginPost(t *testing.T) {
 		if origin != "" {
 			req.Header.Set("Origin", origin)
 		}
-		for _, c := range seedRR.Result().Cookies() {
-			req.AddCookie(c)
-		}
+		req.AddCookie(seeded)
 		return req
 	}
 
@@ -406,26 +455,30 @@ func TestGenerateAndSaveCSRFToken(t *testing.T) {
 		h := &Handler{store: store, sessionName: "test-session"}
 		req := httptest.NewRequest(http.MethodGet, "/x", nil)
 		rr := httptest.NewRecorder()
+		session := newSession()
 
-		token, err := h.generateAndSaveCSRFToken(rr, req)
+		token, err := h.generateAndSaveCSRFToken(rr, req, session)
 		if err != nil {
 			t.Fatalf("GenerateAndSaveCSRFToken() error = %v", err)
 		}
 		if token == "" {
 			t.Fatal("token is empty")
 		}
+		if session.values[CSRFTokenKey] != token {
+			t.Fatalf("session token = %q, want %q", session.values[CSRFTokenKey], token)
+		}
 		if len(rr.Result().Cookies()) == 0 {
 			t.Fatal("expected session cookie to be set")
 		}
 	})
 
-	t.Run("store get error", func(t *testing.T) {
+	t.Run("nil session", func(t *testing.T) {
 		t.Parallel()
-		h := &Handler{store: nilSessionStore{}, sessionName: "test-session"}
+		h := &Handler{store: newTestStore(), sessionName: "test-session"}
 		req := httptest.NewRequest(http.MethodGet, "/x", nil)
 		rr := httptest.NewRecorder()
 
-		if _, err := h.generateAndSaveCSRFToken(rr, req); err == nil {
+		if _, err := h.generateAndSaveCSRFToken(rr, req, nil); err == nil {
 			t.Fatal("GenerateAndSaveCSRFToken() error = nil, want error")
 		}
 	})
@@ -436,53 +489,78 @@ func TestGenerateAndSaveCSRFToken(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/x", nil)
 		rr := httptest.NewRecorder()
 
-		if _, err := h.generateAndSaveCSRFToken(rr, req); err == nil {
+		if _, err := h.generateAndSaveCSRFToken(rr, req, newSession()); err == nil {
 			t.Fatal("GenerateAndSaveCSRFToken() error = nil, want error")
 		}
 	})
 }
 
-func TestGetCSRFTokenFromSession(t *testing.T) {
+// TestAuthenticateIssuesCSRFTokenOnGet は、トークンを持たない認証済み GET が
+// トークンを発行し、それをコンテキストへ載せることを確認します。
+//
+// これが空になると、テンプレートの hidden input が空のまま描画され、その画面から
+// の POST が一律 403 になります（利用アプリはここからトークンを受け取ります）。
+func TestAuthenticateIssuesCSRFTokenOnGet(t *testing.T) {
 	t.Parallel()
 
-	t.Run("returns saved token", func(t *testing.T) {
-		t.Parallel()
-		store := newTestStore()
-		h := &Handler{store: store, sessionName: "test-session"}
+	store := newTestStore()
+	h := &Handler{store: store, sessionName: "test-session", allowedDomains: testAllowedDomains()}
+	cookies := seedAuthenticatedSession(t, h, "user@example.com")
 
-		saveReq := httptest.NewRequest(http.MethodGet, "/x", nil)
-		saveRR := httptest.NewRecorder()
-		token, err := h.generateAndSaveCSRFToken(saveRR, saveReq)
-		if err != nil {
-			t.Fatalf("GenerateAndSaveCSRFToken() error = %v", err)
-		}
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	rr := httptest.NewRecorder()
 
+	ctx, err := h.Authenticate(rr, req)
+	if err != nil {
+		t.Fatalf("Authenticate() error = %v", err)
+	}
+	token := CSRFTokenFromContext(ctx)
+	if token == "" {
+		t.Fatal("CSRF token in context is empty")
+	}
+
+	// 2 回目の GET は、発行済みのトークンをそのまま返します。
+	req2 := httptest.NewRequest(http.MethodGet, "/x", nil)
+	for _, c := range cookies {
+		req2.AddCookie(c)
+	}
+	ctx2, err := h.Authenticate(httptest.NewRecorder(), req2)
+	if err != nil {
+		t.Fatalf("Authenticate() error = %v", err)
+	}
+	if got := CSRFTokenFromContext(ctx2); got != token {
+		t.Fatalf("token = %q, want the already issued %q", got, token)
+	}
+}
+
+// TestAuthenticateReadsStoreOnce は、認証済みリクエスト 1 本につきストアの読み出しが
+// 1 回であることを固定します。
+//
+// Firestore ストアでは 1 回が 1 件の課金対象の読み取りで、しかも往復が 1 つ増えます。
+// 手元のセッションを使わずに読み直す実装へ戻ると、この数字が黙って倍になります。
+func TestAuthenticateReadsStoreOnce(t *testing.T) {
+	t.Parallel()
+
+	counting := &countingStore{inner: newTestStore()}
+	h := &Handler{store: counting, sessionName: "test-session", allowedDomains: testAllowedDomains()}
+	cookies := seedAuthenticatedSession(t, h, "user@example.com")
+
+	// 最初の GET は CSRF トークンの発行を伴うため、保存が 1 回だけ増えます。
+	for i, want := range []struct{ gets, saves int }{{1, 1}, {1, 0}} {
+		counting.reset()
 		req := httptest.NewRequest(http.MethodGet, "/x", nil)
-		for _, c := range saveRR.Result().Cookies() {
+		for _, c := range cookies {
 			req.AddCookie(c)
 		}
-
-		if got := h.csrfTokenFromSession(req); got != token {
-			t.Fatalf("GetCSRFTokenFromSession() = %q, want %q", got, token)
+		if _, err := h.Authenticate(httptest.NewRecorder(), req); err != nil {
+			t.Fatalf("GET #%d: Authenticate() error = %v", i+1, err)
 		}
-	})
-
-	t.Run("store get error returns empty", func(t *testing.T) {
-		t.Parallel()
-		h := &Handler{store: nilSessionStore{}, sessionName: "test-session"}
-		req := httptest.NewRequest(http.MethodGet, "/x", nil)
-		if got := h.csrfTokenFromSession(req); got != "" {
-			t.Fatalf("GetCSRFTokenFromSession() = %q, want empty", got)
+		if counting.gets != want.gets || counting.saves != want.saves {
+			t.Fatalf("GET #%d: store.Get=%d store.Save=%d, want Get=%d Save=%d",
+				i+1, counting.gets, counting.saves, want.gets, want.saves)
 		}
-	})
-
-	t.Run("no token in session returns empty", func(t *testing.T) {
-		t.Parallel()
-		store := newTestStore()
-		h := &Handler{store: store, sessionName: "test-session"}
-		req := httptest.NewRequest(http.MethodGet, "/x", nil)
-		if got := h.csrfTokenFromSession(req); got != "" {
-			t.Fatalf("GetCSRFTokenFromSession() = %q, want empty", got)
-		}
-	})
+	}
 }

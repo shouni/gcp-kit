@@ -45,16 +45,7 @@ func TestAuthenticateInjectsEmail(t *testing.T) {
 	store := newTestStore()
 	h := &Handler{store: store, sessionName: "test-session", allowedDomains: testAllowedDomains()}
 
-	seedReq := httptest.NewRequest(http.MethodGet, "/", nil)
-	seedRR := httptest.NewRecorder()
-	session, err := store.Get(seedReq, h.sessionName)
-	if err != nil {
-		t.Fatalf("store.Get() error = %v", err)
-	}
-	session.Values[DefaultUserSessionKey] = "user@example.com"
-	if err := h.store.Save(seedReq, seedRR, session); err != nil {
-		t.Fatalf("store.Save() error = %v", err)
-	}
+	seeded := seedSession(t, store, h.sessionName, map[string]string{DefaultUserSessionKey: "user@example.com"})
 
 	var gotEmail string
 	var gotOK bool
@@ -63,9 +54,7 @@ func TestAuthenticateInjectsEmail(t *testing.T) {
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/private", nil)
-	for _, c := range seedRR.Result().Cookies() {
-		req.AddCookie(c)
-	}
+	req.AddCookie(seeded)
 	auth.Require(h)(next).ServeHTTP(httptest.NewRecorder(), req)
 
 	if !gotOK || gotEmail != "user@example.com" {

@@ -18,9 +18,9 @@ func newTestSession(t *testing.T) *session.Handler {
 	h, err := session.New(session.Config{
 		ClientID:       "id",
 		ClientSecret:   "secret",
-		RedirectURL:    "https://app.example.com/auth/callback",
+		ServiceURL:     "https://app.example.com",
 		SessionName:    "s",
-		Store:          session.NewMemoryStore(session.StoreConfig{}),
+		Store:          session.NewMemoryStore(),
 		AllowedDomains: []string{"example.com"},
 	})
 	if err != nil {
@@ -36,8 +36,12 @@ func newTestSession(t *testing.T) *session.Handler {
 func TestChallengeMatrix(t *testing.T) {
 	t.Parallel()
 
-	verifier := oidc.New("https://app.example.com", []string{"sa@p.iam.gserviceaccount.com"})
-	unconfigured := oidc.New("https://app.example.com", nil)
+	verifier, err := oidc.New("https://app.example.com", []string{"sa@p.iam.gserviceaccount.com"})
+	if err != nil {
+		t.Fatalf("oidc.New() error = %v", err)
+	}
+	// New は未設定の Verifier を返さないので、ゼロ値で「設定漏れ」を再現します。
+	unconfigured := &oidc.Verifier{}
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	tests := []struct {

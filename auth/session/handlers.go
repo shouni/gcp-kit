@@ -3,6 +3,7 @@ package session
 import (
 	"crypto/subtle"
 	"net/http"
+	"net/url"
 
 	"golang.org/x/oauth2"
 	"google.golang.org/api/idtoken"
@@ -10,7 +11,28 @@ import (
 	"github.com/shouni/gcp-kit/auth"
 )
 
-// Login は、OAuth2 ログイン プロセスを初期化し、state / PKCE の生成とセッション管理を処理する
+// Routes は Login / Callback / Logout を、それぞれ loginPath() / callbackPath() /
+// logoutPath() で受ける http.Handler を返します。
+//
+// 照合はリクエストの完全なパスに対して行うので、どのプレフィックスの下に置いても
+// 同じです（chi なら r.Handle("/auth/*", h.Routes())、標準の mux なら
+// mux.Handle("/auth/", h.Routes())）。3 つのパスを個別にマウントしていた頃は、
+// リダイレクト先を組み立てる側にも同じリテラルがあり、片方だけ変えてもビルドが通りました。
+//
+// Login と Callback は GET だけを受けます。Logout はメソッドを限りません（Logout を参照）。
+func (h *Handler) Routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET "+h.loginPath(), h.Login)
+	mux.HandleFunc("GET "+h.callbackPath(), h.Callback)
+	mux.HandleFunc(h.logoutPath(), h.Logout)
+	return mux
+}
+
+// Login は OAuth2 のログインを開始します。state と PKCE の verifier、
+// および redirect_to があれば戻り先を短命クッキーに残し、Google へ送ります。
+//
+// セッションの保存先には触れません。ログイン画面は誰でも開けるので、ここで実体を
+// 作ると未認証の相手がいくらでも書き込めることになります。
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	state, err := generateState()
 	if err != nil {
@@ -22,23 +44,14 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	// PKCE: 認可コードの横取りに備え、code_verifier をクライアント側に保持します。
 	verifier := oauth2.GenerateVerifier()
 
-	session, err := h.store.Get(r, h.sessionName)
-	if err != nil {
-		h.log().WarnContext(r.Context(), "セッション取得失敗。リダイレクト先の保存をスキップします", "error", err)
-	}
-	if err == nil && session != nil {
-		if redirectTo := r.URL.Query().Get("redirect_to"); redirectTo != "" {
-			// 同一オリジンの相対パスのみを保存します（オープンリダイレクタ対策）。
-			if isSafeRelativePath(redirectTo) {
-				session.Values[DefaultRedirectSessionKey] = redirectTo
-				if err := h.store.Save(r, w, session); err != nil {
-					h.log().ErrorContext(r.Context(), "Failed to save session for redirect", "error", err)
-					http.Error(w, "Could not save session", http.StatusInternalServerError)
-					return
-				}
-			} else {
-				h.log().WarnContext(r.Context(), "Invalid redirect_to parameter detected", "redirectTo", redirectTo)
-			}
+	if redirectTo := r.URL.Query().Get("redirect_to"); redirectTo != "" {
+		// 同一オリジンの相対パスのみを載せます（オープンリダイレクタ対策）。
+		// エスケープするのはクッキー値として往復させるためで、読み出し側は
+		// 復元したうえで同じ判定をやり直します。
+		if isSafeRelativePath(redirectTo) {
+			h.setTemporaryCookie(w, DefaultRedirectCookie, url.QueryEscape(redirectTo))
+		} else {
+			h.log().WarnContext(r.Context(), "Invalid redirect_to parameter detected", "redirectTo", redirectTo)
 		}
 	}
 
@@ -56,7 +69,8 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, authURL, http.StatusTemporaryRedirect)
 }
 
-// Callback OAuth2 コールバックを処理し、CSRF 状態を検証し、認証コードをトークンと交換し、ユーザー セッションを処理します。
+// Callback は Google からの戻りを受けます。state と PKCE verifier を確認し、
+// 認可コードをトークンへ交換し、許可された相手にセッションを発行します。
 func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	if !validateCallbackState(r) {
 		h.log().WarnContext(r.Context(), "CSRF攻撃の可能性を検知")
@@ -144,10 +158,11 @@ func (h *Handler) setTemporaryCookie(w http.ResponseWriter, name, value string) 
 	})
 }
 
-// clearTemporaryCookies は state / PKCE verifier クッキーを無効化します。
-// 属性（Path/SameSite など）は発行時と一致させる必要があります。
+// clearTemporaryCookies は state / PKCE verifier / 戻り先クッキーを無効化します。
+// 属性（Path/SameSite など）は発行時と一致させる必要があります。破棄するのは応答側
+// だけなので、この後でも r からは読めます（Callback は戻り先を後で読みます）。
 func (h *Handler) clearTemporaryCookies(w http.ResponseWriter) {
-	for _, name := range []string{DefaultStateCookie, DefaultVerifierCookie} {
+	for _, name := range []string{DefaultStateCookie, DefaultVerifierCookie, DefaultRedirectCookie} {
 		//nolint:gosec // G124: Secure はローカル開発(http)を許容するため設定値に従う。HttpOnly/SameSite は常に設定済み。
 		http.SetCookie(w, &http.Cookie{
 			Name:     name,

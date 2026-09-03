@@ -18,7 +18,23 @@ import (
 // newTestStore returns an in-process Store usable in tests. Nothing that sits
 // above the Store interface needs Firestore to be exercised.
 func newTestStore() Store {
-	return NewMemoryStore(StoreConfig{MaxAge: time.Hour})
+	return NewMemoryStore()
+}
+
+// seedSession stores values under a freshly minted ID and returns the cookie a
+// browser would carry for it, so a test can start from "already logged in"
+// without going through IssueSession.
+func seedSession(t *testing.T, store Store, name string, values map[string]string) *http.Cookie {
+	t.Helper()
+
+	id, err := newSessionID()
+	if err != nil {
+		t.Fatalf("newSessionID() error = %v", err)
+	}
+	if err := store.Save(context.Background(), id, values, time.Hour); err != nil {
+		t.Fatalf("store.Save() error = %v", err)
+	}
+	return &http.Cookie{Name: name, Value: id}
 }
 
 // testAllowedDomains returns an allowlist admitting the user@example.com
@@ -54,30 +70,97 @@ func newRewriteContext(t *testing.T, server *httptest.Server) context.Context {
 	return context.WithValue(context.Background(), oauth2.HTTPClient, httpClient)
 }
 
-// failingStore is a Store whose Get always succeeds with a fresh session but
-// whose Save always fails, used to exercise session-save error paths.
-type failingStore struct{}
-
-func (failingStore) Get(_ *http.Request, name string) (*Session, error) {
-	return NewSession(name), nil
+// countingStore counts the reads and writes an operation makes against the
+// wrapped Store. Authenticate is expected to read exactly once per request:
+// against Firestore each read is a billed round trip.
+type countingStore struct {
+	inner   Store
+	gets    int
+	saves   int
+	deletes int
 }
 
-func (failingStore) Save(_ *http.Request, _ http.ResponseWriter, _ *Session) error {
+func (c *countingStore) Load(ctx context.Context, id string) (map[string]string, error) {
+	c.gets++
+	return c.inner.Load(ctx, id)
+}
+
+func (c *countingStore) Save(ctx context.Context, id string, values map[string]string, ttl time.Duration) error {
+	c.saves++
+	return c.inner.Save(ctx, id, values, ttl)
+}
+
+func (c *countingStore) Delete(ctx context.Context, id string) error {
+	c.deletes++
+	return c.inner.Delete(ctx, id)
+}
+
+func (c *countingStore) reset() { c.gets, c.saves, c.deletes = 0, 0, 0 }
+
+// unavailableStore is a Store that cannot reach its backing service, the way a
+// Firestore store reports a transient outage.
+type unavailableStore struct{}
+
+func (unavailableStore) Load(context.Context, string) (map[string]string, error) {
+	return nil, fmt.Errorf("%w: deadline exceeded", ErrStoreUnavailable)
+}
+
+func (unavailableStore) Save(context.Context, string, map[string]string, time.Duration) error {
+	return fmt.Errorf("%w: deadline exceeded", ErrStoreUnavailable)
+}
+
+func (unavailableStore) Delete(context.Context, string) error {
+	return fmt.Errorf("%w: deadline exceeded", ErrStoreUnavailable)
+}
+
+// brokenStore is a Store that reaches its backing service but cannot make sense
+// of what it read (a stored session that no longer decodes, say). Its Delete
+// records the ID it was asked to remove.
+type brokenStore struct{ deleted []string }
+
+func (*brokenStore) Load(context.Context, string) (map[string]string, error) {
+	return nil, errors.New("decode stored session: unexpected shape")
+}
+
+func (*brokenStore) Save(context.Context, string, map[string]string, time.Duration) error {
+	return nil
+}
+
+func (b *brokenStore) Delete(_ context.Context, id string) error {
+	b.deleted = append(b.deleted, id)
+	return nil
+}
+
+// seedAuthenticatedSession logs email in through the handler's own IssueSession
+// and returns the cookies a browser would then carry.
+func seedAuthenticatedSession(t *testing.T, h *Handler, email string) []*http.Cookie {
+	t.Helper()
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	if err := h.IssueSession(rr, req, email); err != nil {
+		t.Fatalf("IssueSession() error = %v", err)
+	}
+	cookies := rr.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("IssueSession() set no cookie")
+	}
+	return cookies
+}
+
+// failingStore is a Store that holds nothing and whose Save always fails, used
+// to exercise session-save error paths.
+type failingStore struct{}
+
+func (failingStore) Load(context.Context, string) (map[string]string, error) {
+	return nil, ErrNotFound
+}
+
+func (failingStore) Save(context.Context, string, map[string]string, time.Duration) error {
 	return errors.New("save failed")
 }
 
-// nilSessionStore is a Store whose Get always fails and returns a nil session,
-// simulating an implementation that (unlike the cookie store here) doesn't
-// guarantee a usable session on error.
-type nilSessionStore struct{}
-
-func (nilSessionStore) Get(_ *http.Request, _ string) (*Session, error) {
-	return nil, errors.New("get failed")
-}
-
-func (nilSessionStore) Save(_ *http.Request, _ http.ResponseWriter, _ *Session) error {
-	return nil
-}
+func (failingStore) Delete(context.Context, string) error { return nil }
 
 // rewriteTransport redirects every outgoing request to target, preserving
 // path and query, so a hardcoded external URL (e.g. Google's UserInfo
@@ -110,51 +193,4 @@ func makeUnsignedJWT(claims map[string]any) string {
 	payload := base64.RawURLEncoding.EncodeToString(payloadBytes)
 	sig := base64.RawURLEncoding.EncodeToString([]byte("signature"))
 	return header + "." + payload + "." + sig
-}
-
-// idStore は、サーバーサイドのセッションストア（Firestore 等）の約束を最小限まねた
-// テスト用ストアです。クッキーが運ぶのは ID だけで、中身はストア側が持ちます。
-// ID が空のまま Save されたら新しい ID を振ります（Store の約束）。
-type idStore struct {
-	saved  map[string]map[string]string
-	nextID int
-}
-
-func newIDStore() *idStore {
-	return &idStore{saved: map[string]map[string]string{}}
-}
-
-func (s *idStore) Get(r *http.Request, name string) (*Session, error) {
-	session := NewSession(name)
-	session.Options = &Options{Path: "/"}
-
-	cookie, err := r.Cookie(name)
-	if err != nil || cookie.Value == "" {
-		return session, nil
-	}
-
-	session.ID = cookie.Value
-	if values, ok := s.saved[cookie.Value]; ok {
-		for k, v := range values {
-			session.Values[k] = v
-		}
-		session.IsNew = false
-	}
-	return session, nil
-}
-
-func (s *idStore) Save(_ *http.Request, w http.ResponseWriter, session *Session) error {
-	if session.ID == "" {
-		s.nextID++
-		session.ID = fmt.Sprintf("sid-%d", s.nextID)
-	}
-
-	values := make(map[string]string, len(session.Values))
-	for k, v := range session.Values {
-		values[k] = v
-	}
-	s.saved[session.ID] = values
-
-	http.SetCookie(w, newCookie(session.Name(), session.ID, session.Options))
-	return nil
 }

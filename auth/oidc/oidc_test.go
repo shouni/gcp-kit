@@ -19,7 +19,7 @@ const (
 
 // stubValidate は idtoken.Validate を差し替え、指定した email を持つ
 // 検証済みペイロードを返します。err が非 nil ならそれを返します。
-func stubValidate(email string, err error) validateFunc {
+func stubValidate(email string, err error) ValidateFunc {
 	return func(context.Context, string, string) (*idtoken.Payload, error) {
 		if err != nil {
 			return nil, err
@@ -31,27 +31,73 @@ func stubValidate(email string, err error) validateFunc {
 	}
 }
 
-func TestVerifierConfigured(t *testing.T) {
+// newTestVerifier は、New の検査を通さずに Verifier を組み立てます。
+// 未設定の Verifier に対する Authenticate / Challenge の挙動を試すためです。
+func newTestVerifier(allowed []string, validate ValidateFunc) *Verifier {
+	return &Verifier{audience: testAudience, allowed: toLowerMap(allowed), validate: validate}
+}
+
+// TestWithValidatorDrivesAuthenticate は、WithValidator で差し替えた検証関数が Authenticate
+// の Bearer 経路にそのまま効くことを確認します。利用側がこれで Bearer 経路を端から端まで
+// 試せることが目的です。
+func TestWithValidatorDrivesAuthenticate(t *testing.T) {
 	t.Parallel()
+
+	v, err := New(testAudience, []string{testAccount}, WithValidator(stubValidate(testAccount, nil)))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api", nil)
+	req.Header.Set("Authorization", "Bearer any-token")
+	ctx, err := v.Authenticate(httptest.NewRecorder(), req)
+	if err != nil {
+		t.Fatalf("Authenticate() error = %v", err)
+	}
+	payload, ok := PayloadFromContext(ctx)
+	if !ok || payload.Claims["email"] != testAccount {
+		t.Fatalf("payload in context = %+v, ok = %v", payload, ok)
+	}
+
+	// nil は無視され、既定（idtoken.Validate）のままです。
+	v, err = New(testAudience, []string{testAccount}, WithValidator(nil), nil)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if v.validate == nil {
+		t.Fatal("WithValidator(nil) removed the default validator")
+	}
+}
+
+// TestNewRequiresAudienceAndAllowlist は、設定が欠けた Verifier を New が返さないことを
+// 確認します。「許可リストが空 = 誰でも通す」にしないための入口です。
+func TestNewRequiresAudienceAndAllowlist(t *testing.T) {
+	t.Parallel()
+
+	if _, err := New(testAudience, []string{testAccount}); err != nil {
+		t.Fatalf("New() error = %v, want nil", err)
+	}
 
 	tests := []struct {
 		name     string
-		verifier *Verifier
-		want     bool
+		audience string
+		allowed  []string
 	}{
-		{name: "nil verifier", verifier: nil, want: false},
-		{name: "audience and allowlist", verifier: New(testAudience, []string{testAccount}), want: true},
-		// 許可リストが空の場合は fail-closed のため未設定として扱います。
-		{name: "empty allowlist", verifier: New(testAudience, nil), want: false},
-		{name: "blank entries only", verifier: New(testAudience, []string{"", "  "}), want: false},
-		{name: "missing audience", verifier: New("  ", []string{testAccount}), want: false},
+		{name: "empty allowlist", audience: testAudience, allowed: nil},
+		{name: "blank entries only", audience: testAudience, allowed: []string{"", "  "}},
+		{name: "missing audience", audience: "  ", allowed: []string{testAccount}},
+		{name: "both missing", audience: "", allowed: nil},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := tt.verifier.Configured(); got != tt.want {
-				t.Fatalf("Configured() = %v, want %v", got, tt.want)
+			v, err := New(tt.audience, tt.allowed)
+			if !errors.Is(err, auth.ErrNotConfigured) {
+				t.Fatalf("New() error = %v, want auth.ErrNotConfigured", err)
+			}
+			if v != nil {
+				t.Fatal("New() returned a Verifier alongside the error")
 			}
 		})
 	}
@@ -64,7 +110,7 @@ func TestVerifierAuthenticate(t *testing.T) {
 		name     string
 		allowed  []string
 		authz    string
-		validate validateFunc
+		validate ValidateFunc
 		wantErr  error // errors.Is で比較。nil なら成功を期待する
 	}{
 		{
@@ -149,8 +195,7 @@ func TestVerifierAuthenticate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			v := New(testAudience, tt.allowed)
-			v.validate = tt.validate
+			v := newTestVerifier(tt.allowed, tt.validate)
 
 			req := httptest.NewRequest(http.MethodPost, "/tasks", nil)
 			if tt.authz != "" {
@@ -197,9 +242,6 @@ func TestVerifierNilReceiver(t *testing.T) {
 	t.Parallel()
 
 	var v *Verifier
-	if v.Configured() {
-		t.Fatal("Configured() = true, want false for a nil verifier")
-	}
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	if _, err := v.Authenticate(httptest.NewRecorder(), req); !errors.Is(err, auth.ErrNotConfigured) {
@@ -217,7 +259,7 @@ func TestVerifierChallenge(t *testing.T) {
 		name       string
 		allowed    []string
 		authz      string
-		validate   validateFunc
+		validate   ValidateFunc
 		wantStatus int
 		wantWWW    string
 	}{
@@ -248,8 +290,7 @@ func TestVerifierChallenge(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			v := New(testAudience, tt.allowed)
-			v.validate = tt.validate
+			v := newTestVerifier(tt.allowed, tt.validate)
 
 			req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
 			if tt.authz != "" {

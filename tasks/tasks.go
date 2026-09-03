@@ -35,10 +35,19 @@ type Config struct {
 	ProjectID           string
 	LocationID          string
 	QueueID             string
-	WorkerURL           string // タスクの送信先エンドポイント
+	WorkerURL           string // タスクの送信先。WorkerPath を使うならサービスの URL だけ
 	ServiceAccountEmail string // OIDCトークン生成用
-	// Audience はトークン検証用の audience です。空の場合は WorkerURL が使われます。
-	// 受信側 (oidc.New に渡す audience) と一致させてください。
+	// WorkerPath は、WorkerURL に継ぎ足す受信側のルートです（例: "/tasks/run"）。
+	//
+	// Cloud Tasks の配送先はワーカーが登録したルートと一字一句一致していないと届かず、
+	// 末尾のスラッシュ 1 つで全件 404 になります。それを避ける結合と正規化を、5 つの
+	// アプリが同じ 20 行で持っていたので、ここに置きます。WorkerURL が既にこのパスで
+	// 終わっていれば二重に継ぎ足さず、末尾のスラッシュは落とします。
+	//
+	// 空なら WorkerURL をそのまま配送先にします。
+	WorkerPath string
+	// Audience はトークン検証用の audience です。空の場合は WorkerURL（WorkerPath を
+	// 継ぎ足す前の値）が使われます。受信側 (oidc.New に渡す audience) と一致させてください。
 	Audience string
 	// DispatchDeadline は、このキューへ投入する全タスクに適用する応答待ち時間です。
 	// 未指定 (0) は Cloud Tasks の既定である 10 分を意味します。
@@ -54,6 +63,10 @@ type Config struct {
 	Logger *slog.Logger
 }
 
+// DefaultDispatchDeadline は、Config.DispatchDeadline を指定しなかったときに
+// Cloud Tasks 側で効く既定値です。
+const DefaultDispatchDeadline = 10 * time.Minute
+
 // maxDispatchDeadline は HTTP ターゲットのタスクに指定できる応答待ち時間の上限です。
 // 超えると Cloud Tasks が InvalidArgument を返すため、投入前にローカルで弾きます。
 const maxDispatchDeadline = 30 * time.Minute
@@ -61,12 +74,25 @@ const maxDispatchDeadline = 30 * time.Minute
 // minDispatchDeadline は同じく下限です。
 const minDispatchDeadline = 15 * time.Second
 
+// Queue は Enqueuer が満たすインターフェースです。
+//
+// アプリの port がこれを埋め込めば、Enqueuer を包むアダプタや、テスト用の偽物を
+// 書くための独自インターフェースが要りません。
+type Queue[T any] interface {
+	Enqueue(ctx context.Context, payload T) error
+	EnqueueWithName(ctx context.Context, taskID string, payload T) error
+	EnqueueWithOptions(ctx context.Context, payload T, opts ...EnqueueOption) (string, error)
+}
+
 // Enqueuer は任意の型 T のペイロードを Cloud Tasks に投入する汎用構造体です。
 type Enqueuer[T any] struct {
-	client taskClient
-	cfg    Config
-	parent string
+	client    taskClient
+	cfg       Config
+	parent    string
+	targetURL string
 }
+
+var _ Queue[struct{}] = (*Enqueuer[struct{}])(nil)
 
 type taskClient interface {
 	CreateTask(context.Context, *cloudtaskspb.CreateTaskRequest) (*cloudtaskspb.Task, error)
@@ -121,14 +147,45 @@ func newEnqueuerWithClient[T any](cfg Config, client taskClient) (*Enqueuer[T], 
 		cfg.Audience = cfg.WorkerURL
 	}
 
+	targetURL, err := workerTargetURL(cfg.WorkerURL, cfg.WorkerPath)
+	if err != nil {
+		return nil, err
+	}
+
 	parent := fmt.Sprintf("projects/%s/locations/%s/queues/%s",
 		cfg.ProjectID, cfg.LocationID, cfg.QueueID)
 
 	return &Enqueuer[T]{
-		client: client,
-		cfg:    cfg,
-		parent: parent,
+		client:    client,
+		cfg:       cfg,
+		parent:    parent,
+		targetURL: targetURL,
 	}, nil
+}
+
+// workerTargetURL は、WorkerURL に WorkerPath を継ぎ足した配送先を返します。
+// 挙動は Config.WorkerPath のとおりです。
+func workerTargetURL(workerURL, workerPath string) (string, error) {
+	workerPath = strings.TrimSpace(workerPath)
+	if workerPath == "" {
+		return workerURL, nil
+	}
+
+	parsed, err := url.Parse(workerURL)
+	if err != nil {
+		return "", fmt.Errorf("tasks config WorkerURL is invalid: %w", err)
+	}
+	// 末尾スラッシュは落とします。ルータは登録どおりのパスでしか一致しません。
+	if trimmed := strings.TrimSuffix(parsed.Path, "/"); strings.HasSuffix(trimmed, workerPath) {
+		parsed.Path = trimmed
+		return parsed.String(), nil
+	}
+
+	joined, err := url.JoinPath(workerURL, workerPath)
+	if err != nil {
+		return "", fmt.Errorf("tasks config WorkerURL and WorkerPath cannot be joined: %w", err)
+	}
+	return joined, nil
 }
 
 func (e *Enqueuer[T]) log() *slog.Logger {
@@ -250,7 +307,7 @@ func (e *Enqueuer[T]) EnqueueWithOptions(ctx context.Context, payload T, opts ..
 	if err != nil {
 		e.log().ErrorContext(ctx, "Cloud Tasks enqueue failed",
 			"error", err,
-			"target", e.cfg.WorkerURL,
+			"target", e.targetURL,
 			"queue", e.cfg.QueueID,
 		)
 		return "", err
@@ -278,7 +335,7 @@ func (e *Enqueuer[T]) createTask(ctx context.Context, name string, body []byte, 
 		MessageType: &cloudtaskspb.Task_HttpRequest{
 			HttpRequest: &cloudtaskspb.HttpRequest{
 				HttpMethod: cloudtaskspb.HttpMethod_POST,
-				Url:        e.cfg.WorkerURL,
+				Url:        e.targetURL,
 				Body:       body,
 				Headers:    headers,
 				// OIDC 認証の設定
@@ -347,6 +404,14 @@ func validateConfig(cfg Config) error {
 		return errors.New("tasks config WorkerURL must be an absolute URL")
 	}
 
+	// パスだけを受けます。クエリや別ホストを混ぜると、どちらの値が配送先を決めるのか
+	// 読めなくなります。
+	if p := strings.TrimSpace(cfg.WorkerPath); p != "" {
+		if !strings.HasPrefix(p, "/") || strings.ContainsAny(p, "?#") {
+			return errors.New("tasks config WorkerPath must be an absolute path without query or fragment")
+		}
+	}
+
 	// Audience は未指定なら WorkerURL を使うため必須ではありませんが、
 	// 明示された場合は絶対URLである必要があります。
 	if audience := strings.TrimSpace(cfg.Audience); audience != "" {
@@ -360,6 +425,32 @@ func validateConfig(cfg Config) error {
 		return fmt.Errorf("tasks config DispatchDeadline is invalid: %w", err)
 	}
 
+	return nil
+}
+
+// ValidateDeadlines は、アプリ側のパイプライン上限（worker.WithTimeout などに渡す値）が
+// Cloud Tasks の打ち切りより手前に来ることを確かめます。起動時に呼んでください。
+//
+// 等号は通しません。同時に切れると、アプリが失敗を記録する前に Cloud Tasks が接続を
+// 閉じ、記録の無いまま再配信されます。dispatchDeadline が 0 なら Cloud Tasks の既定
+// （DefaultDispatchDeadline）と比べます。
+//
+// 投入側と受信側は別プロセスなので、両方の値を知っているのは設定だけです。この検査は
+// 3 つのアプリが同じ判定と同じ文言で持っていたものです。
+func ValidateDeadlines(pipelineTimeout, dispatchDeadline time.Duration) error {
+	if pipelineTimeout <= 0 {
+		return errors.New("tasks: pipeline timeout must be positive")
+	}
+	if err := validateDispatchDeadline(dispatchDeadline); err != nil {
+		return fmt.Errorf("tasks: dispatch deadline is invalid: %w", err)
+	}
+	if dispatchDeadline == 0 {
+		dispatchDeadline = DefaultDispatchDeadline
+	}
+	if pipelineTimeout >= dispatchDeadline {
+		return fmt.Errorf("tasks: pipeline timeout (%s) must be shorter than the Cloud Tasks dispatch deadline (%s): "+
+			"at equality the task is cut off before the app records the failure", pipelineTimeout, dispatchDeadline)
+	}
 	return nil
 }
 

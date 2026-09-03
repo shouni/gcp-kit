@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"golang.org/x/oauth2"
@@ -55,6 +56,106 @@ func (h *Handler) fetchUserEmail(ctx context.Context, token *oauth2.Token) (stri
 	})
 }
 
+// session は、1 リクエスト分のセッションです。
+//
+// id が空なら、まだ保存されていない（または保存されている実体を採用しなかった）
+// セッションで、saveSession が新しい ID を振ります。
+type session struct {
+	id     string
+	values map[string]string
+}
+
+func newSession() *session { return &session{values: map[string]string{}} }
+
+// loadSession は、クッキーが指すセッションを読み出します。
+//
+// 返す *session は常に非 nil です。エラーのときも、クッキーが運んできた ID を id に
+// 持たせて返すので、呼び出し側はそのまま clearSession に渡して実体ごと消せます。
+//
+// ★ 保存されていない ID は採用しません。ID はクッキー経由で攻撃者が指定できるので、
+// 採用すると攻撃者が被害者のセッション識別子を選べます（セッション固定）。実体が
+// 読めたときだけ id を埋め、それ以外は空のまま saveSession に振り直させます。
+func (h *Handler) loadSession(r *http.Request) (*session, error) {
+	s := newSession()
+
+	cookie, err := r.Cookie(h.sessionName)
+	if err != nil || cookie.Value == "" {
+		return s, nil
+	}
+	// 発行した形でない ID は、保存先に問い合わせる前に捨てます。実体があるはずも
+	// なく、Firestore ではドキュメントのパスになる値です（isValidSessionID を参照）。
+	if !isValidSessionID(cookie.Value) {
+		return s, nil
+	}
+
+	values, err := h.store.Load(r.Context(), cookie.Value)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return s, nil
+	case err != nil:
+		s.id = cookie.Value
+		return s, err
+	}
+
+	s.id = cookie.Value
+	s.values = values
+	if s.values == nil {
+		s.values = map[string]string{}
+	}
+	return s, nil
+}
+
+// saveSession は、セッションを保存してクッキーを応答へ書きます。id が空なら振ります。
+func (h *Handler) saveSession(w http.ResponseWriter, r *http.Request, s *session) error {
+	if s.id == "" {
+		id, err := newSessionID()
+		if err != nil {
+			return err
+		}
+		s.id = id
+	}
+
+	maxAge := h.sessionMaxAge()
+	if err := h.store.Save(r.Context(), s.id, s.values, maxAge); err != nil {
+		return err
+	}
+	http.SetCookie(w, h.sessionCookie(s.id, int(maxAge.Seconds())))
+	return nil
+}
+
+// clearSession は、セッションの実体を消してクッキーを破棄します。
+//
+// 実体を消せなくてもクッキーは落とします。ここで戻ると、利用者から見てログアウトが
+// 失敗したのにクッキーだけ残る形になります。クッキーを落とすだけでは盗まれた
+// クッキーは有効なままなので、実体を消すことが「本当のログアウト」の中身です。
+func (h *Handler) clearSession(w http.ResponseWriter, r *http.Request, s *session) error {
+	var err error
+	if s != nil && s.id != "" {
+		err = h.store.Delete(r.Context(), s.id)
+	}
+	http.SetCookie(w, h.sessionCookie("", -1))
+	return err
+}
+
+// sessionCookie は、セッション ID を運ぶクッキーを組み立てます。
+//
+// Path は "/"（アプリ全体）、SameSite は Lax です。Strict にすると、Google からの
+// コールバックがクロスサイトのトップレベル遷移なのでクッキーが送られません。
+// Secure は ServiceURL のスキームから決まります（Config.ServiceURL を参照）。
+// maxAge が負なら、ブラウザはその場で破棄します。
+func (h *Handler) sessionCookie(value string, maxAge int) *http.Cookie {
+	//nolint:gosec // G124: Secure は ServiceURL が https かどうかに従う（ローカル開発は http）。
+	return &http.Cookie{
+		Name:     h.sessionName,
+		Value:    value,
+		Path:     "/",
+		MaxAge:   maxAge,
+		Secure:   h.isSecureCookie,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	}
+}
+
 // IssueSession は、email を認証済みの本人としてセッションを発行します。
 // Callback がログイン成立時に行う保存と同じで、リダイレクトを書かない点だけが違います。
 //
@@ -74,40 +175,47 @@ func (h *Handler) IssueSession(w http.ResponseWriter, r *http.Request, email str
 // issueSession は認証済みのセッションを保存し、ログイン後に戻る先を返します。
 // Callback と IssueSession でセッションの作り方が枝分かれしないよう、ここに集めます。
 func (h *Handler) issueSession(w http.ResponseWriter, r *http.Request, email string) (string, error) {
-	session, err := h.store.Get(r, h.sessionName)
+	s, err := h.loadSession(r)
 	if err != nil {
 		h.log().WarnContext(r.Context(), "セッションの取得に失敗したため、新規セッションを作成します", "error", err)
-	}
-	if session == nil {
-		return "", errors.New("session store returned nil session")
+		s = newSession()
 	}
 
-	targetURL := "/"
-	if url, ok := session.Values[DefaultRedirectSessionKey]; ok {
-		delete(session.Values, DefaultRedirectSessionKey)
-		// 保存時にも検証済みですが、セッションの中身を信用せず読み出し時にも確認します。
-		if isSafeRelativePath(url) {
-			targetURL = url
-		}
-	}
+	targetURL := redirectTarget(r)
 
 	// ログイン前のセッションに紐づく CSRF トークンは破棄し、認証済みセッション用に
 	// 再生成させます（ログイン前に固定されたトークンを使い回させないため）。
-	delete(session.Values, CSRFTokenKey)
+	delete(s.values, CSRFTokenKey)
 
 	// ID も捨てて振り直させます（セッション固定攻撃対策）。攻撃者が仕込んだ ID の
-	// まま認証済みにすると、その ID で被害者として振る舞えます。空の ID には Save が
-	// 新しい ID を振ります（Store を参照）。
+	// まま認証済みにすると、その ID で被害者として振る舞えます。空の ID には
+	// saveSession が新しい ID を振ります。
 	//
 	// 古い実体は消しません。認証前の値しか持たず、認証済みになることもないので、
 	// TTL に任せます。
-	session.ID = ""
+	s.id = ""
 
-	session.Values[DefaultUserSessionKey] = email
-	if err := h.store.Save(r, w, session); err != nil {
+	s.values[DefaultUserSessionKey] = email
+	if err := h.saveSession(w, r, s); err != nil {
 		return "", fmt.Errorf("save session: %w", err)
 	}
 	return targetURL, nil
+}
+
+// redirectTarget は、ログイン後に戻る先を決めます。無ければ "/" です。
+//
+// 値は Login が発行したクッキーが運びます。書き込み時にも検証していますが、
+// クッキーは相手が書き換えられるので、読み出し時にも必ず確認します。
+func redirectTarget(r *http.Request) string {
+	cookie, err := r.Cookie(DefaultRedirectCookie)
+	if err != nil || cookie.Value == "" {
+		return "/"
+	}
+	decoded, err := url.QueryUnescape(cookie.Value)
+	if err != nil || !isSafeRelativePath(decoded) {
+		return "/"
+	}
+	return decoded
 }
 
 // isAuthorized はメールアドレスが許可リストまたは許可ドメインに含まれるか判定します。
@@ -133,24 +241,16 @@ func (h *Handler) isAuthorized(email string) bool {
 	return ok
 }
 
-// clearSessionCookie はセッションを破棄します。MaxAge を負にして Save へ渡すので、
-// クッキーの無効化と保存された実体の削除が同時に起きます。
+// clearSessionCookie は、クッキーが指すセッションを実体ごと破棄します。
+// 読めなかった場合も、クッキーが運んできた ID の実体は消しに行きます。
 func (h *Handler) clearSessionCookie(w http.ResponseWriter, r *http.Request) error {
-	session, err := h.store.Get(r, h.sessionName)
+	s, err := h.loadSession(r)
 	if err != nil {
-		h.log().WarnContext(r.Context(), "Failed to get session on clear, proceeding with new session", "error", err)
+		h.log().WarnContext(r.Context(), "破棄するセッションを読めませんでした。実体の削除は試みます", "error", err)
 	}
-	if session == nil {
-		return errors.New("session store returned nil session")
-	}
-	if session.Options == nil {
-		session.Options = &Options{Path: "/"}
-	}
-
-	session.Options.MaxAge = -1 // クッキーを即時期限切れにする
-	if err := h.store.Save(r, w, session); err != nil {
-		h.log().ErrorContext(r.Context(), "Failed to save session for clearing cookie", "error", err)
-		return err // エラーを呼び出し元に返す
+	if err := h.clearSession(w, r, s); err != nil {
+		h.log().ErrorContext(r.Context(), "セッションの破棄に失敗", "error", err)
+		return err
 	}
 	return nil
 }

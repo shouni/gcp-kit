@@ -101,6 +101,12 @@ func WithOrderBy(field string, descending bool) ListOption {
 //
 // デコードに失敗したドキュメントはエラーとして返します。一覧から黙って落とすと、
 // 壊れた記録があることに誰も気づきません。
+//
+// ページ送りは Offset なので、深いページほど読み取りが増えます。Firestore は
+// 読み飛ばしたドキュメントも課金対象に数えるため、page 番目のコストは
+// page × perPage 件ぶんです。任意のページへ飛べることと引き換えなので、
+// 「最新の数件」で足りる画面では Latest を使ってください。数百ページに届く
+// 一覧が要るなら、Offset ではなくカーソル（Query.StartAfter）を検討してください。
 func (s *Store[T]) List(ctx context.Context, page, perPage int, opts ...ListOption) ([]T, PageMeta, error) {
 	cfg := newListOptions(opts)
 

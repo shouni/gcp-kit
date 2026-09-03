@@ -1,8 +1,9 @@
 package session
 
 import (
+	"context"
 	"errors"
-	"net/http"
+	"fmt"
 	"strings"
 	"time"
 
@@ -13,8 +14,6 @@ import (
 
 // FirestoreConfig は、Firestore に置く Store の設定です。
 type FirestoreConfig struct {
-	StoreConfig
-
 	// Client は接続済みの Firestore クライアントです（必須）。
 	//
 	// ★ ジョブ状態とは別のデータベースを指してください。データベース名は識別子で
@@ -37,7 +36,6 @@ type sessionDoc struct {
 type firestoreStore struct {
 	client     *firestore.Client
 	collection string
-	opts       Options
 }
 
 // NewFirestoreStore は、Firestore にセッションを保持する Store を返します。
@@ -55,82 +53,61 @@ func NewFirestoreStore(cfg FirestoreConfig) (Store, error) {
 	return &firestoreStore{
 		client:     cfg.Client,
 		collection: strings.TrimSpace(cfg.Collection),
-		opts:       cfg.options(),
 	}, nil
 }
 
-func (s *firestoreStore) Get(r *http.Request, name string) (*Session, error) {
-	session := NewSession(name)
-	opts := s.opts
-	session.Options = &opts
+// errForeignID は、この実装が発行していない形の ID を受け取ったときのエラーです。
+// ID はドキュメントのパスになるので、形を確かめずに渡すと相手にパスを決めさせることに
+// なります（isValidSessionID を参照）。
+var errForeignID = errors.New("session: refusing a session ID that was not minted here")
 
-	cookie, err := r.Cookie(name)
-	if err != nil || cookie.Value == "" {
-		return session, nil
+func (s *firestoreStore) Load(ctx context.Context, id string) (map[string]string, error) {
+	// 発行した形でない ID は、Firestore へ問い合わせる前に「無い」と答えます。
+	// 実体があるはずもなく、問い合わせればパスを相手に決めさせることになります。
+	if !isValidSessionID(id) {
+		return nil, ErrNotFound
 	}
 
-	snap, err := s.client.Collection(s.collection).Doc(cookie.Value).Get(r.Context())
+	snap, err := s.client.Collection(s.collection).Doc(id).Get(ctx)
 	if err != nil {
-		if status.Code(err) == codes.NotFound {
-			// 保存されていない ID は採用しません（Store の約束）。
-			return session, nil
+		switch status.Code(err) {
+		case codes.NotFound, codes.InvalidArgument:
+			return nil, ErrNotFound
 		}
-		return session, err
+		// ここから先は Firestore へ到達できていません（ErrStoreUnavailable を参照）。
+		return nil, fmt.Errorf("%w: %w", ErrStoreUnavailable, err)
 	}
 
 	var doc sessionDoc
 	if err := snap.DataTo(&doc); err != nil {
-		return session, err
+		// 読めたが解釈できない実体は壊れたセッションです。ラップしないことで、
+		// 呼び出し側にクッキーを消させて作り直させます。
+		return nil, fmt.Errorf("session: decode stored session: %w", err)
 	}
 	// TTL の削除は遅れるので、期限は読み出し側でも見ます。
 	if time.Now().After(doc.ExpiresAt) {
-		return session, nil
+		return nil, ErrNotFound
 	}
-
-	session.ID = cookie.Value
-	for k, v := range doc.Values {
-		session.Values[k] = v
-	}
-	session.IsNew = false
-	return session, nil
+	return doc.Values, nil
 }
 
-func (s *firestoreStore) Save(r *http.Request, w http.ResponseWriter, session *Session) error {
-	opts := session.Options
-	if opts == nil {
-		o := s.opts
-		opts = &o
+func (s *firestoreStore) Save(ctx context.Context, id string, values map[string]string, ttl time.Duration) error {
+	if !isValidSessionID(id) {
+		return errForeignID
 	}
+	doc := sessionDoc{Values: values, ExpiresAt: time.Now().Add(ttl)}
+	if _, err := s.client.Collection(s.collection).Doc(id).Set(ctx, doc); err != nil {
+		return fmt.Errorf("%w: %w", ErrStoreUnavailable, err)
+	}
+	return nil
+}
 
-	if opts.MaxAge < 0 {
-		if session.ID != "" {
-			// 消せなくてもクッキーは落とします。ここで戻ると、利用者から見て
-			// ログアウトが失敗したのにクッキーだけ残る形になります。
-			if _, err := s.client.Collection(s.collection).Doc(session.ID).Delete(r.Context()); err != nil {
-				http.SetCookie(w, newCookie(session.Name(), "", opts))
-				return err
-			}
-		}
-		http.SetCookie(w, newCookie(session.Name(), "", opts))
-		return nil
+func (s *firestoreStore) Delete(ctx context.Context, id string) error {
+	if !isValidSessionID(id) {
+		return errForeignID
 	}
-
-	if session.ID == "" {
-		id, err := newSessionID()
-		if err != nil {
-			return err
-		}
-		session.ID = id
+	if _, err := s.client.Collection(s.collection).Doc(id).Delete(ctx); err != nil {
+		return fmt.Errorf("%w: %w", ErrStoreUnavailable, err)
 	}
-
-	doc := sessionDoc{
-		Values:    session.Values,
-		ExpiresAt: time.Now().Add(time.Duration(opts.MaxAge) * time.Second),
-	}
-	if _, err := s.client.Collection(s.collection).Doc(session.ID).Set(r.Context(), doc); err != nil {
-		return err
-	}
-
-	http.SetCookie(w, newCookie(session.Name(), session.ID, opts))
 	return nil
 }

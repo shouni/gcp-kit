@@ -35,10 +35,12 @@ build+vet+gofmt+race-tests, golangci-lint, govulncheck, and a fuzz job. **The fu
 package path in `ci.yml`** — move a fuzz test to another package and the job silently stops covering it, so
 update that list in the same commit. The Go version comes from `go.mod` (currently 1.27).
 
-**Two breaking changes shipped in minor versions**, both in `auth/session` (`WithStore`'s signature, then
-its removal along with `WithSessionMaxAge` and two `Config` fields). `gorelease` said v2 both times; taking
-it would have rewritten the import path in 7 apps and 58 files, for API that nothing in the fleet called.
-Check what actually calls the API before using this as precedent.
+**Three breaking changes shipped in minor versions**, all in `auth/session`: `WithStore`'s signature, then
+its removal along with `WithSessionMaxAge` and two `Config` fields, then `DefaultRedirectSessionKey`
+(and, in the same series, `Config.RedirectURL`/`IsSecureCookie` → `ServiceURL`, `oidc.New` returning an error,
+and the `Store` interface itself).
+`gorelease` said v2 every time; taking it would have rewritten the import path in 7 apps and 58 files, for
+API that nothing in the fleet called. Check what actually calls the API before using this as precedent.
 
 **Run `gorelease` before tagging.** It compares the module against its last tag and says both what broke
 and what the next version has to be. v1.12.0 shipped with `session.WithCSRFToken` unexported -- the symbol
@@ -92,12 +94,60 @@ workflow and nothing else.
   - **`Config.Store` is required and has no default.** An in-process default would give each Cloud Run
     instance its own sessions and would look fine in development, where there is one instance.
     `NewMemoryStore` is opt-in and says what it is for.
-  - **A store must not adopt an ID it cannot find.** The ID arrives in a cookie, so it is
+  - **`Store` is `Load` / `Save` / `Delete` keyed by ID, and never sees HTTP.** It used to issue the
+    cookie too, which put `Secure` in two places (Handler for the state cookies, Store for the session
+    cookie), made "MaxAge < 0 means delete" a convention both implementations had to know, and meant a fake
+    needed `httptest`. The Handler now owns the cookie — name, `Path=/`, `HttpOnly`, `SameSite=Lax`,
+    `Secure` from `ServiceURL`, lifetime from `WithSessionMaxAge` — and a store fake is ten lines over a map.
+    `WithSessionMaxAge` was removed once as unused; it returns because the lifetime has to live somewhere
+    and the Handler is now the only party that knows it.
+  - **The Handler adopts a cookie's ID only when `Load` finds it.** The ID arrives in a cookie, so it is
     attacker-controlled; writing a session under an unknown ID lets an attacker choose the victim's session
-    identifier. `Get` leaves the ID empty when there is no stored session and lets `Save` mint one.
+    identifier. `loadSession` leaves `id` empty on `ErrNotFound` and lets `saveSession` mint one. The
+    fixation tests plant a *well-formed* ID for this reason — a malformed one never reaches the store.
+  - **The ID is checked for shape twice: by the Handler before `Load`, and by the Firestore store before
+    it becomes a document path.** `Doc()` reads `/` as a separator, so an unchecked cookie can address a
+    document outside the collection. `isValidSessionID` admits only what `newSessionID` mints; validating
+    against our own shape rather than enumerating Firestore's rules is what makes it hold: 43 base64url
+    characters cannot be `.`, `..`, or over the 1500-byte limit. The one exception is the reserved `__…__`
+    form, which the shape does allow, so `newSessionID` mints until it passes — a random ID lands there
+    about once in 17 million, and that login would fail to save with nothing to reproduce. The Handler's
+    check is what keeps the memory and Firestore stores behaving the same for junk cookies; the store's
+    check is there because `Store` is public API and the Handler is not its only possible caller.
   - **Expiry is checked on read, not left to Firestore's TTL policy**, which deletes up to 24 hours late.
     The policy still has to exist, or sessions accumulate forever — unlike cookies, stored sessions do not
     expire themselves.
+  - **A store that cannot be reached is not a broken session.** `ErrStoreUnavailable` splits the two
+    because the right response is opposite: a stored session that no longer decodes is cleared so the next
+    login replaces it, while a Firestore blip must leave the cookie alone — clearing it turns a few seconds
+    of backend trouble into a logout for everyone who happened to be browsing, and recovery does not undo
+    it. `Challenge` answers 503 rather than a login redirect (the login page needs the same store), so the
+    outage shows up in monitoring as a failing dependency instead of as silent churn.
+    `TestStoreUnavailableKeepsTheSession` and `TestBrokenSessionClearsTheCookie` pin both halves.
+  - **`Authenticate` reads the store once per request.** The session it loads is carried through CSRF
+    verification and token minting. Every extra read is a billed Firestore read plus a round trip on the
+    hot path, and re-reading looks harmless in tests because `NewMemoryStore` costs nothing.
+    `TestAuthenticateReadsStoreOnce` fixes the count.
+  - **`Config.ServiceURL` is the one URL, and `Routes()` is the one place the paths are registered.**
+    Six apps built `RedirectURL` as `ServiceURL + "/auth/callback"` and mounted the same literal on their
+    router — two copies that `WithPaths` could only move one of, with the build still passing. The kit now
+    derives the redirect from `ServiceURL + callbackPath()` and registers `Routes()` from the same
+    accessors, so the literal exists once. `ServiceURL` must be an origin: a path there would reach the
+    redirect but not the route match. `Routes()` had existed and was removed in 89d13bd as unused; the
+    count that justified removing it is the count that brings it back.
+  - **The cookie's `Secure` flag comes from `ServiceURL`'s scheme, and only from that.** Apps were passing
+    netarmor's `IsSecureServiceURL`, which answers a different question — "is http acceptable here?" (yes on
+    localhost and a few dev hosts) — and it only worked because browsers treat localhost as a secure
+    context. `Secure` asks whether the transport is TLS; `scheme == https` is the whole answer, so the kit
+    neither imports netarmor nor copies it. `IsSecureCookie` is gone from `Config`.
+  - **The post-login target rides in a cookie, not the session.** `/auth/login` is open to anyone, so
+    stashing `redirect_to` in the session let an unauthenticated caller create a stored session per
+    request — a write anyone could repeat, kept for `MaxAge`. `DefaultRedirectCookie` has the same
+    lifetime and `Path` as the state and PKCE cookies, and `Login` now touches no store at all.
+    `DefaultRedirectSessionKey` went with it rather than staying as a deprecated constant plus a fallback
+    branch: nothing in the fleet ever sent `redirect_to` (the only producer is `Challenge`'s own login
+    redirect), so the fallback would only have covered a login that started on one revision and finished
+    on the next, where dropping it costs the deep link and not the login.
   - CSRF tokens are minted on GET only. Minting on a state-changing request would hand a valid token to a
     request that arrived without one.
   - Required settings are `Config` fields; everything optional is a `With*` option, matching how
@@ -119,7 +169,16 @@ workflow and nothing else.
   not two** — `TaskVerifier` and `M2MVerifier` were two wrappers over one verifier whose only difference
   was how they were composed, and that difference now lives in `Require` vs `Protected`. It requires no
   OAuth2 config, so a worker-only process verifies inbound tokens without ever holding client secrets.
-  An empty allowlist is `ErrNotConfigured`, never "allow everyone".
+  An empty allowlist is `ErrNotConfigured`, never "allow everyone" — and `New` returns that error rather
+  than a `Verifier`, so the six apps stop copying the same `Configured()` check and message. A route where
+  machine callers are optional passes `nil` to `Protected`, which skips nil authenticators; that replaces
+  the one app that logged and carried on.
+  - **`WithValidator` exists so an app's tests can exercise the Bearer path at all.** The `validate` field
+    was unexported, and the apps' router tests worked around it by handing `Protected` an unconfigured
+    verifier — which meant every test request went through the `ErrNotConfigured` branch, logged a
+    misconfiguration, and never once ran the path a real Bearer takes. It is a test seam, documented as one;
+    a production caller has nothing to gain and everything to lose from a validator that does not check
+    signatures.
 - **`cloudlog`**: Cloud Logging-compatible `slog.HandlerOptions`, plus the trace-correlation middleware.
   slog's default `level`/`msg` keys are not the ones Cloud Logging reads (`severity`/`message`), so without
   `HandlerOptions` every entry shows as INFO in Logs Explorer and `slog.Error` never reaches a log-based
@@ -159,15 +218,29 @@ workflow and nothing else.
   client), so nothing stops `NewEnqueuer[A]` from being paired with `NewHandler[B]`. What `T` does buy is
   a fixed payload type inside the app. Do not "fix" this by having `worker` import `tasks`; the realistic
   failure is revision skew between the two Cloud Run services, which no type parameter can catch.
+  - **`WorkerPath` exists because the target URL has to match the worker's route byte for byte.** Cloud
+    Tasks delivers to exactly the string it was given, and chi matches exactly the pattern it registered, so
+    a trailing slash turns every task into a 404 with nothing in the enqueue path to say so. Five apps
+    carried the same 20-line `WorkerTaskURL` — join, don't double an existing suffix, drop the trailing
+    slash — and it now lives here, resolved once at construction. `Audience` still defaults to the bare
+    `WorkerURL`, because the receiving side compares against the service URL, not the route.
+  - **`Queue[T]` is the interface `*Enqueuer[T]` satisfies**, so an app's port can embed it instead of
+    writing a wrapper whose only job is to exist as an interface. Three apps had three differently shaped
+    ones.
   - **`EnqueueWithName` treats `ALREADY_EXISTS` as success**, so a retried enqueue creates one task. That
     covers duplicate *creation* only — delivery is still at-least-once, which the worker has to handle.
   - **`DispatchDeadline` is the worker's effective run-time limit, not a wait.** Unset means Cloud Tasks'
-    10-minute default, and no amount of Cloud Run `timeout` gets past it.
+    10-minute default (`DefaultDispatchDeadline`), and no amount of Cloud Run `timeout` gets past it.
+    `ValidateDeadlines` checks that the app's own pipeline timeout lands strictly before it — equality
+    fails, because when both fire together Cloud Tasks closes the connection before the app records the
+    failure and the task is redelivered with no record. Enqueue and worker are separate processes, so the
+    only place that knows both numbers is the config; three apps had written this check with the same
+    message.
   - The CreateTask RPC is given its own 20s deadline because Cloud Tasks rejects a request whose deadline is
     more than 30s out, and callers naturally pass the long job-lifetime context straight in.
 - **`worker`**: `Handler[T]` — generic HTTP handler (implements `http.Handler`) that decodes a JSON body into
   `T` and calls a user-supplied `TaskExecutor[T]`. Deliberately has no dependency on `tasks` or `auth` — a
-  worker endpoint is typically wrapped in `auth.Require(verifier)` at the router level, not internally. Executor errors wrapping `worker.ErrPermanent` return 2xx so Cloud Tasks stops retrying;
+  worker endpoint is typically wrapped in `auth.Require(verifier)` at the router level, not internally. Executor errors marked with `worker.Permanent` (matching `ErrPermanent`) return 2xx so Cloud Tasks stops retrying;
   everything else returns 500 to trigger backoff.
   - **Decoding is lenient by default and `WithStrictJSON` must not become the default.** Web and worker are
     separate Cloud Run services, so during a rolling deploy the newer side sends fields the older side does
@@ -178,10 +251,14 @@ workflow and nothing else.
     anything that sets `X-CloudTasks-TaskName`, so it says what the request claims, not who sent it.
     Confirming the caller is `auth.Require`'s job; treat `TaskName` as an idempotency key only on a route
     that verification already covers.
+  - **`WithTimeout` is applied inside the kit so a timeout is logged as a timeout.** Two apps wrapped
+    `Execute` in `context.WithTimeout` themselves, and when it fired the log line was whatever the executor
+    returned — indistinguishable from a real failure. The handler now knows it set the deadline and says so;
+    the response is still 500, because slow is not the same as permanent.
   - **The pprof goroutine label goes on with `pprof.Do`, never `SetGoroutineLabels` alone.** The latter does
     not restore on return, so net/http's keep-alive connection goroutine carries the previous task's name
     into the next request — and a traceback naming the wrong task is worse than one naming none.
-- **`jobstatus`**: `Status`/`Recorder`/`StatusStore` — recording an async job's progress as a Firestore
+- **`jobstatus`**: `Status`/`Store[T]`/`Recorder` — recording an async job's progress as a Firestore
   document, and listing history by query. Completes the trio with `tasks` (enqueue) and `worker` (receive).
   It was its own module, `go-job-firestore`, until it moved here: a Firestore adapter is GCP-specific, and
   this repo's boundary rule is exactly that — the three packages that never depended on GCP were moved
@@ -190,11 +267,6 @@ workflow and nothing else.
     `PIPELINE_TIMEOUT < dispatch deadline <= Cloud Run timeout` holding, redelivery arrives serially, so a
     read-then-write rerun guard has no concurrent rival. What it replaces is walking a bucket prefix,
     sorting job IDs in memory, and hiding the cost behind a cache — all workarounds for having no query.
-  - **It shares its name with `go-job-kit`'s `jobstatus`, deliberately.** They are two implementations of
-    one concept — Firestore here, object storage there — and the fleet splits cleanly along that line: the
-    apps whose artifacts live in a bucket take the go-job-kit one, the media-generation apps take this one.
-    No app uses both. Same name, different import path, is what `math/rand` and `crypto/rand` do. Check
-    that "no app uses both" still holds before adding a third.
 
 ### File layout inside `auth`
 
@@ -202,7 +274,7 @@ Three packages, and the dependency runs one way only: `session` → `auth` ← `
 
 - `auth/`: `auth.go` (the contract and both composers), `claims.go` (the shared `email_verified` gate).
 - `auth/session/`: `handler.go` (Config/Handler construction + allowlist normalisation), `options.go`
-  (every optional setting), `handlers.go` (OAuth login/callback/logout), `session.go` (session cookie,
+  (every optional setting), `handlers.go` (OAuth login/callback/logout and `Routes`), `session.go` (session cookie,
   UserInfo lookup, authorization check, random tokens), `authenticate.go` (`Authenticate` / `Challenge`
   and what they need: origin check, CSRF verification, login redirect), `context.go` (context keys).
 - `auth/oidc/`: `oidc.go` (the verifier and bearer extraction), `context.go` (the payload key).
@@ -257,10 +329,11 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
   expired (7 days by default) — deleting the stored session would work, but that requires knowing which one.
   Re-checking is what makes the allowlist an eviction mechanism on its own, and it costs one map lookup. `TestMiddlewareRejectsRevokedSession` guards it. Tests that drive an authenticated request
   through `Authenticate` must therefore give their `Handler` an allowlist (`testAllowedDomains()`).
-- **An empty allowlist means "verify nothing successfully", not "allow everyone".** `Verifier.Configured()`
-  reports false without both an audience and a non-empty allowlist, and `auth.Require` then answers
-  500 rather than letting the request through. Callers check `Verifier.Configured()` at startup so a
-  misconfiguration surfaces before Cloud Tasks retries a task to exhaustion and drops it.
+- **An empty allowlist means "verify nothing successfully", not "allow everyone".** `oidc.New` refuses to
+  build a `Verifier` without both an audience and a non-empty allowlist, so a misconfiguration surfaces at
+  startup rather than after Cloud Tasks retries a task to exhaustion and drops it. `Authenticate` still
+  re-checks (`configured()`), because a zero-value or nil `Verifier` can be composed without `New`, and it
+  must answer `ErrNotConfigured` — 500 under `Require` — rather than let the request through.
 - **`email_verified` is required everywhere** an email is accepted as an identity — ID token login, UserInfo
   API fallback, and OIDC verification. `auth.VerifiedEmail` is the single gate, and all three paths **call
   it** rather than restate it. They did not always: `fetchUserEmail` used to check `u.VerifiedEmail` on its
@@ -293,9 +366,19 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
 
 ### Testing notes
 
-Coverage is roughly auth 90% / oidc 98% / session 91% / cloudlog 97% / cloudrun 94% / tasks 87% /
-worker 96%. The uncovered remainder in `tasks` is the thin `*cloudtasks.Client` wrapper and
+Coverage is roughly auth 91% / oidc 98% / session 87% / cloudlog 97% / cloudrun 94% / jobstatus 59% /
+tasks 87% / worker 96%. The uncovered remainder in `tasks` is the thin `*cloudtasks.Client` wrapper and
 `NewEnqueuer`, which need real GCP credentials.
+
+**`jobstatus` sits lower than the rest for the same reason, and that is the accepted position.** What is
+uncovered there is the Firestore round trip itself — `Save`/`Get`/`Delete` and the iteration inside
+`collect`/`count` — while the parts that hold judgement are covered: `filteredQuery` at 100%, `paging.go`
+at 94%. Unlike `tasks`, it binds the concrete `*firestore.Client` rather than an interface, because
+Firestore's fluent API returns concrete types at every step and a seam would mean abstracting the whole
+query builder while changing `NewStore`'s signature for five apps. Covering the round trip means the
+Firestore emulator, which needs a JRE and a gcloud component locally and has nowhere to start in the
+shared CI workflow (its only injection point is `apt-packages`). Nothing in the fleet runs it today. Read
+the number as "the I/O is untested", not as a gap to close by accident.
 
 Fuzz targets live in `auth/session/fuzz_test.go` (`FuzzIsSafeRelativePath`, `FuzzBuildLoginRedirectURL`) and
 `auth/oidc/fuzz_test.go` (`FuzzExtractBearerToken`), and run for 20s each in CI. Run them longer when

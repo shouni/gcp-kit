@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -190,30 +191,47 @@ func TestClearSessionCookie(t *testing.T) {
 	}
 }
 
-func TestClearSessionCookieSaveError(t *testing.T) {
+// TestClearSessionCookieDeletesTheEntity は、クッキーを落とすだけでなく保存された実体も
+// 消すことを確認します。盗まれたクッキーが有効なままなら、ログアウトになりません。
+func TestClearSessionCookieDeletesTheEntity(t *testing.T) {
 	t.Parallel()
 
-	h := &Handler{store: failingStore{}, sessionName: "test-session"}
+	store := newTestStore()
+	h := &Handler{store: store, sessionName: "test-session"}
+	seeded := seedSession(t, store, h.sessionName, map[string]string{DefaultUserSessionKey: "user@example.com"})
+
 	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.AddCookie(seeded)
 	rr := httptest.NewRecorder()
 
-	if err := h.clearSessionCookie(rr, req); err == nil {
-		t.Fatal("clearSessionCookie() error = nil, want error")
+	if err := h.clearSessionCookie(rr, req); err != nil {
+		t.Fatalf("clearSessionCookie() error = %v", err)
+	}
+	if _, err := store.Load(context.Background(), seeded.Value); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Load() after clear = %v, want ErrNotFound: the stored session must be gone", err)
 	}
 }
 
-// TestClearSessionCookieNilSession guards against a Store that returns a nil
-// session alongside an error from Get: without the nil check this would panic
-// on session.Options.MaxAge instead of returning an error.
-func TestClearSessionCookieNilSession(t *testing.T) {
+// TestClearSessionCookieUnreachableStore は、実体を消せなくてもクッキーは落とし、
+// エラーは呼び出し元へ返すことを確認します。
+func TestClearSessionCookieUnreachableStore(t *testing.T) {
 	t.Parallel()
 
-	h := &Handler{store: nilSessionStore{}, sessionName: "test-session"}
+	h := &Handler{store: unavailableStore{}, sessionName: "test-session"}
+	id, err := newSessionID()
+	if err != nil {
+		t.Fatalf("newSessionID() error = %v", err)
+	}
 	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.AddCookie(&http.Cookie{Name: "test-session", Value: id})
 	rr := httptest.NewRecorder()
 
-	if err := h.clearSessionCookie(rr, req); err == nil {
-		t.Fatal("clearSessionCookie() error = nil, want error")
+	if err := h.clearSessionCookie(rr, req); !errors.Is(err, ErrStoreUnavailable) {
+		t.Fatalf("clearSessionCookie() error = %v, want ErrStoreUnavailable", err)
+	}
+	cookies := rr.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].MaxAge != -1 {
+		t.Fatalf("cookies = %+v, want one expiring session cookie", cookies)
 	}
 }
 
@@ -305,47 +323,44 @@ func TestIssueSessionFailsClosed(t *testing.T) {
 	}
 }
 
-// TestIssueSessionRotatesSessionID は、IssueSession も Callback と同じくセッション ID を
-// 振り直すことを確認します。TestSaveSessionAndRedirectRotatesSessionID と対で、
+// TestIssueSessionRotatesSessionID は、IssueSession でも ID が振り直されることを確認し、
 // 2 つの入口が同じ issueSession を通ることを振る舞いで固定します。
 func TestIssueSessionRotatesSessionID(t *testing.T) {
 	t.Parallel()
 
-	const (
-		plantedID = "attacker-known-id"
-		email     = "user@example.com"
-	)
-
-	store := newIDStore()
-	store.saved[plantedID] = map[string]string{CSRFTokenKey: "token-fixed-before-login"}
+	const email = "user@example.com"
+	store := newTestStore()
+	planted := seedSession(t, store, "test-session", map[string]string{CSRFTokenKey: "token-fixed-before-login"})
 
 	h := &Handler{store: store, sessionName: "test-session", allowedDomains: testAllowedDomains()}
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.AddCookie(&http.Cookie{Name: "test-session", Value: plantedID})
+	req.AddCookie(planted)
+	rr := httptest.NewRecorder()
 
-	if err := h.IssueSession(httptest.NewRecorder(), req, email); err != nil {
+	if err := h.IssueSession(rr, req, email); err != nil {
 		t.Fatalf("IssueSession() error = %v", err)
 	}
 
-	if values, ok := store.saved[plantedID]; ok {
+	if values, err := store.Load(context.Background(), planted.Value); err == nil {
 		if _, authenticated := values[DefaultUserSessionKey]; authenticated {
 			t.Error("攻撃者が知っている ID がそのまま認証済みになりました（セッション固定）")
 		}
 	}
 
-	var newValues map[string]string
-	for id, values := range store.saved {
-		if id == plantedID {
-			continue
-		}
-		if values[DefaultUserSessionKey] == email {
-			newValues = values
+	var issued string
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == "test-session" {
+			issued = c.Value
 		}
 	}
-	if newValues == nil {
-		t.Fatalf("新しい ID で認証済みセッションが保存されていません: %v", store.saved)
+	if issued == "" || issued == planted.Value {
+		t.Fatalf("発行されたクッキー = %q、仕込まれた ID のままか空です", issued)
 	}
-	if _, ok := newValues[CSRFTokenKey]; ok {
-		t.Error("ログイン前の CSRF トークンが認証済みセッションへ持ち越されました")
+	values, err := store.Load(context.Background(), issued)
+	if err != nil || values[DefaultUserSessionKey] != email {
+		t.Fatalf("新しい ID の実体 = %v (err %v), want email %q", values, err, email)
+	}
+	if _, ok := values[CSRFTokenKey]; ok {
+		t.Error("ログイン前の CSRF トークンが新しいセッションへ持ち越されています")
 	}
 }

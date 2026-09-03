@@ -30,12 +30,16 @@
   * **セッションの実体はサーバー側にあり、クッキーが運ぶのは不透明な ID だけです。** 署名も暗号化も
     要らないので、セッション鍵の設定はありません。代わりに `Logout` と失効が実際に効きます。
     保存先は `Config.Store` で必須です（`NewFirestoreStore` / テストとローカルには `NewMemoryStore`）。
+    `Store` は ID をキーにした `Load` / `Save` / `Delete` だけで、HTTP には触れません。寿命は
+    `WithSessionMaxAge`（既定 7 日）です。
   * **`WithPrompt(session.PromptSelectAccount)` を渡さないと、ログアウトが効いて見えません。**
     `Logout` が消せるのはこのアプリのクッキーだけで、Google 側のセッションは残るためです。
 * **`auth/oidc`**: サービス間呼び出しの受信検証（`Verifier`）
   * audience は誰でも指定できる文字列なので、**サービスアカウント許可リストまで照合**します。
-    両方揃わないと常に検証失敗で、設定漏れは `Configured()` が起動時に検出できます。
+    両方揃わないと `New` がエラーを返すので、設定漏れは起動時に止まります。
   * OAuth 設定は要りません。Web UI を持たない Worker が、クライアントシークレット無しで検証できます。
+  * テストでは `WithValidator` で署名検証を差し替え、Bearer 経路を端から端まで通せます（本番で使う
+    理由はありません）。
 * **`cloudlog`**: Cloud Logging 互換の構造化ログ
   * `NewHandler(w, level)` が組み立てを持ちます（`slogctx` で包み忘れると context 属性が黙って消えます）。
     出力先とレベルは引数で受け取り、`slog.SetDefault` は呼び出し側に残します。
@@ -43,30 +47,30 @@
 * **`cloudrun`**: ヘルスチェックと、起動から正常停止まで
   * ヘルスチェックは `HealthPath`（`/health`）です。**`/healthz` は `*.run.app` の GFE が横取りします。**
   * `Serve` は ctx が終わるまで動かし、猶予内に止まらなければ強制的に閉じます。
-    テストでは `Listener` にポート 0 のリスナーを渡せます（空きポートを探して接続できるまで
-    待つ、という迂回が要りません）。
+    テストには `Listener`（ポート 0 のリスナーを渡せます）があります。
   * `WriteTimeout` に既定値を置きません（worker は数分かかることがあるため）。`ReadHeaderTimeout` は 5 秒です。
-* **`tasks`**: Cloud Tasks エンキュー（`Enqueuer[T]`）
+* **`tasks`**: Cloud Tasks エンキュー（`Enqueuer[T]`、インターフェースは `Queue[T]`）
   * OIDC トークンの設定を内側に隠します。`EnqueueWithName` は決定的な名前で投入し、`ALREADY_EXISTS` を
     成功として扱います（防げるのは重複した「投入」までで、重複「配信」は worker 側の冪等性が受け持ちます）。
+  * **配送先は `WorkerURL` + `WorkerPath` で組み立てます。** ルータの登録と一字一句一致しないと届かない
+    （末尾のスラッシュ 1 つで全件 404）ので、結合と正規化はキットが持ちます。
   * **`DispatchDeadline` は「ワーカーの実行時間の実効上限」です。** 未指定だと Cloud Tasks の既定 10 分が
     上限になり、Cloud Run の `timeout` を伸ばしても超えられません。アプリ側の全体タイムアウトは
-    これより短く取ってください。
-  * **`T` は `worker.Handler[T]` と揃える規約で、型による強制ではありません。** 別パッケージなので
-    コンパイラは両者を結びつけません（`worker` を独立させているのは、Worker 単体プロセスに
-    Cloud Tasks クライアントを積ませないためです）。
+    これより短く取ってください（`ValidateDeadlines` が起動時に確かめます。等号も不可です）。
+  * **`T` は `worker.Handler[T]` と揃える規約で、型による強制ではありません。**
+    別パッケージなので、コンパイラは両者を結びつけません。
 * **`worker`**: Cloud Tasks 向けハンドラー（`Handler[T]`）
-  * ペイロードをデコードして `TaskExecutor[T]` へ渡し、エラーを Cloud Tasks の再試行仕様に沿った
-    状態コードへ写します。リトライしても直らない失敗は `worker.ErrPermanent` でラップして打ち切れます。
+  * エラーは Cloud Tasks の再試行仕様に沿った状態コードへ写ります。リトライしても直らない失敗は
+    `worker.Permanent(err)` で印を付けると、2xx を返して打ち切れます（文面は原因のままです）。
+  * `WithTimeout` で実行時間の上限を掛けられます。打ち切りは executor のエラーとは別のログになります。
   * `MetadataFromContext` で再試行回数やタスク名を参照でき、at-least-once 配信に対して冪等に書けます。
     値は Cloud Tasks が付けるヘッダーそのものなので、**呼び出し元の確認は `auth.Require` の役目**です。
   * **デコードが既定で寛容なのは、ローリングデプロイ中の型のずれを生かすためです。** `WithStrictJSON`
     を既定にすると 400 になり、**Cloud Tasks は 4xx をリトライせずタスクを破棄**します。
-* **`jobstatus`**: Firestore による進行状況の記録と履歴（`Status` / `Recorder` / `StatusStore`）
-  * `tasks`（投入）・`worker`（受信）に対する「記録」で、三点が揃います。**トランザクションは
-    使いません**（詳細は CLAUDE.md）。
-  * `go-job-kit` の `jobstatus` と**同名なのは意図的です**。1 つの概念の 2 実装（Firestore とオブジェクト
-    ストレージ）で、併用するアプリはありません。`math/rand` と `crypto/rand` と同じ関係です。
+* **`jobstatus`**: Firestore による進行状況の記録と履歴（`Status` / `Store[T]` / `Recorder`）
+  * `tasks`（投入）・`worker`（受信）に対する「記録」で、三点が揃います。
+  * **`List` のページ送りは Offset です。** Firestore は読み飛ばしたぶんも課金するので、
+    抜粋しか出さない画面では `Latest` を使ってください。
 
 ---
 
@@ -83,11 +87,9 @@
 | 検証器が未設定 | 302 / 401（ログに記録） | 500 |
 | 状態変更で Origin が一致しない | 403 `Invalid origin` | — |
 | 状態変更で CSRF トークンが不正 | 403 `Invalid CSRF token` | — |
+| セッションの保存先へ到達できない | 503（クッキーは保持） | — |
 
-**下 2 行をリダイレクトにしません。** 偽造されたリクエストが素通りしたのか拒否されたのかを、
-利用者からも運用からも区別できなくなるためです。判定は POST / PUT / DELETE / PATCH にだけ掛かり、
-Bearer だけを受けるルート（`Require`）はセッションを見ないので該当しません。
-
+下 3 行はリダイレクトしません。状態変更の判定が掛かるのは POST / PUT / DELETE / PATCH だけです。
 状態コードは RFC 6750, Section 3.1、`WWW-Authenticate` の付与は RFC 9110, Section 15.5.2 に従います。
 これ以外の予期しない失敗は 500 になります。
 
@@ -104,37 +106,35 @@ Bearer だけを受けるルート（`Require`）はセッションを見ない�
 // 変えられないため、片方の名前がもう片方の実態と合わなくなります）。
 fsClient, err := firestore.NewClientWithDatabase(ctx, projectID, "sessions")
 
+// Store は値の永続化だけを持ちます。クッキーの属性と寿命は Handler 側です。
 store, err := session.NewFirestoreStore(session.FirestoreConfig{
-    Client:      fsClient,
-    Collection:  "sessions",
-    StoreConfig: session.StoreConfig{Secure: true},
+    Client:     fsClient,
+    Collection: "sessions",
 })
 
+// リダイレクト先とクッキーの Secure 属性は ServiceURL から導出されます。
 sessionHandler, err := session.New(session.Config{
     ClientID:       os.Getenv("GOOGLE_CLIENT_ID"),
     ClientSecret:   os.Getenv("GOOGLE_CLIENT_SECRET"),
-    RedirectURL:    serviceURL + "/auth/callback",
+    ServiceURL:     serviceURL, // https://app.example.com（パス無し）
     SessionName:    "app-session",
     Store:          store,
-    IsSecureCookie: true,
     AllowedDomains: []string{"example.com"},
 })
 ```
 
 ### 2. サービスを通す
 
-audience と許可 SA は両方が必須です。片方だけでは常に検証失敗になります。
+audience と許可 SA は両方が必須です。片方でも欠けると `New` がエラーを返します（リクエスト時に
+気付く形だと、Cloud Tasks がリトライを重ねた末にタスクを破棄してしまいます）。
 
 ```go
-apiVerifier := oidc.New(serviceURL, allowedCallerSAs)
-taskVerifier := oidc.New(workerURL, allowedCallerSAs)
-
-// 設定漏れは起動時に落とします（リクエスト時だと、Cloud Tasks がリトライを
-// 重ねた末にタスクを破棄してしまいます）。
-if !taskVerifier.Configured() || !apiVerifier.Configured() {
-    return errors.New("OIDC verification is not configured")
-}
+apiVerifier, err := oidc.New(serviceURL, allowedCallerSAs)
+taskVerifier, err := oidc.New(workerURL, allowedCallerSAs)
 ```
+
+機械からの呼び出しを受けなくてもよいルートでは、エラーで止めずに `nil` を `auth.Protected` へ
+渡してください。`nil` の方式は飛ばされます。
 
 ### 3. ルーティング
 
@@ -143,8 +143,7 @@ if !taskVerifier.Configured() || !apiVerifier.Configured() {
 ```go
 mux := http.NewServeMux()
 mux.HandleFunc(cloudrun.HealthPath, cloudrun.Health) // "/healthz" は Cloud Run に横取りされます
-mux.Handle("GET /auth/login", http.HandlerFunc(sessionHandler.Login))
-mux.Handle("GET /auth/callback", http.HandlerFunc(sessionHandler.Callback))
+mux.Handle("/auth/", sessionHandler.Routes()) // login / callback / logout（chi なら r.Handle("/auth/*", ...)）
 
 // 人だけが来るルート
 mux.Handle("/private", auth.Protected(sessionHandler)(privateHandler))

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 type samplePayload struct {
@@ -34,6 +35,44 @@ func (m *executorMock) Execute(_ context.Context, payload samplePayload) error {
 	m.called = true
 	m.payload = payload
 	return m.err
+}
+
+// blockingExecutor は ctx が切れるまで戻らない executor です。WithTimeout の確認に使います。
+type blockingExecutor struct{ got error }
+
+func (b *blockingExecutor) Execute(ctx context.Context, _ samplePayload) error {
+	<-ctx.Done()
+	b.got = ctx.Err()
+	return ctx.Err()
+}
+
+// TestProcessTask_WithTimeout は、WithTimeout が executor の ctx を切り、
+// 打ち切りを 500（再試行）として返すことを確認します。
+func TestProcessTask_WithTimeout(t *testing.T) {
+	t.Parallel()
+
+	exec := &blockingExecutor{}
+	h := NewHandler[samplePayload](exec, WithTimeout(20*time.Millisecond))
+
+	rr := newRecorder()
+	h.ProcessTask(rr, newTaskRequest(strings.NewReader(`{"name":"slow"}`)))
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d (retry)", rr.Code, http.StatusInternalServerError)
+	}
+	if !errors.Is(exec.got, context.DeadlineExceeded) {
+		t.Fatalf("executor ctx error = %v, want DeadlineExceeded", exec.got)
+	}
+}
+
+// TestWithTimeoutIgnoresNonPositive は、0 以下が「無制限」のままであることを確認します。
+func TestWithTimeoutIgnoresNonPositive(t *testing.T) {
+	t.Parallel()
+
+	h := NewHandler[samplePayload](&executorMock{}, WithTimeout(0), WithTimeout(-time.Second))
+	if h.opts.timeout != 0 {
+		t.Fatalf("timeout = %v, want 0", h.opts.timeout)
+	}
 }
 
 func TestProcessTask_MethodNotAllowed(t *testing.T) {
@@ -132,10 +171,37 @@ func TestProcessTask_Success(t *testing.T) {
 
 // TestProcessTask_PermanentError は、リトライしても無意味な失敗を 2xx で打ち切り、
 // Cloud Tasks が最大試行数まで再送し続けるのを防いでいることを確認します。
+// TestPermanent は、Permanent が印だけを足して文面を変えないことを確認します。
+func TestPermanent(t *testing.T) {
+	t.Parallel()
+
+	if Permanent(nil) != nil {
+		t.Fatal("Permanent(nil) != nil")
+	}
+
+	cause := errors.New("unknown command")
+	err := Permanent(cause)
+
+	if !errors.Is(err, ErrPermanent) {
+		t.Error("errors.Is(err, ErrPermanent) = false")
+	}
+	if !errors.Is(err, cause) {
+		t.Error("errors.Is(err, cause) = false: the cause must stay reachable")
+	}
+	// センチネルの文言が記録や通知に漏れないこと。
+	if got := err.Error(); got != cause.Error() {
+		t.Errorf("Error() = %q, want the cause's text %q", got, cause.Error())
+	}
+	// 一段包んでも印は残ること。
+	if !errors.Is(fmt.Errorf("run job: %w", err), ErrPermanent) {
+		t.Error("the mark must survive further wrapping")
+	}
+}
+
 func TestProcessTask_PermanentError(t *testing.T) {
 	t.Parallel()
 
-	exec := &executorMock{err: fmt.Errorf("%w: unknown command", ErrPermanent)}
+	exec := &executorMock{err: Permanent(errors.New("unknown command"))}
 	h := NewHandler[samplePayload](exec)
 
 	rr := newRecorder()

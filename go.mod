@@ -7,7 +7,7 @@ require (
 	cloud.google.com/go/firestore v1.25.0
 	github.com/shouni/go-utils v1.7.1
 	golang.org/x/oauth2 v0.36.0
-	google.golang.org/api v0.295.0
+	google.golang.org/api v0.296.0
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
 )

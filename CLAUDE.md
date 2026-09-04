@@ -258,6 +258,25 @@ workflow and nothing else.
   - **The pprof goroutine label goes on with `pprof.Do`, never `SetGoroutineLabels` alone.** The latter does
     not restore on return, so net/http's keep-alive connection goroutine carries the previous task's name
     into the next request — and a traceback naming the wrong task is worse than one naming none.
+  - **`Lifecycle[T, R]` owns the *order* of a job's life, not just the pieces.** It is a `TaskExecutor`
+    that fixes `Prepare → Begin → Validate → Run → Finish`; apps fill in the hooks. Each step in that
+    order is a past incident:
+    - **`Begin` before `Validate`**, so every attempt reaches the record and every job passes through
+      `running` on its way to a terminal state. Reversed, a job rejected by validation stays `queued`
+      forever. `Begin` also carries the redelivery guard — `done=true` skips `Run` and `Finish` and
+      returns success, because delivery is at-least-once.
+    - **`Timeout` wraps `Run` only.** Wrapping the caller's ctx means `Finish` runs on an
+      already-expired context in exactly the case where the record matters most. Keep it strictly
+      under the dispatch deadline (see `ValidateDeadlines`).
+    - **`Finish` is called exactly once, on `context.WithoutCancel`, on success, failure and panic
+      alike.** Three of five apps had detached only the failure path; jobs that finished around the
+      deadline stuck in `running`. Routing success and failure through one function is what makes
+      "forgot one of them" unwritable — a shared helper could not.
+    - **A panic is recovered and folded into `ErrPanicked`** so it still reaches `Finish`. Unfolded, the
+      HTTP recoverer answers 500 and the job stays `running` with no notification, and a
+      `max_attempts = 1` queue never retries it.
+    Only `Run` is required; unused hooks stay nil. `Labels` feeds `pprof.Do`, which since Go 1.27 also
+    prints in a panic traceback's header — log correlation does not survive a panic, labels do.
 - **`jobstatus`**: `Status`/`Store[T]`/`Recorder` — recording an async job's progress as a Firestore
   document, and listing history by query. Completes the trio with `tasks` (enqueue) and `worker` (receive).
   It was its own module, `go-job-firestore`, until it moved here: a Firestore adapter is GCP-specific, and

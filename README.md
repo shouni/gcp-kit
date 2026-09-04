@@ -169,7 +169,7 @@ return cloudrun.Serve(ctx, cloudrun.Config{Port: os.Getenv("PORT"), Handler: mux
 
 ---
 
-## 🏗 プロジェクトレイアウト (Project Layout)
+## 📦 パッケージ構成 (Package Structure)
 
 ```text
 gcp-kit/
@@ -185,7 +185,7 @@ gcp-kit/
 
 ---
 
-## 🤝 主な依存関係 (Dependencies)
+## 🤝 依存関係 (Dependencies)
 
 * `cloud.google.com/go/cloudtasks`: Cloud Tasks 操作
 * `golang.org/x/oauth2`: Google OAuth2 フロー

@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"path"
 	"runtime/pprof"
-	"time"
 )
 
 // ErrPermanent は、リトライしても成功し得ない恒久的な失敗を示すセンチネルエラーです。
@@ -65,7 +64,6 @@ type Option func(*options)
 type options struct {
 	maxBodyBytes int64
 	strictJSON   bool
-	timeout      time.Duration
 	logger       *slog.Logger
 }
 
@@ -78,21 +76,6 @@ func WithMaxBodyBytes(n int64) Option {
 // 送信側と受信側の型定義のずれを早期に検知したい場合に使います。
 func WithStrictJSON() Option {
 	return func(o *options) { o.strictJSON = true }
-}
-
-// WithTimeout は、Execute 1 回に与える実行時間の上限です。0 以下なら無制限（既定）です。
-//
-// Cloud Tasks の DispatchDeadline より短く取ってください。同時に切れると、executor が
-// 失敗を記録する前に Cloud Tasks が接続を閉じ、記録の無いまま再配信されます。
-// 上限に掛かった場合は 500 を返して再試行に委ね、ログには打ち切りであることを
-// 別のメッセージで残します（executor のエラーに埋もれると、遅かったのか壊れていたのか
-// 読めません）。関係の検査には tasks.ValidateDeadlines があります。
-func WithTimeout(d time.Duration) Option {
-	return func(o *options) {
-		if d > 0 {
-			o.timeout = d
-		}
-	}
 }
 
 // WithLogger は本パッケージが使うロガーを差し替えます。未指定の場合は slog.Default() です。
@@ -195,27 +178,9 @@ func (h *Handler[T]) process(ctx context.Context, w http.ResponseWriter, r *http
 
 	// ctx はリクエストのものを土台にしているため、Cloud Tasks の応答待ち上限が
 	// そのまま executor まで伝わります（配信メタデータとラベルを足してあります）。
-	// WithTimeout があれば、その手前で自分から切ります。
-	runCtx := ctx
-	if h.opts.timeout > 0 {
-		var cancel context.CancelFunc
-		runCtx, cancel = context.WithTimeout(ctx, h.opts.timeout)
-		defer cancel()
-	}
-
-	if err := h.executor.Execute(runCtx, payload); err != nil {
-		// 自分で掛けた上限に当たったなら、そう書きます。executor のエラーに埋もれると、
-		// 遅かったのか壊れていたのかがログから読めません。
-		if h.opts.timeout > 0 && errors.Is(runCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-			h.log().ErrorContext(ctx, "Worker task exceeded its timeout",
-				"error", err,
-				"timeout", h.opts.timeout,
-				"payload_type", fmt.Sprintf("%T", payload),
-			)
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-			return
-		}
-
+	// 実行時間の上限はここでは掛けません。上限は結末の記録より内側に掛ける必要が
+	// あり、その順序は Lifecycle が持ちます（Lifecycle.Timeout）。
+	if err := h.executor.Execute(ctx, payload); err != nil {
 		// セキュリティリスクを回避するため、payload そのものではなく型情報のみを記録します。
 		h.log().ErrorContext(ctx, "Worker task execution failed",
 			"error", err,

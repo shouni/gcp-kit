@@ -62,7 +62,7 @@
 * **`worker`**: Cloud Tasks 向けハンドラー（`Handler[T]`）
   * エラーは Cloud Tasks の再試行仕様に沿った状態コードへ写ります。リトライしても直らない失敗は
     `worker.Permanent(err)` で印を付けると、2xx を返して打ち切れます（文面は原因のままです）。
-  * `WithTimeout` で実行時間の上限を掛けられます。打ち切りは executor のエラーとは別のログになります。
+  * `Lifecycle[T, R]` がジョブ 1 件の一生（Prepare → Begin → Validate → Run → Finish）を固定します。実行時間の上限は `Lifecycle.Timeout` で Run にだけ掛かり、Finish（結末の記録と通知）は呼び出し元の ctx から切り離して必ず 1 度走ります。panic は `ErrPanicked` として Finish に届きます。
   * `MetadataFromContext` で再試行回数やタスク名を参照でき、at-least-once 配信に対して冪等に書けます。
     値は Cloud Tasks が付けるヘッダーそのものなので、**呼び出し元の確認は `auth.Require` の役目**です。
   * **デコードが既定で寛容なのは、ローリングデプロイ中の型のずれを生かすためです。** `WithStrictJSON`

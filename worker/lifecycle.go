@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// ErrPanicked は、Run が panic で終わったことを表すセンチネルエラーです。
+// ErrPanicked は、Validate または Run が panic で終わったことを表すセンチネルエラーです。
 //
 // Lifecycle は panic を回復してこのエラーに畳み、Finish へ渡します。畳まないと
 // 結末の記録まで到達せず、HTTP 側の Recoverer が 500 を返して終わります。状態は
@@ -60,7 +60,8 @@ type Lifecycle[T, R any] struct {
 	//
 	// 失敗は Permanent に包んで Finish へ渡します。Finish がそのまま返せば、Handler は
 	// 2xx を返して再配信を止めます。Begin の後に置くので、検証で落ちたジョブも
-	// running を経由して failed に至ります。
+	// running を経由して failed に至ります。panic は Run と同じく回復して ErrPanicked に
+	// 畳みます（こちらは Permanent に包みません。入力の不備ではなく実装の欠陥だからです）。
 	Validate func(task T) error
 
 	// Run は本体です。Timeout があれば、その上限を被せた ctx で呼ばれます。
@@ -68,6 +69,9 @@ type Lifecycle[T, R any] struct {
 	Run func(ctx context.Context, task T) (R, error)
 
 	// Finish は、結末の記録と通知です。
+	//
+	// Validate の失敗と panic では Run の結果が無いので、result は R のゼロ値です。
+	// 通知に要る値（ジョブ ID など）は result ではなく task から取ってください。
 	//
 	// 成功（cause == nil）でも失敗でも、呼び出し元の ctx から切り離した ctx で必ず
 	// 1 度だけ呼ばれます。返り値が Execute の結果になります。失敗をそのまま返せば
@@ -117,11 +121,9 @@ func (l Lifecycle[T, R]) execute(ctx context.Context, task T) error {
 		}
 	}
 
-	var zero R
-	if l.Validate != nil {
-		if err := l.Validate(task); err != nil {
-			return l.finish(ctx, task, zero, Permanent(err))
-		}
+	if err := l.validate(ctx, task); err != nil {
+		var zero R
+		return l.finish(ctx, task, zero, err)
 	}
 
 	result, err := l.run(ctx, task)
@@ -150,19 +152,32 @@ func (l Lifecycle[T, R]) withLabels(ctx context.Context, task T, fn func(ctx con
 	pprof.Do(ctx, pprof.Labels(pairs...), fn)
 }
 
+// validate は Validate を呼び、失敗を Permanent に包み、panic をエラーに畳みます。
+//
+// Begin が running を記録した後なので、ここの panic を回復しないと Finish に届かず、
+// ErrPanicked の説明にある「永久に running」がそのまま起きます。
+func (l Lifecycle[T, R]) validate(ctx context.Context, task T) (err error) {
+	if l.Validate == nil {
+		return nil
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = l.panicked(ctx, "Worker validate panicked", recovered)
+		}
+	}()
+	if err := l.Validate(task); err != nil {
+		return Permanent(err)
+	}
+	return nil
+}
+
 // run は Run を上限つきの ctx で呼び、panic をエラーに畳みます。
 func (l Lifecycle[T, R]) run(ctx context.Context, task T) (result R, err error) {
 	defer func() {
-		recovered := recover()
-		if recovered == nil {
-			return
+		if recovered := recover(); recovered != nil {
+			var zero R
+			result, err = zero, l.panicked(ctx, "Worker run panicked", recovered)
 		}
-		l.log().ErrorContext(ctx, "Worker run panicked",
-			"panic", recovered,
-			"stack", string(debug.Stack()),
-		)
-		var zero R
-		result, err = zero, fmt.Errorf("%w: %v", ErrPanicked, recovered)
 	}()
 
 	runCtx := ctx
@@ -172,6 +187,16 @@ func (l Lifecycle[T, R]) run(ctx context.Context, task T) (result R, err error) 
 		defer cancel()
 	}
 	return l.Run(runCtx, task)
+}
+
+// panicked は、回復した panic のスタックをログへ出し、ErrPanicked に畳んで返します。
+// スタックを取るため、recover した defer の中から呼んでください。
+func (l Lifecycle[T, R]) panicked(ctx context.Context, msg string, recovered any) error {
+	l.log().ErrorContext(ctx, msg,
+		"panic", recovered,
+		"stack", string(debug.Stack()),
+	)
+	return fmt.Errorf("%w: %v", ErrPanicked, recovered)
 }
 
 // finish は Finish を、呼び出し元の ctx から切り離した ctx で呼びます。

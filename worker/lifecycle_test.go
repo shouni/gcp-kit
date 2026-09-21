@@ -138,6 +138,37 @@ func TestLifecycleTurnsPanicIntoFailure(t *testing.T) {
 	}
 }
 
+// TestLifecycleTurnsValidatePanicIntoFailure は、Validate の panic も ErrPanicked として
+// Finish に届くことを確かめます。Begin が running を記録した後なので、届かないと Run の
+// panic と同じく running のまま固着します。
+func TestLifecycleTurnsValidatePanicIntoFailure(t *testing.T) {
+	t.Parallel()
+
+	tr := &lifecycleTrace{}
+	l := tr.lifecycle(func(context.Context, lifecycleTask) (string, error) { return "unreachable", nil })
+	l.Validate = func(lifecycleTask) error {
+		tr.order = append(tr.order, "validate")
+		panic("boom")
+	}
+
+	err := l.Execute(context.Background(), lifecycleTask{})
+	if !errors.Is(err, ErrPanicked) {
+		t.Fatalf("Execute() error = %v, want ErrPanicked", err)
+	}
+	if errors.Is(err, ErrPermanent) {
+		t.Errorf("a panic is a defect, not invalid input; it must not be Permanent: %v", err)
+	}
+	if !strings.Contains(err.Error(), "boom") {
+		t.Errorf("panic value is missing from the error: %v", err)
+	}
+	if got := strings.Join(tr.order, ">"); got != "begin>validate>finish" {
+		t.Errorf("order = %s, want begin>validate>finish", got)
+	}
+	if tr.result != "" {
+		t.Errorf("Finish result = %q, want the zero value", tr.result)
+	}
+}
+
 // TestLifecycleTimesOutRunButNotFinish は、Timeout が Run にだけ効き、Finish は
 // 切り離した ctx で呼ばれることを確かめます。打ち切りこそが終端の理由である場面で
 // 記録が残るための配線です。

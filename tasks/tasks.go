@@ -266,7 +266,14 @@ func (e *Enqueuer[T]) Enqueue(ctx context.Context, payload T) error {
 //
 // なお、名前付きタスクは Cloud Tasks 側で重複排除のためのインデックスが必要になるため
 // キューのスループットが低下し、また削除・完了したタスクの名前はしばらく再利用できません。
+//
+// 空の taskID はエラーです。EnqueueWithOptions では空が「名前指定なし」を意味するため、
+// そのまま渡すと名前なしのタスクが作られ、呼び出し側の ID 計算が空を返しただけで
+// 重複排除がエラーも出さずに効かなくなります。
 func (e *Enqueuer[T]) EnqueueWithName(ctx context.Context, taskID string, payload T) error {
+	if err := validateTaskID(taskID); err != nil {
+		return err
+	}
 	_, err := e.EnqueueWithOptions(ctx, payload, WithTaskID(taskID))
 	return err
 }

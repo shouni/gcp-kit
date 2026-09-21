@@ -311,8 +311,15 @@ func TestEnqueueWithNameRejectsEmptyTaskID(t *testing.T) {
 		t.Fatalf("newEnqueuerWithClient() returned error: %v", err)
 	}
 
-	if err := enqueuer.EnqueueWithName(context.Background(), "  ", samplePayload{}); err == nil {
-		t.Fatal("EnqueueWithName() error = nil, want error for empty taskID")
+	// "" も含めます。EnqueueWithOptions では空が「名前指定なし」を意味するため、素通しすると
+	// 名前なしのタスクが作られ、重複排除がエラーも出さずに効かなくなります。
+	for _, taskID := range []string{"", "  "} {
+		if err := enqueuer.EnqueueWithName(context.Background(), taskID, samplePayload{}); err == nil {
+			t.Errorf("EnqueueWithName(%q) error = nil, want error for empty taskID", taskID)
+		}
+	}
+	if client.req != nil {
+		t.Errorf("CreateTask was called for an empty taskID: %v", client.req)
 	}
 }
 

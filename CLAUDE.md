@@ -274,7 +274,10 @@ workflow and nothing else.
       "forgot one of them" unwritable — a shared helper could not.
     - **A panic is recovered and folded into `ErrPanicked`** so it still reaches `Finish`. Unfolded, the
       HTTP recoverer answers 500 and the job stays `running` with no notification, and a
-      `max_attempts = 1` queue never retries it.
+      `max_attempts = 1` queue never retries it. This covers `Validate` as well as `Run`: `Validate`
+      runs after `Begin` has written `running`, so a panic there strands the job the same way. It is
+      not wrapped in `Permanent` — a panic is a defect, not bad input. On both paths `Finish` gets the
+      zero `R`, so notifications must take the job ID from `task`, not from `result`.
     Only `Run` is required; unused hooks stay nil. `Labels` feeds `pprof.Do`, which since Go 1.27 also
     prints in a panic traceback's header — log correlation does not survive a panic, labels do.
 - **`jobstatus`**: `Status`/`Store[T]`/`Recorder` — recording an async job's progress as a Firestore

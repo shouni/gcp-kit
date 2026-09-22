@@ -18,6 +18,15 @@ import (
 // そのジョブは永久に running です。
 var ErrPanicked = errors.New("worker: run panicked")
 
+// ErrTimedOut は、Run が Lifecycle.Timeout で打ち切られたことを表すセンチネルエラーです。
+//
+// 下流呼び出し 1 回の期限切れ（HTTP クライアントのタイムアウトなど）もパイプライン
+// 全体の打ち切りも、同じ context.DeadlineExceeded で返ります。この印が無いと、
+// 通知の文面を「打ち切り」に切り替える判定を呼び出し側が DeadlineExceeded で行う
+// ことになり、両者を区別できません。errors.Is(err, ErrTimedOut) で判定でき、
+// Unwrap は Run が返した元のエラーです（文面はそのまま）。
+var ErrTimedOut = errors.New("worker: run exceeded Lifecycle.Timeout")
+
 // DefaultFinishTimeout は、Finish（結末の記録と通知）に与える既定の上限です。
 const DefaultFinishTimeout = 30 * time.Second
 
@@ -79,7 +88,8 @@ type Lifecycle[T, R any] struct {
 	// 2xx で打ち切られます。nil なら cause をそのまま返します。
 	Finish func(ctx context.Context, task T, result R, cause error) error
 
-	// Timeout は Run に与える実行時間の上限です。0 以下は無制限です。
+	// Timeout は Run に与える実行時間の上限です。0 以下は無制限です。発火した場合、
+	// Run のエラーは errors.Is(err, ErrTimedOut) で判定できる印を付けて Finish へ渡ります。
 	//
 	// Cloud Tasks の dispatch deadline より短く取ってください。アプリが自分で先に
 	// 諦めることで、Finish が失敗を記録して通知する余地が残ります。逆順だと
@@ -180,14 +190,28 @@ func (l Lifecycle[T, R]) run(ctx context.Context, task T) (result R, err error) 
 		}
 	}()
 
-	runCtx := ctx
-	if l.Timeout > 0 {
-		var cancel context.CancelFunc
-		runCtx, cancel = context.WithTimeout(ctx, l.Timeout)
-		defer cancel()
+	if l.Timeout <= 0 {
+		return l.Run(ctx, task)
 	}
-	return l.Run(runCtx, task)
+
+	runCtx, cancel := context.WithTimeoutCause(ctx, l.Timeout, ErrTimedOut)
+	defer cancel()
+
+	result, err = l.Run(runCtx, task)
+	if err != nil && errors.Is(context.Cause(runCtx), ErrTimedOut) {
+		l.log().ErrorContext(ctx, "Worker run exceeded its timeout", "timeout", l.Timeout, "error", err)
+		err = timedOutError{cause: err}
+	}
+	return result, err
 }
+
+// timedOutError は、Run が Timeout で打ち切られたことを示す印です。
+// permanentError と同じ形で、文面は原因のまま、errors.Is(err, ErrTimedOut) だけが真になります。
+type timedOutError struct{ cause error }
+
+func (e timedOutError) Error() string        { return e.cause.Error() }
+func (e timedOutError) Unwrap() error        { return e.cause }
+func (e timedOutError) Is(target error) bool { return target == ErrTimedOut }
 
 // panicked は、回復した panic のスタックをログへ出し、ErrPanicked に畳んで返します。
 // スタックを取るため、recover した defer の中から呼んでください。

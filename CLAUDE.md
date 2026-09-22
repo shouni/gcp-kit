@@ -84,6 +84,20 @@ workflow and nothing else.
   (session auth, CSRF verification, CSRF context), and `Challenge` decides the response — a redirect when
   the session is missing or the address fell off the allowlist, **403 when Origin or CSRF verification
   failed**. Redirecting the latter would hide whether a forged request was rejected or waved through.
+  - **`Callback` reads the `error` query parameter before anything else.** A user who cancels on the
+    consent screen, or a `prompt=none` round trip that needs interaction, comes back with `error=` and
+    no `code`; proceeding to the token exchange turned that into a 500 and an ERROR log line (which
+    `cloudlog` maps to severity ERROR and log-based alerts pick up). It is a 403 with a WARN now, and the
+    temporary cookies are cleared so the next login starts clean.
+  - **Login rotates the session ID *and* deletes the old entity.** Only authenticated sessions ever reach
+    `Store.Save` (issueSession and CSRF token issuance), so the entity found under the pre-login cookie is
+    always an authenticated one; leaving it to TTL meant every re-login or account switch left a valid
+    session that `Logout` could not reach. The reason it was not deleted before — two `Set-Cookie`
+    headers — went away when the store was split from HTTP. Deletion failure is a WARN, not a login failure.
+  - **`OpenFirestoreStore` owns the client; `NewFirestoreStore` takes one.** Five services wired
+    "open client → register closer → NewFirestoreStore" in the same twelve lines, and two of them imported
+    the Firestore SDK for nothing else. `OwnedFirestoreStore` is a `Store` and an `io.Closer`, mirroring
+    `jobstatus.ClientFactory`'s ownership split.
   - Authorization is re-evaluated on **every** request, not once at login. It is what evicts an address
     removed from the allowlist without having to find that person's stored session, and it costs one map
     lookup.
@@ -251,10 +265,15 @@ workflow and nothing else.
     anything that sets `X-CloudTasks-TaskName`, so it says what the request claims, not who sent it.
     Confirming the caller is `auth.Require`'s job; treat `TaskName` as an idempotency key only on a route
     that verification already covers.
-  - **`WithTimeout` is applied inside the kit so a timeout is logged as a timeout.** Two apps wrapped
-    `Execute` in `context.WithTimeout` themselves, and when it fired the log line was whatever the executor
-    returned — indistinguishable from a real failure. The handler now knows it set the deadline and says so;
-    the response is still 500, because slow is not the same as permanent.
+  - **`Lifecycle.Timeout` uses `WithTimeoutCause(ErrTimedOut)` so the kit knows *it* set the deadline.**
+    Two apps used to wrap `Execute` in `context.WithTimeout` themselves, and when it fired the log line
+    was whatever the executor returned — indistinguishable from a real failure. Moving the timeout into
+    `Lifecycle` lost that knowledge for a while: a plain `WithTimeout` makes the pipeline cut-off and a
+    downstream client's own deadline the same `DeadlineExceeded`, and two apps grew an identical
+    `isTimeout` that could not tell them apart. `run` now checks `context.Cause(runCtx)` and wraps the
+    error in `timedOutError` (same shape as `permanentError`: text untouched, `errors.Is(err, ErrTimedOut)`
+    true) before handing it to `Finish`, and logs the configured value. The response is still 500,
+    because slow is not the same as permanent.
   - **The pprof goroutine label goes on with `pprof.Do`, never `SetGoroutineLabels` alone.** The latter does
     not restore on return, so net/http's keep-alive connection goroutine carries the previous task's name
     into the next request — and a traceback naming the wrong task is worse than one naming none.
@@ -285,6 +304,15 @@ workflow and nothing else.
   It was its own module, `go-job-firestore`, until it moved here: a Firestore adapter is GCP-specific, and
   this repo's boundary rule is exactly that — the three packages that never depended on GCP were moved
   *out*, to `go-serve-kit`.
+  - **`IsTerminal` is the rerun-guard predicate; `Finished` / `InFlight` are the display ones.** `IsTerminal`
+    is true only for `succeeded`, because `Begin` must let a `failed` job be retried by Cloud Tasks. But
+    "stop polling" and "show as in progress" also need `failed` to count as done (the queues run with
+    `max_attempts = 1`), and four callers had re-derived that — one of them shipped "まだ生成中です
+    (状態: failed)". Don't widen `IsTerminal`; use the other two.
+  - **`Stamp` fills `QueuedAt` when it is zero.** History lists by `queued_at` descending, so a job whose
+    enqueue path forgot the stamp sank to the bottom; three apps stamped it by hand and "every job at zero"
+    has happened once. `Recorder` carries the previous value over before `Stamp` runs, so an existing
+    timestamp is never overwritten.
   - **The motive is the cost of listing, not atomicity.** It uses no transactions. With
     `PIPELINE_TIMEOUT < dispatch deadline <= Cloud Run timeout` holding, redelivery arrives serially, so a
     read-then-write rerun guard has no concurrent rival. What it replaces is walking a bucket prefix,

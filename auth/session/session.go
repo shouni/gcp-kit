@@ -191,13 +191,21 @@ func (h *Handler) issueSession(w http.ResponseWriter, r *http.Request, email str
 	// まま認証済みにすると、その ID で被害者として振る舞えます。空の ID には
 	// saveSession が新しい ID を振ります。
 	//
-	// 古い実体は消しません。認証前の値しか持たず、認証済みになることもないので、
-	// TTL に任せます。
+	// 古い実体は保存に成功したあとで消します。ストアに実体があるのは認証済みの
+	// セッションだけ（Save へ到達するのはここと CSRF トークンの発行だけ）なので、
+	// 残すと再ログインやアカウント切替のたびに、Logout では消せない有効なセッションが
+	// 寿命いっぱい残ります。削除の失敗はログイン自体を止めるほどではないので警告に留めます。
+	oldID := s.id
 	s.id = ""
 
 	s.values[DefaultUserSessionKey] = email
 	if err := h.saveSession(w, r, s); err != nil {
 		return "", fmt.Errorf("save session: %w", err)
+	}
+	if oldID != "" {
+		if err := h.store.Delete(r.Context(), oldID); err != nil {
+			h.log().WarnContext(r.Context(), "ログイン前のセッション実体の削除に失敗しました", "error", err)
+		}
 	}
 	return targetURL, nil
 }

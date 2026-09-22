@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/firestore"
+	"google.golang.org/api/option"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -54,6 +55,43 @@ func NewFirestoreStore(cfg FirestoreConfig) (Store, error) {
 		client:     cfg.Client,
 		collection: strings.TrimSpace(cfg.Collection),
 	}, nil
+}
+
+// OwnedFirestoreStore は、自分で開いた Firestore クライアントを持つ Store です。
+// Close で閉じます。クライアントを注入する NewFirestoreStore と違い、寿命をこちらが持ちます。
+type OwnedFirestoreStore struct {
+	Store
+	client *firestore.Client
+}
+
+// Close は、開いた Firestore クライアントを閉じます。
+func (s *OwnedFirestoreStore) Close() error {
+	if s == nil || s.client == nil {
+		return nil
+	}
+	return s.client.Close()
+}
+
+// OpenFirestoreStore は、Firestore クライアントを開いてセッションの Store を返します。
+//
+// 各サービスが「クライアントを開く → Closers に登録 → NewFirestoreStore に渡す」を
+// 同じ 12 行で書いていたので、その配線をまとめたものです。返り値は io.Closer でもある
+// ので、そのまま Closers に登録できます。databaseID はジョブ状態とは別のデータベースを
+// 指してください（FirestoreConfig.Client の注記）。
+func OpenFirestoreStore(ctx context.Context, projectID, databaseID, collection string, opts ...option.ClientOption) (*OwnedFirestoreStore, error) {
+	if strings.TrimSpace(databaseID) == "" {
+		return nil, errors.New("session: databaseID must not be empty")
+	}
+	client, err := firestore.NewClientWithDatabase(ctx, projectID, databaseID, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("session: firestore クライアントの初期化に失敗しました: %w", err)
+	}
+	store, err := NewFirestoreStore(FirestoreConfig{Client: client, Collection: collection})
+	if err != nil {
+		_ = client.Close()
+		return nil, err
+	}
+	return &OwnedFirestoreStore{Store: store, client: client}, nil
 }
 
 // errForeignID は、この実装が発行していない形の ID を受け取ったときのエラーです。

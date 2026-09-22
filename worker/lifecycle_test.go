@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"runtime/pprof"
 	"strings"
 	"testing"
@@ -186,8 +187,36 @@ func TestLifecycleTimesOutRunButNotFinish(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Execute() error = %v, want deadline exceeded", err)
 	}
+	// パイプライン全体の打ち切りは、下流 1 回の期限切れと区別できる印が付く。
+	if !errors.Is(err, ErrTimedOut) {
+		t.Errorf("Execute() error = %v, want errors.Is(..., ErrTimedOut)", err)
+	}
+	if !errors.Is(tr.cause, ErrTimedOut) {
+		t.Errorf("Finish cause = %v, want the ErrTimedOut mark to reach Finish", tr.cause)
+	}
 	if tr.finishCtxErr != nil {
 		t.Errorf("Finish ctx was already done: %v", tr.finishCtxErr)
+	}
+}
+
+// TestLifecycleDownstreamDeadlineIsNotTimedOut は、Run の中の下流呼び出しが自分の期限で
+// 切れただけのときは ErrTimedOut の印が付かないことを確かめます。両方とも
+// DeadlineExceeded で返るため、印が無いと通知の文面で区別できません。
+func TestLifecycleDownstreamDeadlineIsNotTimedOut(t *testing.T) {
+	t.Parallel()
+
+	tr := &lifecycleTrace{}
+	l := tr.lifecycle(func(context.Context, lifecycleTask) (string, error) {
+		return "", fmt.Errorf("voicevox: %w", context.DeadlineExceeded)
+	})
+	l.Timeout = time.Minute
+
+	err := l.Execute(context.Background(), lifecycleTask{})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Execute() error = %v, want deadline exceeded", err)
+	}
+	if errors.Is(err, ErrTimedOut) {
+		t.Errorf("a downstream deadline must not be marked as the pipeline timeout: %v", err)
 	}
 }
 

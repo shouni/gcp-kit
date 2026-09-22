@@ -289,6 +289,11 @@ workflow and nothing else.
     `PIPELINE_TIMEOUT < dispatch deadline <= Cloud Run timeout` holding, redelivery arrives serially, so a
     read-then-write rerun guard has no concurrent rival. What it replaces is walking a bucket prefix,
     sorting job IDs in memory, and hiding the cost behind a cache — all workarounds for having no query.
+  - **`PageMeta` is an alias of `go-utils/paging.PageMeta`, and `List` gets its arithmetic from
+    `paging.New`.** The GCS listing (go-job-kit) returns the same alias. The two used to be separate
+    copies with drifted edge values (empty list `total_pages` 1 here vs 0 there, page 1 `prev_page` 1
+    vs 0) while ap-mcp read both through one struct; the clamped arithmetic that lived here became the
+    shared one. `jobstatus/paging_test.go` still pins the values, as the contract this listing returns.
 
 ### File layout inside `auth`
 
@@ -394,8 +399,8 @@ tasks 87% / worker 96%. The uncovered remainder in `tasks` is the thin `*cloudta
 
 **`jobstatus` sits lower than the rest for the same reason, and that is the accepted position.** What is
 uncovered there is the Firestore round trip itself — `Save`/`Get`/`Delete` and the iteration inside
-`collect`/`count` — while the parts that hold judgement are covered: `filteredQuery` at 100%, `paging.go`
-at 94%. Unlike `tasks`, it binds the concrete `*firestore.Client` rather than an interface, because
+`collect`/`count` — while the parts that hold judgement are covered: `filteredQuery` at 100%, the
+paging arithmetic (now in go-utils) at 100%. Unlike `tasks`, it binds the concrete `*firestore.Client` rather than an interface, because
 Firestore's fluent API returns concrete types at every step and a seam would mean abstracting the whole
 query builder while changing `NewStore`'s signature for five apps. Covering the round trip means the
 Firestore emulator, which needs a JRE and a gcloud component locally and has nowhere to start in the

@@ -1,7 +1,13 @@
 package jobstatus
 
-import "testing"
+import (
+	"testing"
 
+	"github.com/shouni/go-utils/paging"
+)
+
+// TestNewPageMeta は、この一覧が返す端の値を固定します。実装は go-utils/paging にあり、
+// ここで固定しているのは「Firestore 系の一覧がこの値を返す」という契約のほうです。
 func TestNewPageMeta(t *testing.T) {
 	t.Parallel()
 
@@ -48,8 +54,8 @@ func TestNewPageMeta(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := newPageMeta(tt.page, tt.perPage, tt.total); got != tt.want {
-				t.Errorf("newPageMeta(%d, %d, %d) = %+v, want %+v",
+			if got := paging.New(tt.page, tt.perPage, tt.total); got != tt.want {
+				t.Errorf("paging.New(%d, %d, %d) = %+v, want %+v",
 					tt.page, tt.perPage, tt.total, got, tt.want)
 			}
 		})
@@ -73,7 +79,7 @@ func TestPageMetaOffset(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := tt.meta.offset(); got != tt.want {
+			if got := tt.meta.Offset(); got != tt.want {
 				t.Errorf("offset() = %d, want %d", got, tt.want)
 			}
 		})

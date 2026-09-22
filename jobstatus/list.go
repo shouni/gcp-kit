@@ -7,6 +7,7 @@ import (
 
 	"cloud.google.com/go/firestore"
 	"cloud.google.com/go/firestore/apiv1/firestorepb"
+	"github.com/shouni/go-utils/paging"
 	"google.golang.org/api/iterator"
 )
 
@@ -120,14 +121,14 @@ func (s *Store[T]) List(ctx context.Context, page, perPage int, opts ...ListOpti
 		return nil, PageMeta{}, err
 	}
 
-	meta := newPageMeta(page, perPage, total)
+	meta := paging.New(page, perPage, total)
 	if total == 0 {
 		return nil, meta, nil
 	}
 
 	query = orderedQuery(query, cfg)
 	if meta.PerPage > 0 {
-		query = query.Offset(meta.offset()).Limit(meta.PerPage)
+		query = query.Offset(meta.Offset()).Limit(meta.PerPage)
 	}
 
 	items, err := collect[T](ctx, query)

@@ -421,6 +421,27 @@ func TestCallback(t *testing.T) {
 		}
 	})
 
+	// 利用者が同意画面でキャンセルすると、Google は code ではなく error を付けて戻す。
+	// トークン交換へ進むと空の code で 500 になり、利用者の操作が ERROR ログに載る。
+	t.Run("oauth error parameter returns 403 without exchanging", func(t *testing.T) {
+		t.Parallel()
+		exchanged := false
+		h, ctx := newCallbackTestHandler(t, func(http.ResponseWriter, *http.Request) { exchanged = true }, nil)
+		req := httptest.NewRequest(http.MethodGet, "/auth/callback?error=access_denied&state="+state, nil).WithContext(ctx)
+		req.AddCookie(&http.Cookie{Name: DefaultStateCookie, Value: state})
+		req.AddCookie(&http.Cookie{Name: DefaultVerifierCookie, Value: "test-verifier"})
+		rr := httptest.NewRecorder()
+
+		h.Callback(rr, req)
+
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusForbidden)
+		}
+		if exchanged {
+			t.Error("token exchange was attempted with no code")
+		}
+	})
+
 	t.Run("exchange failure returns 500", func(t *testing.T) {
 		t.Parallel()
 		h, ctx := newCallbackTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
@@ -724,11 +745,10 @@ func TestSaveSessionAndRedirectRotatesSessionID(t *testing.T) {
 		t.Fatalf("saveSessionAndRedirect = %v", err)
 	}
 
-	// 仕込まれた ID が認証済みになっていないこと。
+	// 仕込まれた ID の実体が消えていること。ストアに実体があるのは認証済みの
+	// セッションだけなので、残すと Logout では消せない有効なセッションが寿命いっぱい残る。
 	if values, err := store.Load(context.Background(), plantedID); err == nil {
-		if _, authenticated := values[DefaultUserSessionKey]; authenticated {
-			t.Error("攻撃者が知っている ID がそのまま認証済みになりました（セッション固定）")
-		}
+		t.Errorf("ログイン前のセッション実体が残っています: %v", values)
 	}
 
 	// ブラウザへ渡すクッキーが新しい ID で、その下に認証済みセッションがあること。

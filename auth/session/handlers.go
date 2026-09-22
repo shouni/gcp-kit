@@ -78,6 +78,17 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 利用者が同意画面でキャンセルした、あるいは prompt=none で対話が要った場合、
+	// Google は code ではなく error を付けて戻します。トークン交換へ進むと空の code で
+	// 失敗し、利用者の操作 1 つが ERROR ログ（ログベースのアラート）に載ります。
+	if oauthErr := r.URL.Query().Get("error"); oauthErr != "" {
+		h.log().WarnContext(r.Context(), "認可がエラーで戻されました",
+			"error", oauthErr, "description", r.URL.Query().Get("error_description"))
+		h.clearTemporaryCookies(w)
+		http.Error(w, "Login was not completed: "+oauthErr, http.StatusForbidden)
+		return
+	}
+
 	verifier, err := r.Cookie(DefaultVerifierCookie)
 	if err != nil || verifier.Value == "" {
 		// Login を経由していない、あるいはクッキーが期限切れ。再ログインさせます。

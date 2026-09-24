@@ -74,16 +74,6 @@ const maxDispatchDeadline = 30 * time.Minute
 // minDispatchDeadline は同じく下限です。
 const minDispatchDeadline = 15 * time.Second
 
-// Queue は Enqueuer が満たすインターフェースです。
-//
-// アプリの port がこれを埋め込めば、Enqueuer を包むアダプタや、テスト用の偽物を
-// 書くための独自インターフェースが要りません。
-type Queue[T any] interface {
-	Enqueue(ctx context.Context, payload T) error
-	EnqueueWithName(ctx context.Context, taskID string, payload T) error
-	EnqueueWithOptions(ctx context.Context, payload T, opts ...EnqueueOption) (string, error)
-}
-
 // Enqueuer は任意の型 T のペイロードを Cloud Tasks に投入する汎用構造体です。
 type Enqueuer[T any] struct {
 	client    taskClient
@@ -91,8 +81,6 @@ type Enqueuer[T any] struct {
 	parent    string
 	targetURL string
 }
-
-var _ Queue[struct{}] = (*Enqueuer[struct{}])(nil)
 
 type taskClient interface {
 	CreateTask(context.Context, *cloudtaskspb.CreateTaskRequest) (*cloudtaskspb.Task, error)
@@ -432,32 +420,6 @@ func validateConfig(cfg Config) error {
 		return fmt.Errorf("tasks config DispatchDeadline is invalid: %w", err)
 	}
 
-	return nil
-}
-
-// ValidateDeadlines は、アプリ側のパイプライン上限（worker.WithTimeout などに渡す値）が
-// Cloud Tasks の打ち切りより手前に来ることを確かめます。起動時に呼んでください。
-//
-// 等号は通しません。同時に切れると、アプリが失敗を記録する前に Cloud Tasks が接続を
-// 閉じ、記録の無いまま再配信されます。dispatchDeadline が 0 なら Cloud Tasks の既定
-// （DefaultDispatchDeadline）と比べます。
-//
-// 投入側と受信側は別プロセスなので、両方の値を知っているのは設定だけです。この検査は
-// 3 つのアプリが同じ判定と同じ文言で持っていたものです。
-func ValidateDeadlines(pipelineTimeout, dispatchDeadline time.Duration) error {
-	if pipelineTimeout <= 0 {
-		return errors.New("tasks: pipeline timeout must be positive")
-	}
-	if err := validateDispatchDeadline(dispatchDeadline); err != nil {
-		return fmt.Errorf("tasks: dispatch deadline is invalid: %w", err)
-	}
-	if dispatchDeadline == 0 {
-		dispatchDeadline = DefaultDispatchDeadline
-	}
-	if pipelineTimeout >= dispatchDeadline {
-		return fmt.Errorf("tasks: pipeline timeout (%s) must be shorter than the Cloud Tasks dispatch deadline (%s): "+
-			"at equality the task is cut off before the app records the failure", pipelineTimeout, dispatchDeadline)
-	}
 	return nil
 }
 

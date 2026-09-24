@@ -238,16 +238,20 @@ workflow and nothing else.
     carried the same 20-line `WorkerTaskURL` — join, don't double an existing suffix, drop the trailing
     slash — and it now lives here, resolved once at construction. `Audience` still defaults to the bare
     `WorkerURL`, because the receiving side compares against the service URL, not the route.
-  - **`Queue[T]` is the interface `*Enqueuer[T]` satisfies**, so an app's port can embed it instead of
-    writing a wrapper whose only job is to exist as an interface. Three apps had three differently shaped
-    ones.
+  - **There is no `Queue[T]` interface any more.** It was added so an app's port could embed it instead
+    of declaring its own, and no app ever did — adk-review's port needs `Close`, so it did not fit, and
+    the others kept the wrappers they already had. Apps declare the interface they need at the point of
+    use, which is the Go convention anyway. Don't re-add a speculative one.
   - **`EnqueueWithName` treats `ALREADY_EXISTS` as success**, so a retried enqueue creates one task. That
     covers duplicate *creation* only — delivery is still at-least-once, which the worker has to handle.
   - **`DispatchDeadline` is the worker's effective run-time limit, not a wait.** Unset means Cloud Tasks'
     10-minute default (`DefaultDispatchDeadline`), and no amount of Cloud Run `timeout` gets past it.
-    `ValidateDeadlines` checks that the app's own pipeline timeout lands strictly before it — equality
-    fails, because when both fire together Cloud Tasks closes the connection before the app records the
-    failure and the task is redelivered with no record. Enqueue and worker are separate processes, so the
+    The app's own pipeline timeout has to land strictly before it: when both fire together Cloud Tasks
+    closes the connection before the app records the failure and the task is redelivered with no record.
+    A `ValidateDeadlines` helper used to live here and no app adopted it — they reject an unset
+    `TASK_DISPATCH_DEADLINE` outright while the helper read 0 as the 10-minute default, and their error
+    text has to name the env var. The check stays in each app's `config/validate.go`. Enqueue and worker
+    are separate processes, so the
     only place that knows both numbers is the config; three apps had written this check with the same
     message.
   - The CreateTask RPC is given its own 20s deadline because Cloud Tasks rejects a request whose deadline is
@@ -286,7 +290,7 @@ workflow and nothing else.
       returns success, because delivery is at-least-once.
     - **`Timeout` wraps `Run` only.** Wrapping the caller's ctx means `Finish` runs on an
       already-expired context in exactly the case where the record matters most. Keep it strictly
-      under the dispatch deadline (see `ValidateDeadlines`).
+      under the dispatch deadline.
     - **`Finish` is called exactly once, on `context.WithoutCancel`, on success, failure and panic
       alike.** Three of five apps had detached only the failure path; jobs that finished around the
       deadline stuck in `running`. Routing success and failure through one function is what makes

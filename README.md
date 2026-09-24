@@ -49,14 +49,14 @@
   * `Serve` は ctx が終わるまで動かし、猶予内に止まらなければ強制的に閉じます。
     テストには `Listener`（ポート 0 のリスナーを渡せます）があります。
   * `WriteTimeout` に既定値を置きません（worker は数分かかることがあるため）。`ReadHeaderTimeout` は 5 秒です。
-* **`tasks`**: Cloud Tasks エンキュー（`Enqueuer[T]`、インターフェースは `Queue[T]`）
+* **`tasks`**: Cloud Tasks エンキュー（`Enqueuer[T]`）
   * OIDC トークンの設定を内側に隠します。`EnqueueWithName` は決定的な名前で投入し、`ALREADY_EXISTS` を
     成功として扱います（防げるのは重複した「投入」までで、重複「配信」は worker 側の冪等性が受け持ちます）。
   * **配送先は `WorkerURL` + `WorkerPath` で組み立てます。** ルータの登録と一字一句一致しないと届かない
     （末尾のスラッシュ 1 つで全件 404）ので、結合と正規化はキットが持ちます。
   * **`DispatchDeadline` は「ワーカーの実行時間の実効上限」です。** 未指定だと Cloud Tasks の既定 10 分が
     上限になり、Cloud Run の `timeout` を伸ばしても超えられません。アプリ側の全体タイムアウトは
-    これより短く取ってください（`ValidateDeadlines` が起動時に確かめます。等号も不可です）。
+    これより短く取ってください（等号も不可です。同時に切れると、記録の無いまま再配信されます）。
   * **`T` は `worker.Handler[T]` と揃える規約で、型による強制ではありません。**
     別パッケージなので、コンパイラは両者を結びつけません。
 * **`worker`**: Cloud Tasks 向けハンドラー（`Handler[T]`）

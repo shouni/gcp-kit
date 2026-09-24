@@ -47,9 +47,13 @@ const (
 	DefaultIdleTimeout = 120 * time.Second
 
 	// DefaultShutdownTimeout は SIGTERM 後に停止を待つ上限です。
-	// Cloud Run が SIGKILL するまでの猶予より長く取っても待ち切れないため、
-	// デプロイ側の設定に合わせて Config で上書きしてください。
-	DefaultShutdownTimeout = 15 * time.Second
+	//
+	// Cloud Run は SIGTERM から 10 秒で SIGKILL します（container runtime contract）。
+	// この上限をそれ以上にすると、待ち切る前にプロセスごと消えるため、shutdown の
+	// 強制クローズの分岐（掴んでいる接続を切って終わらせる）が本番では一度も走りません。
+	// 8 秒にしているのは、強制クローズと最後のログを書き出す余地を 2 秒残すためです。
+	// 猶予を延ばしたデプロイでは Config.ShutdownTimeout で上書きしてください。
+	DefaultShutdownTimeout = 8 * time.Second
 )
 
 // Config は Serve の設定です。Port と Handler だけが必須です。

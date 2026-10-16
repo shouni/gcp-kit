@@ -319,3 +319,137 @@ func TestRecorderDisabled(t *testing.T) {
 
 	rec.Record(t.Context(), "job-1", testStatus{})
 }
+
+// fakeModifier は Modifier も満たす偽実装です。Modify は、トランザクションの
+// やり直しを再現するため、fn を呼んだ後に race が立っていれば記録を書き換えて
+// fn をもう一度呼びます（読んだ後に別の配信が書き込んだ状況）。
+type fakeModifier struct {
+	fakeStore
+
+	// race は、1 回目の fn の後に割り込む書き込みです。
+	race      *testStatus
+	modErr    error // 読み取りの失敗（fn を呼ばない）
+	commitErr error // 書き込みの失敗（fn の後）
+
+	getCalls int
+	fnCalls  int
+}
+
+func (f *fakeModifier) Get(ctx context.Context, jobID string) (testStatus, error) {
+	f.getCalls++
+	return f.fakeStore.Get(ctx, jobID)
+}
+
+func (f *fakeModifier) Modify(_ context.Context, _ string, fn func(prev *testStatus) (testStatus, bool, error)) error {
+	if f.modErr != nil {
+		return f.modErr
+	}
+	for {
+		var prev *testStatus
+		if f.prevSet {
+			p := f.prev
+			prev = &p
+		}
+		next, write, err := fn(prev)
+		f.fnCalls++
+		if err != nil {
+			return err
+		}
+		if f.race != nil {
+			// 読んでから書くまでの間に別の書き込みが入った。Firestore はこの
+			// トランザクションを捨て、fn を最新の記録でやり直させる。
+			f.prev, f.prevSet, f.race = *f.race, true, nil
+			continue
+		}
+		if !write {
+			return nil
+		}
+		if f.commitErr != nil {
+			return f.commitErr
+		}
+		f.saved = append(f.saved, next)
+		f.prev, f.prevSet = next, true
+		return nil
+	}
+}
+
+func TestRecorderBeginUsesModifier(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Modify だけで判定と記録を行う", func(t *testing.T) {
+		t.Parallel()
+		store := &fakeModifier{}
+		done, err := newTestRecorder(store).Begin(t.Context(), "job-1", testStatus{Status: Status{State: StateRunning}})
+		if err != nil || done {
+			t.Fatalf("Begin() = (%v, %v), want (false, nil)", done, err)
+		}
+		if store.getCalls != 0 {
+			t.Errorf("Get が %d 回呼ばれた（トランザクションの外で読んでいる）", store.getCalls)
+		}
+		if len(store.saved) != 1 || store.saved[0].State != StateRunning {
+			t.Errorf("saved = %+v, want running を 1 件", store.saved)
+		}
+	})
+
+	t.Run("判定の後に succeeded が書かれたら、やり直した判定で打ち切る", func(t *testing.T) {
+		t.Parallel()
+		// 前回の配信が完了を記録した直後に、再配信の Begin が走る状況。
+		// Get と Save が別々だと running で上書きし、もう一度生成してしまう。
+		store := &fakeModifier{
+			fakeStore: fakeStore{prevSet: true, prev: testStatus{Status: Status{State: StateRunning}}},
+			race:      &testStatus{Status: Status{State: StateSucceeded}},
+		}
+		done, err := newTestRecorder(store).Begin(t.Context(), "job-1", testStatus{Status: Status{State: StateRunning}})
+		if err != nil || !done {
+			t.Fatalf("Begin() = (%v, %v), want (true, nil)", done, err)
+		}
+		if len(store.saved) != 0 {
+			t.Errorf("saved = %+v, want none（succeeded を巻き戻さない）", store.saved)
+		}
+		if store.fnCalls != 2 {
+			t.Errorf("fn の呼び出し = %d, want 2（やり直しで最新を見る）", store.fnCalls)
+		}
+	})
+
+	t.Run("読めなければエラーを返し、記録もしない", func(t *testing.T) {
+		t.Parallel()
+		store := &fakeModifier{modErr: ErrUnavailable}
+		done, err := newTestRecorder(store).Begin(t.Context(), "job-1", testStatus{Status: Status{State: StateRunning}})
+		if !errors.Is(err, ErrUnavailable) || done {
+			t.Fatalf("Begin() = (%v, %v), want (false, ErrUnavailable)", done, err)
+		}
+		if len(store.saved) != 0 {
+			t.Errorf("saved = %+v, want none", store.saved)
+		}
+	})
+
+	t.Run("書き込みだけの失敗は警告に留めて続ける", func(t *testing.T) {
+		t.Parallel()
+		// 記録は観測のためのもので、書けなかったことを理由に生成を止めない。
+		store := &fakeModifier{commitErr: ErrUnavailable}
+		done, err := newTestRecorder(store).Begin(t.Context(), "job-1", testStatus{Status: Status{State: StateRunning}})
+		if err != nil || done {
+			t.Fatalf("Begin() = (%v, %v), want (false, nil)", done, err)
+		}
+	})
+
+	t.Run("引き継ぎと apply は前回の記録から行う", func(t *testing.T) {
+		t.Parallel()
+		queuedAt := time.Date(2026, 8, 30, 9, 0, 0, 0, time.UTC)
+		store := &fakeModifier{
+			fakeStore: fakeStore{prevSet: true, prev: testStatus{Status: Status{State: StateQueued, QueuedAt: queuedAt, Attempts: 1}}},
+		}
+		bump := func(next, prev *testStatus) {
+			if prev != nil {
+				next.Attempts = prev.Attempts + 1
+			}
+		}
+		if _, err := newTestRecorder(store).Begin(t.Context(), "job-1", testStatus{Status: Status{State: StateRunning}}, bump); err != nil {
+			t.Fatal(err)
+		}
+		got := store.saved[0]
+		if got.Attempts != 2 || !got.QueuedAt.Equal(queuedAt) {
+			t.Errorf("saved = Attempts %d / QueuedAt %v, want 2 / %v", got.Attempts, got.QueuedAt, queuedAt)
+		}
+	})
+}

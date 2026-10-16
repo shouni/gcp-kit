@@ -81,8 +81,9 @@ func TestProcessTask_InvalidJSON(t *testing.T) {
 
 	h.ProcessTask(rr, req)
 
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	// 4xx では Cloud Tasks が再配信するため、2xx で打ち切る。
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
 	}
 	if exec.called {
 		t.Fatalf("executor should not be called")
@@ -186,8 +187,9 @@ func TestProcessTask_BodyTooLarge(t *testing.T) {
 	rr := newRecorder()
 	h.ServeHTTP(rr, newTaskRequest(strings.NewReader(body)))
 
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	// 4xx では Cloud Tasks が再配信するため、2xx で打ち切る。
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
 	}
 	if exec.called {
 		t.Fatal("executor should not be called")
@@ -232,8 +234,9 @@ func TestProcessTask_StrictJSON(t *testing.T) {
 		h := NewHandler[samplePayload](exec, WithStrictJSON())
 		rr := newRecorder()
 		h.ServeHTTP(rr, newTaskRequest(strings.NewReader(body)))
-		if rr.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+		// 4xx では Cloud Tasks が再配信するため、2xx で打ち切る。
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
 		}
 		if exec.called {
 			t.Fatal("executor should not be called")

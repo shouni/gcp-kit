@@ -16,6 +16,20 @@ type StatusStore[T any] interface {
 	Save(ctx context.Context, jobID string, status T) error
 }
 
+// Modifier は、記録を読んでから書くまでを割り込みなしで行える StatusStore です。
+// *Store[T] が満たします（Store.Modify を参照）。
+//
+// Recorder.Begin は、渡された StatusStore がこれも満たしていれば使います。Get と
+// Save を別々に呼ぶと、その間に別の配信の書き込みが入り、完了済み（succeeded）の
+// ジョブを running へ巻き戻したうえで、もう一度実行してしまうことがあります。
+//
+// 満たさない StatusStore（テストの偽実装や、*Store を包んだアプリ側の型）では、
+// Begin は従来どおり Get と Save で動きます。*Store を包む型でアトミックにしたい
+// 場合は、Modify をそのまま委譲してください。
+type Modifier[T any] interface {
+	Modify(ctx context.Context, jobID string, fn func(prev *T) (next T, write bool, err error)) error
+}
+
 // Recorder は、ワーカーがジョブの進行に合わせて状態を記録するための薄い層です。
 //
 //  1. 完了済みジョブの再実行ガード（AlreadySucceeded）
@@ -156,9 +170,20 @@ func (r *Recorder[T]) Record(ctx context.Context, jobID string, status T, apply 
 //
 // 渡す status は処理開始（running）を表すものにしてください。投入（queued）の記録は
 // 再実行ガードの対象ではないので Record を使います。
+//
+// store が Modifier を満たす（*Store[T] など）なら、読み取りから書き込みまでを
+// 1 つのトランザクションで行います。判定と記録の間に別の配信が succeeded を
+// 書いた場合でも、やり直した判定がそれを見て打ち切ります。満たさない store では
+// Get と Save が別々の呼び出しになり、その間に入った書き込みは見逃します。
+//
+// どちらの経路でも、ジョブが running のあいだに届いた再配信は止めません。止める
+// 対象は完了済み（succeeded）だけだからです。
 func (r *Recorder[T]) Begin(ctx context.Context, jobID string, status T, apply ...func(next, prev *T)) (bool, error) {
 	if !r.Enabled() {
 		return false, nil
+	}
+	if m, ok := r.store.(Modifier[T]); ok {
+		return r.beginAtomic(ctx, m, jobID, status, apply)
 	}
 
 	prev, prevCommon, err := r.previous(ctx, jobID)
@@ -171,6 +196,43 @@ func (r *Recorder[T]) Begin(ctx context.Context, jobID string, status T, apply .
 
 	r.save(ctx, jobID, status, prev, prevCommon, apply)
 	return false, nil
+}
+
+// beginAtomic は、Begin の判定と記録を Modifier の 1 回の読み書きで行います。
+//
+// 判断は Begin と同じです。読めなければエラーを返して記録もせず、完了済みなら
+// 何も書かずに true を返します。書き込みだけが失敗した場合は、Begin の非アトミックな
+// 経路と同じく警告に留めて処理を続けます（記録の失敗で生成を止めない）。両者を
+// 見分けるため、fn まで到達したかどうかを decided に残します。
+//
+// fn はトランザクションのやり直しで複数回呼ばれることがあるので、apply も同じ回数
+// 呼ばれえます。前回の記録（prev）だけから次の値を決めている限り、結果は変わりません。
+func (r *Recorder[T]) beginAtomic(ctx context.Context, m Modifier[T], jobID string, status T, apply []func(next, prev *T)) (bool, error) {
+	var decided, done bool
+	err := m.Modify(ctx, jobID, func(prev *T) (T, bool, error) {
+		decided, done = true, false
+
+		var prevCommon *Status
+		if prev != nil {
+			if c, ok := common(prev); ok {
+				prevCommon = &c
+			}
+		}
+		if prevCommon != nil && prevCommon.IsTerminal() {
+			done = true
+			return status, false, nil
+		}
+
+		next, write := r.prepare(ctx, jobID, status, prev, prevCommon, apply)
+		return next, write, nil
+	})
+	if err != nil {
+		if !decided {
+			return false, err
+		}
+		r.logger.WarnContext(ctx, "failed to record job status", "job_id", jobID, "error", err)
+	}
+	return done, nil
 }
 
 // previous は前回の記録を読み、値と共通フィールドを返します。
@@ -195,6 +257,24 @@ func (r *Recorder[T]) previous(ctx context.Context, jobID string) (*T, *Status, 
 
 // save は引き継ぎ・apply・巻き戻しの判定を通してから保存します。
 func (r *Recorder[T]) save(ctx context.Context, jobID string, status T, prev *T, prevCommon *Status, apply []func(next, prev *T)) {
+	next, write := r.prepare(ctx, jobID, status, prev, prevCommon, apply)
+	if !write {
+		return
+	}
+
+	if err := r.store.Save(ctx, jobID, next); err != nil {
+		attrs := []any{"job_id", jobID, "error", err}
+		if c, ok := common(&next); ok {
+			attrs = append(attrs, "state", c.State)
+		}
+		r.logger.WarnContext(ctx, "failed to record job status", attrs...)
+	}
+}
+
+// prepare は、引き継ぎ・apply・巻き戻しの判定を通した、保存する値を返します。
+// 巻き戻しにあたるなら write は false です。status は値で受け取るので、呼び出し側の
+// 値は変わりません（beginAtomic がやり直しのたびに同じ status から作り直せます）。
+func (r *Recorder[T]) prepare(ctx context.Context, jobID string, status T, prev *T, prevCommon *Status, apply []func(next, prev *T)) (T, bool) {
 	if prevCommon != nil {
 		if next, ok := any(&status).(Carrier); ok {
 			next.CarryOver(*prevCommon)
@@ -213,16 +293,9 @@ func (r *Recorder[T]) save(ctx context.Context, jobID string, status T, prev *T,
 	if rolledBack(prevCommon, next, hasCommon) {
 		r.logger.InfoContext(ctx, "skipped job status record; job already finished",
 			"job_id", jobID, "state", next.State, "recorded_state", prevCommon.State)
-		return
+		return status, false
 	}
-
-	if err := r.store.Save(ctx, jobID, status); err != nil {
-		attrs := []any{"job_id", jobID, "error", err}
-		if hasCommon {
-			attrs = append(attrs, "state", next.State)
-		}
-		r.logger.WarnContext(ctx, "failed to record job status", attrs...)
-	}
+	return status, true
 }
 
 // rolledBack は、前回が終了済みなのに今回がそうでない記録かどうかを返します。

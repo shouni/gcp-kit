@@ -74,6 +74,7 @@ func WithMaxBodyBytes(n int64) Option {
 
 // WithStrictJSON は、ペイロードに未知のフィールドが含まれる場合にデコードを失敗させます。
 // 送信側と受信側の型定義のずれを早期に検知したい場合に使います。
+// 失敗したタスクは、解析できないペイロードと同じく 2xx で打ち切られ、ERROR ログに残ります。
 func WithStrictJSON() Option {
 	return func(o *options) { o.strictJSON = true }
 }
@@ -168,9 +169,19 @@ func (h *Handler[T]) process(ctx context.Context, w http.ResponseWriter, r *http
 
 	var payload T
 	if err := decoder.Decode(&payload); err != nil {
-		h.log().ErrorContext(ctx, "Failed to decode worker task payload", "error", err)
-		// 400系を返すと、Cloud Tasks は通常リトライを行わずタスクを破棄します。
-		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+		// 解析できないボディ（上限超過を含む）は、何度配り直しても同じ結果です。
+		// ErrPermanent と同じく 2xx で打ち切ります。
+		//
+		// 4xx では止まりません。Cloud Tasks は 2xx 以外をすべて失敗として扱い、
+		// キューのリトライ設定に従って再配信します（HttpRequest のリファレンス）。
+		// 以前は 400 を返していて、max_attempts = 1 のキューでは表に出ませんでしたが、
+		// max_attempts を上げた時点で壊れたペイロードが上限まで配り直されます。
+		h.log().ErrorContext(ctx, "Failed to decode worker task payload; dropping the task",
+			"error", err,
+			"payload_type", fmt.Sprintf("%T", payload),
+			"permanent", true,
+		)
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 

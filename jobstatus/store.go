@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"cloud.google.com/go/firestore"
+	"google.golang.org/grpc/codes"
+	grpcstatus "google.golang.org/grpc/status"
 
 	"github.com/shouni/go-utils/jobid"
 )
@@ -92,7 +94,12 @@ func (s *Store[T]) Get(ctx context.Context, jobID string) (T, error) {
 	if err != nil {
 		return out, classify(safeJobID, err)
 	}
+	return decode[T](snap, safeJobID)
+}
 
+// decode はスナップショットを T へ読み出します。Get と Modify で読み方を揃えます。
+func decode[T any](snap *firestore.DocumentSnapshot, safeJobID string) (T, error) {
+	var out T
 	if err := snap.DataTo(&out); err != nil {
 		return out, fmt.Errorf("ジョブ状態のデコードに失敗しました (%s): %w", safeJobID, err)
 	}
@@ -102,6 +109,69 @@ func (s *Store[T]) Get(ctx context.Context, jobID string) (T, error) {
 		e.EnsureJobID(safeJobID)
 	}
 	return out, nil
+}
+
+// Modify は、記録を読んでから書くまでを Firestore のトランザクションで行います。
+// Modifier を満たし、Recorder.Begin はこれがあれば使います。
+//
+// fn は前回の記録（未記録なら nil）を受け取り、書く値と、書くかどうかを返します。
+// Get と Save を別々に呼ぶと、その間に別の書き込みが入りえます。Cloud Tasks の
+// 再配信が、完了を記録した直後の succeeded を running で上書きするのがその例です。
+// トランザクションの中なら、読んだ後に記録が変わっていれば Firestore が fn を
+// やり直させるので、fn は必ず最新の記録を見て判断します。
+//
+// fn はやり直しで複数回呼ばれることがあります。外へ副作用を出さず、引数だけから
+// 結果を決めてください。
+//
+// 読み取りやデコードに失敗した場合は、fn を呼ばずにそのエラーを返します（Get と
+// 同じ分類です）。fn のエラーは包まずにそのまま返します。
+func (s *Store[T]) Modify(ctx context.Context, jobID string, fn func(prev *T) (next T, write bool, err error)) error {
+	doc, safeJobID, err := s.doc(jobID)
+	if err != nil {
+		return err
+	}
+
+	// デコード失敗と fn のエラーは、Firestore のエラーと一緒に classify へ通さないよう
+	// ここに退避し、素のまま返します。
+	var innerErr error
+	err = s.client.RunTransaction(ctx, func(_ context.Context, tx *firestore.Transaction) error {
+		innerErr = nil
+
+		var prev *T
+		snap, getErr := tx.Get(doc)
+		switch {
+		case grpcstatus.Code(getErr) == codes.NotFound:
+		case getErr != nil:
+			return getErr
+		default:
+			v, decErr := decode[T](snap, safeJobID)
+			if decErr != nil {
+				innerErr = decErr
+				return decErr
+			}
+			prev = &v
+		}
+
+		next, write, fnErr := fn(prev)
+		if fnErr != nil {
+			innerErr = fnErr
+			return fnErr
+		}
+		if !write {
+			return nil
+		}
+		if stamper, ok := any(&next).(Stamper); ok {
+			stamper.Stamp(safeJobID, s.now())
+		}
+		return tx.Set(doc, next)
+	})
+	if innerErr != nil {
+		return innerErr
+	}
+	if err != nil {
+		return classify(safeJobID, err)
+	}
+	return nil
 }
 
 // Delete はジョブ状態を削除します。不在はエラーになりません。

@@ -10,19 +10,19 @@ import (
 	"testing"
 )
 
-// TestProcessTaskLabelsGoroutineWithTaskName は、Cloud Tasks のタスク名が
-// pprof のゴルーチンラベルに載ることを検証します。
+// TestProcessTaskLabelsGoroutineWithTaskName checks that the Cloud Tasks task
+// name is put on a pprof goroutine label.
 //
-// これはログではなくパニックのトレースバックのための配線です。Go 1.27 以降、
-// ラベルはトレースバックの見出し行に出るため、ワーカーが落ちたときに
-// どのタスクだったかがスタックだけで特定できます。slogctx による相関は
-// panic の経路では効かないので、そこを埋めるのがこのラベルです。
+// This wiring is for panic tracebacks, not logs. Since Go 1.27 labels appear
+// in the traceback's header line, so when the worker crashes the stack alone
+// identifies the task. Correlation through slogctx does not work on the panic
+// path, and this label fills that gap.
 func TestProcessTaskLabelsGoroutineWithTaskName(t *testing.T) {
 	var got string
 	var found bool
 
 	h := NewHandler[map[string]string](execFunc(func(ctx context.Context, _ map[string]string) error {
-		// 実行中のゴルーチンに載っているラベルを読む。
+		// Read the labels on the running goroutine.
 		pprof.ForLabels(ctx, func(key, value string) bool {
 			if key == "cloudtask" {
 				got, found = value, true
@@ -43,15 +43,15 @@ func TestProcessTaskLabelsGoroutineWithTaskName(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	if !found {
-		t.Fatal("cloudtask ラベルがゴルーチンに載っていません")
+		t.Fatal("no cloudtask label on the goroutine")
 	}
 	if got != "task-42" {
-		t.Errorf("cloudtask = %q, want %q（完全修飾名ではなく末尾のタスク名）", got, "task-42")
+		t.Errorf("cloudtask = %q, want %q (the trailing task name, not the fully qualified one)", got, "task-42")
 	}
 }
 
-// TestProcessTaskWithoutTaskNameSetsNoLabel は、Cloud Tasks 以外からの呼び出しで
-// 空のラベルを載せないことを検証します。
+// TestProcessTaskWithoutTaskNameSetsNoLabel checks that calls not from Cloud
+// Tasks get no empty label.
 func TestProcessTaskWithoutTaskNameSetsNoLabel(t *testing.T) {
 	labeled := false
 
@@ -70,28 +70,29 @@ func TestProcessTaskWithoutTaskNameSetsNoLabel(t *testing.T) {
 	h.ProcessTask(rec, req)
 
 	if labeled {
-		t.Error("タスク名が無いのにラベルを載せています")
+		t.Error("set a label although there is no task name")
 	}
 }
 
-// execFunc は TaskExecutor を関数で満たすためのテスト用アダプターです。
+// execFunc is a test adapter satisfying TaskExecutor with a function.
 type execFunc func(context.Context, map[string]string) error
 
 func (f execFunc) Execute(ctx context.Context, p map[string]string) error { return f(ctx, p) }
 
-// TestProcessTaskDoesNotLeakLabelIntoNextRequest は、同じゴルーチンで続けて
-// 処理したリクエストが直前のタスク名を引き継がないことを検証します。
+// TestProcessTaskDoesNotLeakLabelIntoNextRequest checks that a request handled
+// next on the same goroutine does not inherit the previous task name.
 //
-// net/http は 1 本の接続ゴルーチンで keep-alive の複数リクエストを順に捌きます。
-// pprof.SetGoroutineLabels は復帰時にラベルを戻さないため、これを直接呼ぶと
-// 2 本目のトレースバックが 1 本目のタスク名を指します。ラベルは「落ちたときに
-// どのタスクだったか」を知るための配線なので、無関係の名前が出るのは
-// 何も出ないより悪い状態です。pprof.Do は復帰時に元のラベルへ戻します。
+// net/http serves several keep-alive requests in turn on one connection
+// goroutine. pprof.SetGoroutineLabels does not restore labels on return, so
+// calling it directly makes the second request's traceback name the first
+// task. The label is wiring for knowing "which task it was when it crashed",
+// so an unrelated name is worse than none. pprof.Do restores the original
+// labels on return.
 //
-// ゴルーチンのラベルを読む公開 API は無いため、goroutine プロファイル
-// （debug=1 はラベル行を含む）を経由して確認します。
+// There is no public API to read a goroutine's labels, so this checks through
+// the goroutine profile (debug=1 includes label lines).
 func TestProcessTaskDoesNotLeakLabelIntoNextRequest(t *testing.T) {
-	// プロファイルは全ゴルーチンを含むため、他のテストと衝突しない名前を使います。
+	// The profile covers every goroutine, so use a name no other test uses.
 	const canary = "task-keepalive-canary"
 
 	var profiles []string
@@ -100,43 +101,43 @@ func TestProcessTaskDoesNotLeakLabelIntoNextRequest(t *testing.T) {
 		return nil
 	}))
 
-	// 1 本目: Cloud Tasks 由来（タスク名あり）。
+	// First: from Cloud Tasks (with a task name).
 	first := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`))
 	first.Header.Set(HeaderTaskName, "projects/p/locations/l/queues/q/tasks/"+canary)
 	h.ProcessTask(httptest.NewRecorder(), first)
 
-	// 2 本目: 同じゴルーチンで、タスク名を持たない呼び出し。
+	// Second: on the same goroutine, a call without a task name.
 	second := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`))
 	h.ProcessTask(httptest.NewRecorder(), second)
 
 	if len(profiles) != 2 {
-		t.Fatalf("executor の呼び出し回数 = %d, want 2", len(profiles))
+		t.Fatalf("executor calls = %d, want 2", len(profiles))
 	}
-	// ラベルがそもそも載っていなければ、以降の検証は空振りします。
+	// If the label was never set, the checks below would pass vacuously.
 	if !strings.Contains(profiles[0], canary) {
-		t.Fatalf("1 本目の処理中にラベルが載っていません:\n%s", labelLines(profiles[0]))
+		t.Fatalf("no label while handling the first request:\n%s", labelLines(profiles[0]))
 	}
 	if strings.Contains(profiles[1], canary) {
-		t.Errorf("2 本目の処理中に 1 本目のタスク名が残っています:\n%s", labelLines(profiles[1]))
+		t.Errorf("the first task name remains while handling the second request:\n%s", labelLines(profiles[1]))
 	}
 	if profile := goroutineProfile(t); strings.Contains(profile, canary) {
-		t.Errorf("ProcessTask から復帰した後もラベルが残っています:\n%s", labelLines(profile))
+		t.Errorf("a label remains after returning from ProcessTask:\n%s", labelLines(profile))
 	}
 }
 
-// goroutineProfile は、いま動いている全ゴルーチンのプロファイルを文字列で返します。
-// debug=1 の出力にはラベル行（"# labels: {...}"）が含まれます。
+// goroutineProfile returns the profile of every running goroutine as a
+// string. The debug=1 output includes label lines ("# labels: {...}").
 func goroutineProfile(t *testing.T) string {
 	t.Helper()
 
 	var buf bytes.Buffer
 	if err := pprof.Lookup("goroutine").WriteTo(&buf, 1); err != nil {
-		t.Fatalf("goroutine プロファイルの取得に失敗: %v", err)
+		t.Fatalf("failed to get goroutine profile: %v", err)
 	}
 	return buf.String()
 }
 
-// labelLines は、失敗時のメッセージに載せるラベル行だけを抜き出します。
+// labelLines extracts just the label lines to put in a failure message.
 func labelLines(profile string) string {
 	var lines []string
 	for line := range strings.SplitSeq(profile, "\n") {
@@ -145,7 +146,7 @@ func labelLines(profile string) string {
 		}
 	}
 	if len(lines) == 0 {
-		return "(ラベル行なし)"
+		return "(no label lines)"
 	}
 	return strings.Join(lines, "\n")
 }

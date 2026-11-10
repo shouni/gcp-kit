@@ -1,4 +1,4 @@
-# CI の実体は shouni/workflows。ジョブ構成とタグ運用の理由はそちらの README にある。
+# The CI itself lives in shouni/workflows; the reasons for its job layout and tagging are in that README.
 name: CI
 
 on:
@@ -18,5 +18,5 @@ jobs:
   ci:
     uses: shouni/workflows/.github/workflows/go-ci.yml@v1
     with:
-      # 認証まわりは外から与えられた値を直接解釈するため、探索を毎回回す。
+      # The auth code parses externally supplied values directly, so fuzzing runs every time.
       fuzz-targets: "./auth/session#FuzzBuildLoginRedirectURL ./auth/session#FuzzIsSafeRelativePath ./auth/oidc#FuzzExtractBearerToken"

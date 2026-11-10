@@ -1,19 +1,21 @@
-// Package auth は、「誰として通すか」の契約と、その合成だけを持ちます。
+// Package auth holds only the contract for "who to let a request through as"
+// and the ways of composing it.
 //
-// 実装は 2 つの子パッケージにあります。人（ブラウザ）は auth/session、
-// サービス間呼び出しは auth/oidc です。どちらも Authenticator を満たすため、
-// 合成はこのパッケージの Require / Protected が引き受けます。
+// The implementations live in two child packages: people (browsers) in
+// auth/session, service-to-service calls in auth/oidc. Both satisfy
+// Authenticator, so composing them is left to this package's Require and
+// Protected.
 //
-//	// Worker 用: サービスしか来ないルート
+//	// For a worker: a route only services call
 //	r.Use(auth.Require(verifier))
 //
-//	// Web 用: 人もエージェントも来るルート
+//	// For the web: a route both people and agents call
 //	r.Use(auth.Protected(verifier, handler))
 //
-// 依存の向きは session → auth ← oidc の一方向で、このパッケージ自身は
-// 標準ライブラリしか使いません。合成の判断を 1 か所に集めるためであって、
-// 各アプリが同じ組み立てを手で書くと、認証経路が散らばって片方だけが
-// 強化される事故が起きます。
+// Dependencies run one way only, session → auth ← oidc, and this package
+// itself uses the standard library alone. The point is to keep the
+// composition decisions in one place: when each app writes the same assembly
+// by hand, the auth paths scatter and only one of them ends up hardened.
 package auth
 
 import (
@@ -23,54 +25,59 @@ import (
 	"net/http"
 )
 
-// Authenticator は、リクエストの主体を 1 つの方式で確認します。
+// Authenticator confirms who made a request, using one method.
 //
-// 自分宛ての資格情報が無い場合は ErrNotAttempted を返し、合成側に次の方式を
-// 試させます。確認できた場合は、下流が参照する値を載せたコンテキストを返します。
+// When the request carries no credentials for this method it returns
+// ErrNotAttempted, so the composer tries the next method. On success it
+// returns a context carrying the values downstream handlers read.
 //
-// w を受け取るのは、確認の過程で応答へ書き込む必要がある方式があるためです
-// （壊れたセッションクッキーの破棄など）。ただし応答本体
-// （リダイレクトや 401）は書きません。それは Challenge の仕事です。
+// It takes w because some methods need to write to the response while
+// verifying (clearing a broken session cookie, for example). It never writes
+// the response itself (a redirect or a 401); that is Challenge's job.
 //
-// ここで書いたヘッダーは、確認に失敗しても応答に残ります。Protected は失敗した
-// 方式で走査を止めないため、後の方式が成立して 200 を返しても取り消されません。
-// 書き込みは、そうなっても差し支えないものに限ってください。
+// Headers written here stay on the response even when verification fails.
+// Protected does not stop scanning at a failed method, so they are not undone
+// when a later method succeeds and returns 200. Write only what is harmless in
+// that case.
 type Authenticator interface {
 	Authenticate(w http.ResponseWriter, r *http.Request) (context.Context, error)
 }
 
-// Challenger は、認証が成立しなかったときの応答を自分で決められる Authenticator です。
+// Challenger is an Authenticator that decides its own response when
+// authentication does not succeed.
 //
-// セッション方式がログイン画面へリダイレクトするように、失敗時に何を返すかは
-// 方式ごとに違います。実装しない場合、Require / Protected が既定の応答を返します。
+// What to return on failure differs by method, the way the session method
+// redirects to the login page. If it is not implemented, Require and Protected
+// return the default response.
 type Challenger interface {
 	Challenge(w http.ResponseWriter, r *http.Request, err error)
 }
 
 var (
-	// ErrNotAttempted は、リクエストがその方式を試してすらいないことを示します
-	// （Bearer トークンが無い、セッションクッキーが無い、など）。
+	// ErrNotAttempted reports that the request did not even attempt this
+	// method (no Bearer token, no session cookie, and so on).
 	//
-	// 失敗ではなく「自分の担当ではない」の意味なので、Protected は次の方式へ進み、
-	// 呼び出し側もログを出す必要はありません。
+	// It means "not mine to handle" rather than a failure, so Protected moves
+	// on to the next method and callers need not log it.
 	ErrNotAttempted = errors.New("auth: no credentials for this method")
 
-	// ErrNotConfigured は、方式そのものが設定されていないことを示します。
+	// ErrNotConfigured reports that the method itself is not configured.
 	//
-	// ErrNotAttempted と区別するのは、設定漏れをフォールバックで隠さないためです。
-	// 混ぜると「なぜかエージェントだけログイン画面に飛ばされる」という分かりにくい
-	// 形で現れます。
+	// It is kept apart from ErrNotAttempted so that a missing setting is not
+	// hidden behind a fallback. Mixed together, it shows up in the confusing
+	// form of "for some reason only agents get sent to the login page".
 	ErrNotConfigured = errors.New("auth: authenticator is not configured")
 )
 
-// Require は、a で確認できなければ止めるミドルウェアを返します。
-// サービスしか来ないルート（Cloud Tasks の Worker など）に使います。
+// Require returns middleware that stops the request unless a confirms it.
+// Use it on routes only services call (a Cloud Tasks worker, for example).
 //
-// a が Challenger なら失敗時の応答を委ね、そうでなければ次を返します。
+// If a is a Challenger, the failure response is left to it; otherwise it
+// returns:
 //
-//   - ErrNotConfigured: 500。設定漏れは呼び出し元の落ち度ではありません
-//   - ErrNotAttempted:  401。資格情報が無い
-//   - それ以外:          403。提示されたが通らなかった
+//   - ErrNotConfigured: 500. A missing setting is not the caller's fault
+//   - ErrNotAttempted:  401. No credentials
+//   - anything else:    403. Credentials were presented but did not pass
 func Require(a Authenticator, opts ...Option) func(http.Handler) http.Handler {
 	o := newOptions(opts)
 
@@ -83,9 +90,9 @@ func Require(a Authenticator, opts ...Option) func(http.Handler) http.Handler {
 			}
 
 			if errors.Is(err, ErrNotConfigured) {
-				o.logger().ErrorContext(r.Context(), "認証方式が未設定です", "error", err, "path", r.URL.Path)
+				o.logger().ErrorContext(r.Context(), "authenticator is not configured", "error", err, "path", r.URL.Path)
 			} else if !errors.Is(err, ErrNotAttempted) {
-				o.logger().WarnContext(r.Context(), "認証失敗", "error", err, "path", r.URL.Path)
+				o.logger().WarnContext(r.Context(), "authentication failed", "error", err, "path", r.URL.Path)
 			}
 
 			challenge(w, r, a, err)
@@ -93,34 +100,38 @@ func Require(a Authenticator, opts ...Option) func(http.Handler) http.Handler {
 	}
 }
 
-// Protected は、方式を順に試して最初に成立したもので通すミドルウェアを返します。
-// 人もサービスも来るルートに使います。
+// Protected returns middleware that tries the methods in order and lets the
+// request through on the first that succeeds. Use it on routes both people and
+// services call.
 //
-// どれも成立しなかった場合、応答を決めるのは資格情報を提示したうえで落ちた方式です。
-// 「Bearer を出したが通らなかった」は確定的な失敗で、次の方式に望みはありません。
-// 最後の方式に答えさせると、JSON を求めたエージェントに HTML のログイン画面が返ります。
-// 提示すらしていない方式しか無ければ、最後の方式が答えます。
+// When none succeeds, the response is decided by the method whose presented
+// credentials failed. "Presented a Bearer and it did not pass" is a decisive
+// failure, with nothing to hope for from the next method. Letting the last
+// method answer instead sends an HTML login page to an agent that asked for
+// JSON. If every method was simply not attempted, the last one answers.
 //
-// ErrNotConfigured だけは確定的な失敗に数えません。設定漏れでフォールバックを止めると、
-// サービス側の設定を直すまで人までログインできなくなります。
+// ErrNotConfigured alone does not count as a decisive failure. Stopping the
+// fallback on a missing setting would lock even people out until the service
+// configuration is fixed.
 //
-// 方式の順序は、どれも成立しなかった場合だけでなく、成立した場合の応答にも効きます。
-// Authenticate が応答へ書いたヘッダーは、その方式が落ちても残るためです（走査を
-// 続ける以上、巻き戻す先がありません）。人向けの方式は最後に置いてください。
-// auth/session を先に置くと、壊れたクッキーを持ったまま Bearer で通った呼び出しの
-// 200 応答に、セッションを破棄する Set-Cookie が紛れ込みます。
+// The order of the methods affects the response on success too, not only when
+// all fail: headers an Authenticate wrote to the response stay even if that
+// method failed (scanning goes on, so there is nothing to roll back to). Put
+// the browser-facing method last. With auth/session first, a call that passed
+// on a Bearer while carrying a broken cookie gets a Set-Cookie deleting the
+// session on its 200 response.
 func Protected(first Authenticator, rest ...Authenticator) func(http.Handler) http.Handler {
 	return ProtectedWith(nil, append([]Authenticator{first}, rest...)...)
 }
 
-// ProtectedWith は、オプションを指定できる Protected です。
+// ProtectedWith is Protected with options.
 func ProtectedWith(opts []Option, authenticators ...Authenticator) func(http.Handler) http.Handler {
 	o := newOptions(opts)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// decisive は「資格情報を提示したうえで落ちた」最初の方式です。
-			// last は、どの方式も提示されなかった場合の応答役です。
+			// decisive is the first method that failed after credentials were
+			// presented. last answers when no method was presented at all.
 			var decisiveAuth, lastAuth Authenticator
 			var decisiveErr, lastErr error
 
@@ -134,13 +145,14 @@ func ProtectedWith(opts []Option, authenticators ...Authenticator) func(http.Han
 					return
 				}
 
-				// そもそも試していない呼び出しはノイズになるためログしない。
+				// Calls that never attempted the method are noise, so they are not logged.
 				if !errors.Is(err, ErrNotAttempted) {
-					o.logger().InfoContext(r.Context(), "認証方式が成立せず、次の方式へフォールバック",
+					o.logger().InfoContext(r.Context(), "authenticator did not succeed, falling back to the next one",
 						"error", err, "path", r.URL.Path)
 				}
-				// 提示して落ちた方式を覚えつつ、走査は続けます。不正な Bearer と
-				// 有効なセッションを同時に持つ呼び出しを、締め出さないためです。
+				// Remember the method that was presented and failed, but keep
+				// scanning, so a call holding both a bad Bearer and a valid
+				// session is not locked out.
 				if decisiveAuth == nil && !errors.Is(err, ErrNotAttempted) && !errors.Is(err, ErrNotConfigured) {
 					decisiveAuth, decisiveErr = a, err
 				}
@@ -159,7 +171,7 @@ func ProtectedWith(opts []Option, authenticators ...Authenticator) func(http.Han
 	}
 }
 
-// challenge は、方式が応答を決められるならそれに委ね、そうでなければ既定を返します。
+// challenge defers to the method when it can decide the response, and returns the default otherwise.
 func challenge(w http.ResponseWriter, r *http.Request, a Authenticator, err error) {
 	if c, ok := a.(Challenger); ok {
 		c.Challenge(w, r, err)
@@ -176,7 +188,7 @@ func challenge(w http.ResponseWriter, r *http.Request, a Authenticator, err erro
 	}
 }
 
-// Option は Require / ProtectedWith の挙動を調整します。
+// Option adjusts the behaviour of Require and ProtectedWith.
 type Option func(*options)
 
 type options struct {
@@ -200,8 +212,8 @@ func (o *options) logger() *slog.Logger {
 	return slog.Default()
 }
 
-// WithLogger は合成の判断を記録するロガーを指定します。
-// 未指定の場合は slog.Default() です。
+// WithLogger sets the logger that records the composition's decisions.
+// It defaults to slog.Default().
 func WithLogger(logger *slog.Logger) Option {
 	return func(o *options) { o.log = logger }
 }

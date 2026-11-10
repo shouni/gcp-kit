@@ -1,12 +1,13 @@
-// Package cloudlog は、Cloud Logging が解釈できる構造化ログを出力するための
-// slog 設定と、Cloud Run のトレース相関ミドルウェアを提供します。
+// Package cloudlog provides the slog settings for writing structured logs
+// Cloud Logging can interpret, and the Cloud Run trace-correlation middleware.
 //
-// slog の既定 JSON 出力は `level`/`msg` キーを使いますが、Cloud Logging が参照するのは
-// `severity`/`message` です。既定のままだと Logs Explorer 上ですべてのエントリが
-// INFO 扱いになり、重大度での絞り込みができません。HandlerOptions がこの差を吸収します。
+// slog's default JSON output uses the `level`/`msg` keys, but Cloud Logging
+// reads `severity`/`message`. Left at the defaults, every entry shows as INFO
+// in Logs Explorer and nothing can be filtered by severity. HandlerOptions
+// bridges the difference.
 //
-// 組み立ては NewHandler が引き受けます。出力先とレベルは GCP に依存しないため、
-// 引数として呼び出し側に残します。
+// NewHandler takes care of the composition. The destination and the level do
+// not depend on GCP, so they stay with the caller as arguments.
 //
 //	level := slogctx.ParseLevel(os.Getenv("LOG_LEVEL"))
 //	slog.SetDefault(slog.New(cloudlog.NewHandler(os.Stdout, level)))
@@ -19,30 +20,32 @@ import (
 	"github.com/shouni/go-utils/slogctx"
 )
 
-// Cloud Logging がトレースとの相関に使う予約フィールド名です。
+// Reserved field names Cloud Logging uses to correlate entries with traces.
 const (
-	// TraceKey はトレースの完全修飾名を入れるフィールドです。
+	// TraceKey is the field holding the trace's fully qualified name.
 	TraceKey = "logging.googleapis.com/trace"
-	// SpanKey はスパン ID を入れるフィールドです。
+	// SpanKey is the field holding the span ID.
 	SpanKey = "logging.googleapis.com/spanId"
 )
 
-// NewHandler は、Cloud Logging 互換の JSON を w へ書き、context に載せた属性も
-// 出力する slog.Handler を組み立てます。
+// NewHandler builds a slog.Handler that writes Cloud Logging-compatible JSON
+// to w and also outputs the attributes carried in the context.
 //
-// 組み立ての順番をここに置くのは、外しても何も言わずに壊れる部分だからです。
-// slogctx.NewHandler で包み忘れてもエラーは出ず、job_id やトレース ID がログから
-// 消えるだけなので、6 つの兄弟アプリが同じ 3 行を逐語で写していました。
+// The composition order lives here because it is the part that breaks
+// silently when gotten wrong. Forgetting to wrap in slogctx.NewHandler raises
+// no error; job_id and the trace ID simply vanish from the logs, which is why
+// six sibling apps were copying the same three lines verbatim.
 //
-// 使い方はパッケージのドキュメントにあります。slog.SetDefault をこの中でやらないのは、
-// 既定ロガーの差し替えがプロセス全体に効くためです。呼び出し側から見える場所に残します。
-// 別の組み立てをしたい場合は HandlerOptions を直接 slog.NewJSONHandler へ渡してください。
+// Usage is in the package documentation. slog.SetDefault is not called in
+// here because replacing the default logger affects the whole process; it
+// stays where the caller can see it. For a different composition, pass
+// HandlerOptions directly to slog.NewJSONHandler.
 func NewHandler(w io.Writer, level slog.Level) slog.Handler {
 	return slogctx.NewHandler(slog.NewJSONHandler(w, HandlerOptions(level)))
 }
 
-// HandlerOptions は、Cloud Logging 互換の属性名で出力する slog.HandlerOptions を返します。
-// slog.NewJSONHandler へ渡して使います。
+// HandlerOptions returns slog.HandlerOptions that output Cloud
+// Logging-compatible attribute names. Pass it to slog.NewJSONHandler.
 func HandlerOptions(level slog.Level) *slog.HandlerOptions {
 	return &slog.HandlerOptions{
 		Level:       level,
@@ -50,8 +53,8 @@ func HandlerOptions(level slog.Level) *slog.HandlerOptions {
 	}
 }
 
-// replaceAttr は slog の標準キーを Cloud Logging の予約フィールドへ詰め替えます。
-// グループ内の属性はアプリ固有のデータなので触りません。
+// replaceAttr moves slog's standard keys onto Cloud Logging's reserved fields.
+// Attributes inside groups are app-specific data and are left alone.
 func replaceAttr(groups []string, a slog.Attr) slog.Attr {
 	if len(groups) > 0 {
 		return a
@@ -69,8 +72,8 @@ func replaceAttr(groups []string, a slog.Attr) slog.Attr {
 	return a
 }
 
-// SeverityOf は slog のレベルを Cloud Logging の severity 文字列へ対応付けます。
-// slog.LevelWarn は Cloud Logging では "WARNING" である点に注意してください。
+// SeverityOf maps a slog level to a Cloud Logging severity string.
+// Note that slog.LevelWarn is "WARNING" in Cloud Logging.
 func SeverityOf(level slog.Level) string {
 	switch {
 	case level < slog.LevelInfo:

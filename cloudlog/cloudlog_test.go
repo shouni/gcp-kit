@@ -16,8 +16,8 @@ import (
 	"github.com/shouni/gcp-kit/cloudlog"
 )
 
-// newTestLogger は、Cloud Logging 互換の JSON を buf へ書く context 対応ロガーを返します。
-// アプリケーション側で行う想定の組み立てをそのまま再現しています。
+// newTestLogger returns a context-aware logger writing Cloud Logging-compatible
+// JSON to buf. It reproduces the composition an application is expected to do.
 func newTestLogger(buf *bytes.Buffer, level slog.Level) *slog.Logger {
 	base := slog.NewJSONHandler(buf, cloudlog.HandlerOptions(level))
 	return slog.New(slogctx.NewHandler(base))
@@ -38,7 +38,7 @@ func decodeLines(t *testing.T, buf *bytes.Buffer) []map[string]any {
 	return entries
 }
 
-// Cloud Logging は level/msg ではなく severity/message を読むため、詰め替えが必須。
+// Cloud Logging reads severity/message, not level/msg, so the keys must be moved.
 func TestHandlerOptionsWritesCloudLoggingFields(t *testing.T) {
 	var buf bytes.Buffer
 	newTestLogger(&buf, slog.LevelInfo).Warn("something happened", "job_id", "job-1")
@@ -57,14 +57,14 @@ func TestHandlerOptionsWritesCloudLoggingFields(t *testing.T) {
 		t.Errorf("job_id = %v", entries[0]["job_id"])
 	}
 	if _, ok := entries[0]["level"]; ok {
-		t.Error("level キーが残っている（severity へ詰め替えられていない）")
+		t.Error("level key remains (not moved to severity)")
 	}
 	if _, ok := entries[0]["msg"]; ok {
-		t.Error("msg キーが残っている（message へ詰め替えられていない）")
+		t.Error("msg key remains (not moved to message)")
 	}
 }
 
-// グループ内の属性はアプリ固有のデータなので詰め替えないこと。
+// Attributes inside groups are app-specific data and must not be moved.
 func TestHandlerOptionsLeavesGroupedAttrsAlone(t *testing.T) {
 	var buf bytes.Buffer
 	logger := newTestLogger(&buf, slog.LevelInfo).WithGroup("payload")
@@ -76,10 +76,10 @@ func TestHandlerOptionsLeavesGroupedAttrsAlone(t *testing.T) {
 	}
 	group, ok := entries[0]["payload"].(map[string]any)
 	if !ok {
-		t.Fatalf("グループ payload が出力されていない: %v", entries[0])
+		t.Fatalf("group payload missing from output: %v", entries[0])
 	}
 	if group["level"] != "high" {
-		t.Errorf("payload.level = %v, want high（グループ内は詰め替えない）", group["level"])
+		t.Errorf("payload.level = %v, want high (keys inside groups are not moved)", group["level"])
 	}
 }
 
@@ -87,7 +87,7 @@ func TestSeverityOf(t *testing.T) {
 	tests := map[slog.Level]string{
 		slog.LevelDebug: "DEBUG",
 		slog.LevelInfo:  "INFO",
-		// slog では Warn だが Cloud Logging では WARNING。
+		// Warn in slog, but WARNING in Cloud Logging.
 		slog.LevelWarn:  "WARNING",
 		slog.LevelError: "ERROR",
 	}
@@ -98,9 +98,9 @@ func TestSeverityOf(t *testing.T) {
 	}
 }
 
-// Cloud Run が実際に送る形の X-Cloud-Trace-Context です。
-// SPAN_ID がヘッダー上は 10 進数（"/1"）で、Cloud Logging の spanId が期待する
-// 16 進 16 桁（"0000000000000001"）とは表現が違う点がこのテスト群の要点です。
+// X-Cloud-Trace-Context in the form Cloud Run actually sends. The point of
+// these tests is that SPAN_ID is decimal in the header ("/1"), unlike the 16
+// hex digits ("0000000000000001") Cloud Logging's spanId expects.
 const (
 	testTraceHeader = "105445aa7843bc8bf206b12000100000/1;o=1"
 	testTraceID     = "105445aa7843bc8bf206b12000100000"
@@ -115,64 +115,64 @@ func TestParseTraceContext(t *testing.T) {
 		wantSpan  string
 	}{
 		{
-			name:      "Cloud Run が送る形。10 進数の SPAN_ID を 16 進 16 桁へ直す",
+			name:      "Cloud Run form: decimal SPAN_ID becomes 16 hex digits",
 			header:    testTraceHeader,
 			wantTrace: testTraceID,
 			wantSpan:  testSpanID,
 		},
 		{
-			name:      "サンプリング指定なし",
+			name:      "no sampling flag",
 			header:    testTraceID + "/456",
 			wantTrace: testTraceID,
 			wantSpan:  "00000000000001c8",
 		},
 		{
-			name:      "32 桁に満たない TRACE_ID は 0 で左詰めする",
+			name:      "TRACE_ID shorter than 32 digits is zero-padded",
 			header:    "abc123/1",
 			wantTrace: "00000000000000000000000000abc123",
 			wantSpan:  testSpanID,
 		},
 		{
-			name:      "大文字の 16 進数は小文字へ揃える",
+			name:      "uppercase hex is lowercased",
 			header:    "ABC123/1",
 			wantTrace: "00000000000000000000000000abc123",
 			wantSpan:  testSpanID,
 		},
 		{
-			name:      "SPAN_ID なし",
+			name:      "no SPAN_ID",
 			header:    testTraceID,
 			wantTrace: testTraceID,
 		},
 		{
-			name:      "SPAN_ID が無く、サンプリング指定だけある形",
+			name:      "sampling flag without SPAN_ID",
 			header:    testTraceID + ";o=1",
 			wantTrace: testTraceID,
 		},
 		{
-			name:   "16 進数でない TRACE_ID は相関に使わない",
+			name:   "non-hex TRACE_ID is not correlated",
 			header: "trace-abc/1",
 		},
 		{
-			name:   "32 桁を超える TRACE_ID は相関に使わない",
+			name:   "TRACE_ID longer than 32 digits is not correlated",
 			header: strings.Repeat("a", 33) + "/1",
 		},
 		{
-			name:      "10 進数でない SPAN_ID は捨てるが、TRACE_ID は残す",
+			name:      "non-decimal SPAN_ID is dropped but TRACE_ID kept",
 			header:    testTraceID + "/span-1",
 			wantTrace: testTraceID,
 		},
 		{
-			name:      "SPAN_ID 0 は「スパンなし」の意味",
+			name:      "SPAN_ID 0 means no span",
 			header:    testTraceID + "/0",
 			wantTrace: testTraceID,
 		},
 		{
-			name:      "64 ビットに収まらない SPAN_ID は捨てる",
+			name:      "SPAN_ID overflowing 64 bits is dropped",
 			header:    testTraceID + "/18446744073709551616",
 			wantTrace: testTraceID,
 		},
 		{
-			name:   "空",
+			name:   "empty",
 			header: "",
 		},
 	}
@@ -194,7 +194,7 @@ func TestTraceAttrs(t *testing.T) {
 
 	attrs := cloudlog.TraceAttrs("my-project", req)
 	if len(attrs) != 2 {
-		t.Fatalf("attrs = %v, want 2 件", attrs)
+		t.Fatalf("attrs = %v, want 2 entries", attrs)
 	}
 	if attrs[0].Key != cloudlog.TraceKey || attrs[0].Value.String() != "projects/my-project/traces/"+testTraceID {
 		t.Errorf("attrs[0] = %v", attrs[0])
@@ -203,24 +203,24 @@ func TestTraceAttrs(t *testing.T) {
 		t.Errorf("attrs[1] = %v", attrs[1])
 	}
 
-	// projectID 未設定・ヘッダー無し・nil リクエストはいずれも相関しない。
+	// No projectID, no header and a nil request all give no correlation.
 	if got := cloudlog.TraceAttrs("", req); got != nil {
-		t.Errorf("TraceAttrs(projectID 空) = %v, want nil", got)
+		t.Errorf("TraceAttrs(empty projectID) = %v, want nil", got)
 	}
 	if got := cloudlog.TraceAttrs("my-project", httptest.NewRequest(http.MethodGet, "/", nil)); got != nil {
-		t.Errorf("TraceAttrs(ヘッダー無し) = %v, want nil", got)
+		t.Errorf("TraceAttrs(no header) = %v, want nil", got)
 	}
 	if got := cloudlog.TraceAttrs("my-project", nil); got != nil {
-		t.Errorf("TraceAttrs(nil リクエスト) = %v, want nil", got)
+		t.Errorf("TraceAttrs(nil request) = %v, want nil", got)
 	}
 }
 
-// TestTraceAttrsIgnoresForgedHeader は、呼び出し元が細工したヘッダーを
-// Cloud Logging の予約フィールドへ書かないことを検証します。
+// TestTraceAttrsIgnoresForgedHeader checks that a header crafted by the caller
+// is never written into Cloud Logging's reserved fields.
 //
-// このヘッダーは誰でも付けられ、Cloud Run は提示された値を引き継ぎます。
-// 検証せずに書くと、trace フィールドに任意の文字列を仕込めるうえ、
-// 他リクエストのトレースへ相乗りする経路にもなります。
+// Anyone can set this header, and Cloud Run passes on what it was handed.
+// Writing it unchecked would let arbitrary strings into the trace field, and
+// would also be a way to ride on another request's trace.
 func TestTraceAttrsIgnoresForgedHeader(t *testing.T) {
 	forged := []string{
 		`" injected`,
@@ -234,7 +234,7 @@ func TestTraceAttrsIgnoresForgedHeader(t *testing.T) {
 		req.Header.Set(cloudlog.TraceHeader, header)
 
 		if got := cloudlog.TraceAttrs("my-project", req); got != nil {
-			t.Errorf("TraceAttrs(%q) = %v, want nil（相関に使わない）", header, got)
+			t.Errorf("TraceAttrs(%q) = %v, want nil (not used for correlation)", header, got)
 		}
 	}
 }
@@ -263,7 +263,7 @@ func TestTraceMiddlewareAttachesTrace(t *testing.T) {
 	}
 }
 
-// projectID 未設定（ローカル実行）では完全修飾名を組めないため何も付与しない。
+// Without a projectID (running locally) the fully qualified name cannot be built, so nothing is attached.
 func TestTraceMiddlewareSkipsWithoutProjectID(t *testing.T) {
 	var buf bytes.Buffer
 	logger := newTestLogger(&buf, slog.LevelInfo)
@@ -281,11 +281,11 @@ func TestTraceMiddlewareSkipsWithoutProjectID(t *testing.T) {
 		t.Fatalf("entries = %d, want 1", len(entries))
 	}
 	if _, ok := entries[0][cloudlog.TraceKey]; ok {
-		t.Error("projectID 未設定なのにトレースが付与されている")
+		t.Error("trace attached although projectID is unset")
 	}
 }
 
-// トレース相関と、アプリが後から積む属性が併存すること。
+// Trace correlation coexists with attributes the app adds later.
 func TestTraceMiddlewareComposesWithApplicationAttrs(t *testing.T) {
 	var buf bytes.Buffer
 	logger := newTestLogger(&buf, slog.LevelInfo)
@@ -304,7 +304,7 @@ func TestTraceMiddlewareComposesWithApplicationAttrs(t *testing.T) {
 		t.Fatalf("entries = %d, want 1", len(entries))
 	}
 	if entries[0][cloudlog.TraceKey] == nil || entries[0]["job_id"] != "job-1" {
-		t.Errorf("entry = %v, want トレースと job_id を両方含む", entries[0])
+		t.Errorf("entry = %v, want both the trace and job_id", entries[0])
 	}
 }
 
@@ -312,16 +312,17 @@ func TestHandlerOptionsRespectsLevel(t *testing.T) {
 	var buf bytes.Buffer
 	newTestLogger(&buf, slog.LevelWarn).InfoContext(context.Background(), "filtered out")
 	if buf.Len() != 0 {
-		t.Errorf("レベル未満のログが出力された: %s", buf.String())
+		t.Errorf("a log below the level was written: %s", buf.String())
 	}
 }
 
-// TestNewHandlerMatchesManualComposition は、NewHandler が兄弟アプリの main.go に
-// 書かれていた 3 行と同じ出力になることを固定します。
+// TestNewHandlerMatchesManualComposition pins NewHandler to the same output as
+// the three lines that were in the sibling apps' main.go.
 //
-// 引き上げの要点は、slogctx.NewHandler で包み忘れても何のエラーも出ず、
-// context に載せた属性が黙って消えるだけ、という点です。等価であることを
-// ここで押さえておかないと、移行したときに気付けません。
+// The point of moving it here is that forgetting to wrap in
+// slogctx.NewHandler raises no error; the context attributes just vanish
+// silently. Without pinning the equivalence here, a migration would not
+// notice.
 func TestNewHandlerMatchesManualComposition(t *testing.T) {
 	var fromKit, manual bytes.Buffer
 
@@ -330,7 +331,7 @@ func TestNewHandlerMatchesManualComposition(t *testing.T) {
 	slog.New(cloudlog.NewHandler(&fromKit, slog.LevelInfo)).
 		WarnContext(ctx, "handled", "attempt", 2)
 
-	// これまで各アプリが手で書いていた組み立て。
+	// The composition each app used to write by hand.
 	base := slog.NewJSONHandler(&manual, cloudlog.HandlerOptions(slog.LevelInfo))
 	slog.New(slogctx.NewHandler(base)).
 		WarnContext(ctx, "handled", "attempt", 2)
@@ -340,16 +341,16 @@ func TestNewHandlerMatchesManualComposition(t *testing.T) {
 		t.Fatalf("entries = %d / %d, want 1 / 1", len(kit), len(man))
 	}
 
-	// 中身が空でも一致してしまうため、期待する形を先に確かめる。
+	// Empty output would match too, so check the expected shape first.
 	if kit[0]["severity"] != "WARNING" || kit[0]["message"] != "handled" || kit[0]["job_id"] != "job-1" {
-		t.Fatalf("entry = %v, want severity/message/job_id が揃っていること", kit[0])
+		t.Fatalf("entry = %v, want severity, message and job_id all present", kit[0])
 	}
 
-	// 時刻だけは一致しない。
+	// Only the time differs.
 	delete(kit[0], slog.TimeKey)
 	delete(man[0], slog.TimeKey)
 	if !reflect.DeepEqual(kit[0], man[0]) {
-		t.Errorf("NewHandler の出力が従来の組み立てと違います:\n kit    = %v\n manual = %v", kit[0], man[0])
+		t.Errorf("NewHandler output differs from the manual composition:\n kit    = %v\n manual = %v", kit[0], man[0])
 	}
 }
 
@@ -359,6 +360,6 @@ func TestNewHandlerRespectsLevel(t *testing.T) {
 		InfoContext(context.Background(), "filtered out")
 
 	if buf.Len() != 0 {
-		t.Errorf("レベル未満のログが出力された: %s", buf.String())
+		t.Errorf("a log below the level was written: %s", buf.String())
 	}
 }

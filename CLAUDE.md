@@ -312,7 +312,7 @@ workflow and nothing else.
     is true only for `succeeded`, because `Begin` must let a `failed` job be retried by Cloud Tasks. But
     "stop polling" and "show as in progress" also need `failed` to count as done (the queues run with
     `max_attempts = 1`), and four callers had re-derived that — one of them shipped "まだ生成中です
-    (状態: failed)". Don't widen `IsTerminal`; use the other two.
+    (状態: failed)" ("still generating (state: failed)"). Don't widen `IsTerminal`; use the other two.
   - **`Stamp` fills `QueuedAt` when it is zero.** History lists by `queued_at` descending, so a job whose
     enqueue path forgot the stamp sank to the bottom; three apps stamped it by hand and "every job at zero"
     has happened once. `Recorder` carries the previous value over before `Stamp` runs, so an existing
@@ -344,6 +344,12 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
 
 ### Conventions used throughout
 
+- **Comments, doc comments, error/log/panic messages and test assertion messages are English.** They
+  moved from Japanese on 2026-11-10; do not mix Japanese back in. Go style applies to error strings
+  (lowercase, no trailing punctuation, ST1005). Subtest names (`t.Run` names and table `name` fields)
+  are English too; test fixture values may stay Japanese. HTTP response bodies were already English.
+- **`README.md` is English and `README.ja.md` is its Japanese version; update the two together.** Both
+  carry the language switch under the badges.
 - **The README's feature list carries only what is expensive not to know.** Signatures belong in godoc and
   reasoning belongs in this file; a bullet that restates an API is noise, and the list stops being read at
   all once it reads like a reference. This rule used to sit in the README itself, addressed to readers who

@@ -8,51 +8,58 @@ import (
 	grpcstatus "google.golang.org/grpc/status"
 )
 
-// このパッケージが返すエラーです。いずれも原因を包んだまま返すので、errors.Is の
-// 判定はそのままに、ログには元の失敗理由が残ります。
+// Errors returned by this package. Each wraps its cause, so errors.Is keeps
+// working while the log still carries the original reason for the failure.
 //
-// 読み書きの結果は次の 3 つ（と、どれにも当てはまらないもの）に分かれます。HTTP
-// ハンドラーはこう対応づけてください。呼び出し側が取るべき判断が分類ごとに違うため、
-// まとめると必ずどちらかを取り違えます。
+// Reads and writes end in one of the three outcomes below (or in something
+// that fits none of them). Map them in HTTP handlers like this. Each class
+// calls for a different decision from the caller, so lumping them together
+// always gets one of them wrong.
 //
-//	ErrInvalidJobID → 400  入力が不正。再試行しても直らない
-//	ErrNotFound     → 404  未記録。処理を先へ進めてよい
-//	ErrUnavailable  → 503  読めなかっただけ。あとで読めるかもしれない
-//	その他          → 500  デコード失敗など
+//	ErrInvalidJobID → 400  bad input; retrying will not fix it
+//	ErrNotFound     → 404  not recorded; processing may go ahead
+//	ErrUnavailable  → 503  just could not be read; it may be readable later
+//	anything else   → 500  a decode failure and the like
 //
-// ErrClosed だけは別で、ファクトリの寿命の話です（1 回のリクエストの結果ではなく、
-// クライアントを閉じた後に取り出そうとしたことを表します）。
+// ErrClosed is separate: it is about the factory's lifetime (not the outcome
+// of one request, but an attempt to take the client after it was closed).
 var (
-	// ErrNotFound は、ジョブ状態がまだ記録されていないことを表します。
-	// 記録前の投入や、この機能より前に作られたジョブでも起こる正常な状態です。
+	// ErrNotFound reports that no job status has been recorded yet. It is a
+	// normal state, which also occurs for an enqueue before recording and for
+	// jobs created before this feature existed.
 	ErrNotFound = errors.New("job status not found")
 
-	// ErrUnavailable は、ジョブ状態が「存在するはずなのに読めなかった」ことを
-	// 表します。
+	// ErrUnavailable reports that a job status "should exist but could not be
+	// read".
 	//
-	// ErrNotFound と分けているのは、両者で取るべき判断が正反対だからです。記録が
-	// 無いなら処理を進めてよい一方、読めなかっただけの場合に「無い」とみなすと、
-	// 完了済みのジョブを未完了と誤認して生成をまるごとやり直します
-	// （Recorder.AlreadySucceeded を参照）。
+	// It is kept apart from ErrNotFound because the right decisions are
+	// opposite. With no record, processing may go ahead; but treating a mere
+	// read failure as "no record" mistakes a finished job for an unfinished
+	// one and redoes the whole generation (see Recorder.AlreadySucceeded).
 	ErrUnavailable = errors.New("job status unavailable")
 
-	// ErrInvalidJobID は、渡されたジョブ ID が正規化を通らなかったことを表します。
+	// ErrInvalidJobID reports that the given job ID did not pass
+	// normalisation.
 	//
-	// これが独立していないと、ハンドラーは URL に紛れ込んだ不正な ID をストレージ
-	// 障害と同じ 5xx で返すことになり、再試行しても直らないリクエストを再試行
-	// させます。原因は jobid のエラーとして残るので、errors.Is で jobid.ErrEmpty /
-	// jobid.ErrTooLong / jobid.ErrInvalidFormat まで辿れます。
+	// Without it as its own error, a handler would answer an invalid ID that
+	// slipped into a URL with the same 5xx as a storage outage, inviting
+	// retries of a request that retrying cannot fix. The cause remains as a
+	// jobid error, so errors.Is reaches jobid.ErrEmpty, jobid.ErrTooLong and
+	// jobid.ErrInvalidFormat.
 	ErrInvalidJobID = errors.New("invalid job id")
 
-	// ErrClosed は、ファクトリが既に閉じられていることを表します。
+	// ErrClosed reports that the factory has already been closed.
 	ErrClosed = errors.New("firestore client is closed")
 )
 
-// classify は Firestore が返したエラーを、呼び出し側の判断が分かれる 3 つへ畳みます。
+// classify folds an error from Firestore into the three classes the caller
+// decides differently on.
 //
-// 権限不足を ErrNotFound へ寄せないことが要点です。寄せると、権限設定を誤った瞬間に
-// 全ジョブが「未記録」に見え、再実行ガードが完了済みのジョブを未完了と誤認します。
-// 読めなかったのか無いのかは、ここでしか区別できません。
+// The point is not to fold a permission failure into ErrNotFound. Doing so
+// would make every job look "not recorded" the moment permissions are
+// misconfigured, and the rerun guard would mistake finished jobs for
+// unfinished ones. Only here can "could not read" be told apart from "does not
+// exist".
 func classify(jobID string, err error) error {
 	if err == nil {
 		return nil
@@ -67,6 +74,6 @@ func classify(jobID string, err error) error {
 		return fmt.Errorf("%w (%s): %w", ErrUnavailable, jobID, err)
 
 	default:
-		return fmt.Errorf("ジョブ状態の操作に失敗しました (%s): %w", jobID, err)
+		return fmt.Errorf("job status operation failed (%s): %w", jobID, err)
 	}
 }

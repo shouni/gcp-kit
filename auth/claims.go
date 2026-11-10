@@ -5,12 +5,13 @@ import (
 	"fmt"
 )
 
-// VerifiedEmail は、Google の ID トークンのクレームから検証済みメールアドレスを取り出します。
+// VerifiedEmail extracts the verified email address from the claims of a
+// Google ID token.
 //
-// 未検証のメールアドレスは、その所有者であることを保証しません。ログイン
-// （auth/session の OAuth コールバック）と、サービス間検証（auth/oidc）で
-// 同じ基準を適用するために、判定はここに 1 つだけ置いています。片方だけが
-// 緩むと、緩んだ側から他人のアドレスを名乗れます。
+// An unverified email address does not prove ownership of it. The check lives
+// here, once, so that login (the OAuth callback in auth/session) and
+// service-to-service verification (auth/oidc) apply the same standard. If only
+// one side loosens, that side can be used to claim someone else's address.
 func VerifiedEmail(claims map[string]any) (string, error) {
 	email, ok := claims["email"].(string)
 	if !ok || email == "" {

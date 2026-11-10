@@ -1,5 +1,6 @@
-// Package worker は、Cloud Tasks / Cloud Run 等から呼び出される HTTP ハンドラーで
-// JSONペイロードをデコードし、型安全にタスク実行を行うユーティリティを提供します。
+// Package worker provides utilities for HTTP handlers called by Cloud Tasks,
+// Cloud Run and the like: decoding the JSON payload and running the task in a
+// type-safe way.
 package worker
 
 import (
@@ -13,28 +14,32 @@ import (
 	"runtime/pprof"
 )
 
-// ErrPermanent は、リトライしても成功し得ない恒久的な失敗を示すセンチネルエラーです。
+// ErrPermanent is the sentinel error for a permanent failure that no retry
+// can fix.
 //
-// TaskExecutor が errors.Is でこれに一致するエラーを返した場合、Handler は 2xx を返して
-// Cloud Tasks にタスクを完了扱いさせ、無駄なリトライを止めます（内容は ERROR ログに残ります）。
-// 一時的な失敗（外部APIのタイムアウト等）では返さないでください。
+// When a TaskExecutor returns an error matching it under errors.Is, the
+// Handler answers 2xx so that Cloud Tasks treats the task as done and stops
+// pointless retries (the details stay in an ERROR log). Do not return it for
+// transient failures (an external API timing out, for example).
 //
-// 印を付けるには Permanent を使います。
+// Mark an error with Permanent.
 //
 //	if errors.Is(err, domain.ErrInvalidInput) {
 //	    return worker.Permanent(err)
 //	}
 var ErrPermanent = errors.New("worker: permanent failure, task must not be retried")
 
-// Permanent は、err に「再配信しても直らない」印を付けて返します。err が nil なら nil です。
+// Permanent marks err as "redelivery will not fix this" and returns it. A nil
+// err returns nil.
 //
-// fmt.Errorf("%w: %v", ErrPermanent, err) と違い、Error() は原因の文面のままです。
-// センチネルの文言は実装都合で、ジョブ状態の記録や通知にそのまま出ると利用者には
-// 意味がありません。恒久かどうかは Handler が構造化ログの permanent フィールドへ
-// 別に出すので、文面に混ぜる必要もありません。
+// Unlike fmt.Errorf("%w: %v", ErrPermanent, err), Error() stays the cause's
+// text. The sentinel's wording is an implementation detail and means nothing
+// to users when it shows up in a job status record or a notification. The
+// Handler reports permanence separately in the structured log's permanent
+// field, so there is no need to mix it into the text.
 //
-// errors.Is(err, ErrPermanent) は true、Unwrap は原因を返すので、原因側の判定
-// （errors.Is / errors.As）はそのまま効きます。
+// errors.Is(err, ErrPermanent) is true and Unwrap returns the cause, so checks
+// against the cause (errors.Is / errors.As) keep working.
 func Permanent(err error) error {
 	if err == nil {
 		return nil
@@ -42,23 +47,23 @@ func Permanent(err error) error {
 	return permanentError{cause: err}
 }
 
-// permanentError は Permanent が返す印です。
+// permanentError is the mark Permanent returns.
 type permanentError struct{ cause error }
 
 func (e permanentError) Error() string        { return e.cause.Error() }
 func (e permanentError) Unwrap() error        { return e.cause }
 func (e permanentError) Is(target error) bool { return target == ErrPermanent }
 
-// defaultMaxBodyBytes は受け付けるリクエストボディの既定上限です。
-// Cloud Tasks の HTTP ターゲットはタスク全体で 1MB 上限のため、既定値もそれに合わせます。
+// defaultMaxBodyBytes is the default limit on the accepted request body.
+// Cloud Tasks HTTP targets cap a whole task at 1MB, so the default matches.
 const defaultMaxBodyBytes int64 = 1 << 20
 
-// TaskExecutor は、デコードされたペイロードを受け取って実際の処理を行うインターフェースです。
+// TaskExecutor receives the decoded payload and does the actual work.
 type TaskExecutor[T any] interface {
 	Execute(ctx context.Context, payload T) error
 }
 
-// Option は Handler の任意設定です。
+// Option is an optional setting of a Handler.
 type Option func(*options)
 
 type options struct {
@@ -67,30 +72,31 @@ type options struct {
 	logger       *slog.Logger
 }
 
-// WithMaxBodyBytes はリクエストボディの上限を変更します。0 以下を指定すると無制限になります。
+// WithMaxBodyBytes changes the request body limit. 0 or less means no limit.
 func WithMaxBodyBytes(n int64) Option {
 	return func(o *options) { o.maxBodyBytes = n }
 }
 
-// WithStrictJSON は、ペイロードに未知のフィールドが含まれる場合にデコードを失敗させます。
-// 送信側と受信側の型定義のずれを早期に検知したい場合に使います。
-// 失敗したタスクは、解析できないペイロードと同じく 2xx で打ち切られ、ERROR ログに残ります。
+// WithStrictJSON makes decoding fail when the payload has unknown fields.
+// Use it to catch drift between the sender's and receiver's type definitions
+// early. A task that fails this is stopped with 2xx like any unparsable
+// payload, and left in an ERROR log.
 func WithStrictJSON() Option {
 	return func(o *options) { o.strictJSON = true }
 }
 
-// WithLogger は本パッケージが使うロガーを差し替えます。未指定の場合は slog.Default() です。
+// WithLogger replaces the logger this package uses. It defaults to slog.Default().
 func WithLogger(logger *slog.Logger) Option {
 	return func(o *options) { o.logger = logger }
 }
 
-// Handler は Cloud Tasks からの HTTP リクエストを受け取る汎用ハンドラーです。
+// Handler is a generic handler receiving HTTP requests from Cloud Tasks.
 type Handler[T any] struct {
 	executor TaskExecutor[T]
 	opts     options
 }
 
-// NewHandler は新しいワーカーハンドラーを生成します。
+// NewHandler creates a new worker handler.
 func NewHandler[T any](executor TaskExecutor[T], opts ...Option) *Handler[T] {
 	cfg := options{maxBodyBytes: defaultMaxBodyBytes}
 	for _, opt := range opts {
@@ -109,12 +115,12 @@ func (h *Handler[T]) log() *slog.Logger {
 	return slog.Default()
 }
 
-// ServeHTTP は Handler を http.Handler として利用可能にします。
+// ServeHTTP makes Handler usable as an http.Handler.
 func (h *Handler[T]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.ProcessTask(w, r)
 }
 
-// ProcessTask は Cloud Tasks からの POST リクエストを処理する http.HandlerFunc です。
+// ProcessTask is an http.HandlerFunc that processes POST requests from Cloud Tasks.
 func (h *Handler[T]) ProcessTask(w http.ResponseWriter, r *http.Request) {
 	if h == nil || h.executor == nil {
 		slog.ErrorContext(r.Context(), "Worker task executor is not configured")
@@ -130,17 +136,17 @@ func (h *Handler[T]) ProcessTask(w http.ResponseWriter, r *http.Request) {
 	md := metadataFromHeader(r.Header)
 	ctx := WithMetadata(r.Context(), md)
 
-	// タスク名を pprof のゴルーチンラベルに載せます。Go 1.27 以降、ラベルは
-	// パニックのトレースバックの見出し行にも出ます。ワーカーが落ちたときに
-	// どのタスクだったかがスタックだけで分かるようにするためで、ログの相関
-	// （slogctx）が使えない panic の経路を埋めるのがここの役目です。
-	// ラベルは executor が起こす子ゴルーチンへも継承されます。
+	// Put the task name on a pprof goroutine label. Since Go 1.27 labels also
+	// appear in the header line of a panic traceback, so when the worker
+	// crashes the stack alone says which task it was. This fills the panic
+	// path, where log correlation (slogctx) does not work. Labels are
+	// inherited by child goroutines the executor starts.
 	//
-	// pprof.SetGoroutineLabels ではなく pprof.Do を使います。前者は復帰時に
-	// ラベルを戻さないため、net/http が 1 本の接続ゴルーチンで keep-alive の
-	// 複数リクエストを順に捌く構成では、次のリクエストが前のタスク名を背負った
-	// ままになります。トレースバックが無関係のタスクを指すのは、名前が
-	// 載っていないより悪い状態です。
+	// It uses pprof.Do, not pprof.SetGoroutineLabels. The latter does not
+	// restore labels on return, so when net/http serves several keep-alive
+	// requests in turn on one connection goroutine, the next request carries
+	// the previous task's name. A traceback pointing at an unrelated task is
+	// worse than one naming none.
 	name := path.Base(md.TaskName)
 	if name == "" || name == "." || name == "/" {
 		h.process(ctx, w, r)
@@ -151,11 +157,12 @@ func (h *Handler[T]) ProcessTask(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// process はボディをデコードして executor を呼び、その結果を Cloud Tasks の
-// リトライ仕様に沿った状態コードへ写します。
+// process decodes the body, calls the executor, and maps the result to a
+// status code that follows Cloud Tasks' retry behaviour.
 //
-// ProcessTask から切り出しているのは、pprof.Do がラベルを関数の実行中だけに
-// 限るためです（ラベルの復元はこの関数からの復帰と対応します）。
+// It is split out of ProcessTask because pprof.Do limits the labels to the
+// function's execution (restoring them corresponds to returning from this
+// function).
 func (h *Handler[T]) process(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	body := r.Body
 	if h.opts.maxBodyBytes > 0 {
@@ -169,13 +176,15 @@ func (h *Handler[T]) process(ctx context.Context, w http.ResponseWriter, r *http
 
 	var payload T
 	if err := decoder.Decode(&payload); err != nil {
-		// 解析できないボディ（上限超過を含む）は、何度配り直しても同じ結果です。
-		// ErrPermanent と同じく 2xx で打ち切ります。
+		// An unparsable body (over the limit included) gives the same result
+		// however often it is redelivered, so it stops with 2xx, like
+		// ErrPermanent.
 		//
-		// 4xx では止まりません。Cloud Tasks は 2xx 以外をすべて失敗として扱い、
-		// キューのリトライ設定に従って再配信します（HttpRequest のリファレンス）。
-		// 以前は 400 を返していて、max_attempts = 1 のキューでは表に出ませんでしたが、
-		// max_attempts を上げた時点で壊れたペイロードが上限まで配り直されます。
+		// 4xx does not stop it. Cloud Tasks treats anything but 2xx as a
+		// failure and redelivers per the queue's retry settings (see the
+		// HttpRequest reference). This used to return 400, which did not show
+		// on a max_attempts = 1 queue, but once max_attempts is raised a broken
+		// payload is redelivered up to the limit.
 		h.log().ErrorContext(ctx, "Failed to decode worker task payload; dropping the task",
 			"error", err,
 			"payload_type", fmt.Sprintf("%T", payload),
@@ -187,12 +196,12 @@ func (h *Handler[T]) process(ctx context.Context, w http.ResponseWriter, r *http
 
 	h.log().DebugContext(ctx, "Worker received task", "type", fmt.Sprintf("%T", payload))
 
-	// ctx はリクエストのものを土台にしているため、Cloud Tasks の応答待ち上限が
-	// そのまま executor まで伝わります（配信メタデータとラベルを足してあります）。
-	// 実行時間の上限はここでは掛けません。上限は結末の記録より内側に掛ける必要が
-	// あり、その順序は Lifecycle が持ちます（Lifecycle.Timeout）。
+	// ctx is built on the request's, so Cloud Tasks' response deadline reaches
+	// the executor as is (with the delivery metadata and labels added). No
+	// run-time limit is applied here: it has to sit inside the recording of
+	// the outcome, and that order belongs to Lifecycle (Lifecycle.Timeout).
 	if err := h.executor.Execute(ctx, payload); err != nil {
-		// セキュリティリスクを回避するため、payload そのものではなく型情報のみを記録します。
+		// Log only the type, not the payload itself, to avoid a security risk.
 		h.log().ErrorContext(ctx, "Worker task execution failed",
 			"error", err,
 			"payload_type", fmt.Sprintf("%T", payload),
@@ -200,12 +209,12 @@ func (h *Handler[T]) process(ctx context.Context, w http.ResponseWriter, r *http
 		)
 
 		if errors.Is(err, ErrPermanent) {
-			// 恒久的な失敗をリトライさせても成功しないため、成功扱いで打ち切ります。
+			// Retrying a permanent failure cannot succeed, so stop by treating it as success.
 			w.WriteHeader(http.StatusOK)
 			return
 		}
 
-		// 500系を返すと、Cloud Tasks は設定に基づき指数バックオフリトライを行います。
+		// On a 5xx, Cloud Tasks retries with exponential backoff per its settings.
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}

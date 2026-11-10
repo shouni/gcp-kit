@@ -1,4 +1,4 @@
-# 各設定の理由は shouni/workflows の README「Dependabot の規約」にある。
+# The reasons behind each setting are in the shouni/workflows README, under its Dependabot conventions section.
 version: 2
 
 updates:

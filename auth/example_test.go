@@ -10,15 +10,15 @@ import (
 	"github.com/shouni/gcp-kit/auth/session"
 )
 
-// Cloud Tasks からの呼び出しだけを受けるワーカーエンドポイントの保護です。
+// Protecting a worker endpoint that accepts calls from Cloud Tasks only.
 //
-// 許可サービスアカウントには tasks.Config.ServiceAccountEmail と同じものを指定します。
-// 空にすると常に検証失敗になります（理由は oidc.New を参照）。
+// The allowed service accounts are the same as tasks.Config.ServiceAccountEmail.
+// Empty, verification always fails (see oidc.New for why).
 //
-// oidc は OAuth 設定を要求しないため、Web UI を持たない Worker プロセスでも使えます。
-// 使いもしない OAuth シークレットへのアクセス権を配らずに済みます。
+// oidc needs no OAuth configuration, so a worker process without a web UI can
+// use it, without being granted access to an OAuth secret it would never use.
 func ExampleRequire() {
-	// 設定漏れはリクエスト時ではなく起動時に落とします。
+	// A missing setting fails at startup, not at request time.
 	verifier, err := oidc.New(
 		"https://worker.example.com",
 		[]string{"tasks@my-project.iam.gserviceaccount.com"},
@@ -39,11 +39,12 @@ func ExampleRequire() {
 	mux.Handle("POST /tasks/run", auth.Require(verifier)(worker))
 }
 
-// 人（ブラウザ）とサービス（エージェント）が同じルートを使う場合の構成です。
+// The setup for a route that people (browsers) and services (agents) share.
 //
-// 有効な OIDC Bearer トークンを提示した呼び出しはセッション認証と CSRF 検証を
-// バイパスし、それ以外はブラウザのログインへ回ります。人向けの方式を最後に
-// 置くと、どれも成立しなかったときログイン画面へ送られます。
+// A call presenting a valid OIDC Bearer token bypasses session authentication
+// and CSRF verification, and everything else goes to the browser login. With
+// the browser-facing method last, a request where nothing succeeded is sent to
+// the login page.
 func ExampleProtected() {
 	handler, err := session.New(session.Config{
 		ClientID:       "xxxxx.apps.googleusercontent.com",
@@ -68,7 +69,7 @@ func ExampleProtected() {
 	}
 
 	page := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// CSRF トークンはセッション経路でのみコンテキストに載ります。
+		// The CSRF token is in the context only on the session path.
 		_, _ = fmt.Fprintf(w, "<input name=%q value=%q>", "csrf_token", session.CSRFTokenFromContext(r.Context()))
 	})
 

@@ -136,7 +136,7 @@ func TestLogin(t *testing.T) {
 		if got, err := url.QueryUnescape(redirect.Value); err != nil || got != "/private" {
 			t.Fatalf("redirect cookie = %q (err %v), want %q", redirect.Value, err, "/private")
 		}
-		// コールバックへ届く必要があるので、属性は state / verifier と同じです。
+		// It has to reach the callback, so its attributes match the state and verifier cookies.
 		if redirect.Path != DefaultCallbackPath || !redirect.HttpOnly {
 			t.Fatalf("redirect cookie Path = %q HttpOnly = %v, want %q and true",
 				redirect.Path, redirect.HttpOnly, DefaultCallbackPath)
@@ -161,8 +161,8 @@ func TestLogin(t *testing.T) {
 		}
 	})
 
-	// ログイン画面は誰でも開けます。ここでセッションの実体を作ると、未認証の
-	// 相手が保存先へ書き込めることになるので、ストアには触れません。
+	// Anyone can open the login page. Creating a stored session here would let
+	// unauthenticated callers write to the store, so the store is not touched.
 	t.Run("does not touch the session store", func(t *testing.T) {
 		t.Parallel()
 		counting := &countingStore{inner: newTestStore()}
@@ -229,7 +229,7 @@ func TestClearTemporaryCookies(t *testing.T) {
 		if c.MaxAge != -1 {
 			t.Fatalf("%s MaxAge = %d, want -1", c.Name, c.MaxAge)
 		}
-		// 削除は発行時と同じ属性で行う必要があります。
+		// Deletion must use the same attributes as issuance.
 		if c.Path != DefaultCallbackPath {
 			t.Fatalf("%s Path = %q, want %q", c.Name, c.Path, DefaultCallbackPath)
 		}
@@ -239,9 +239,9 @@ func TestClearTemporaryCookies(t *testing.T) {
 	}
 }
 
-// TestSetTemporaryCookieUsesLaxSameSite は、state/PKCE クッキーが Lax であることを
-// 保証します。Google からのコールバックはクロスサイトのトップレベル GET 遷移のため、
-// Strict にするとクッキーが送信されずログインが必ず失敗します。
+// TestSetTemporaryCookieUsesLaxSameSite guarantees that the state/PKCE cookies
+// are Lax. The callback from Google is a cross-site top-level GET navigation,
+// so with Strict the cookies are not sent and login always fails.
 func TestSetTemporaryCookieUsesLaxSameSite(t *testing.T) {
 	t.Parallel()
 
@@ -405,8 +405,8 @@ func TestCallback(t *testing.T) {
 		}
 	})
 
-	// PKCE の verifier が無いリクエストは、Login を経由していないか
-	// クッキーが期限切れのため、トークン交換に進ませず再ログインさせます。
+	// A request without the PKCE verifier either skipped Login or has an
+	// expired cookie, so it goes back to login instead of the token exchange.
 	t.Run("missing PKCE verifier returns 400", func(t *testing.T) {
 		t.Parallel()
 		h, ctx := newCallbackTestHandler(t, nil, nil)
@@ -421,8 +421,9 @@ func TestCallback(t *testing.T) {
 		}
 	})
 
-	// 利用者が同意画面でキャンセルすると、Google は code ではなく error を付けて戻す。
-	// トークン交換へ進むと空の code で 500 になり、利用者の操作が ERROR ログに載る。
+	// When the user cancels on the consent screen, Google comes back with error
+	// instead of code. Proceeding to the token exchange would be a 500 on the
+	// empty code, putting a user action in an ERROR log.
 	t.Run("oauth error parameter returns 403 without exchanging", func(t *testing.T) {
 		t.Parallel()
 		exchanged := false
@@ -508,7 +509,7 @@ func TestSaveSessionAndRedirect(t *testing.T) {
 		}
 	})
 
-	// Login が発行したクッキーが、そのままコールバックの戻り先になります。
+	// The cookie Login issued becomes the callback's return target as is.
 	t.Run("uses the redirect cookie left by Login", func(t *testing.T) {
 		t.Parallel()
 		h := &Handler{store: newTestStore(), sessionName: "test-session"}
@@ -610,7 +611,7 @@ func TestLogout(t *testing.T) {
 		}
 	})
 
-	// オープンリダイレクタを避けるため、外部URLやスキーマ相対URLは無視します。
+	// External and scheme-relative URLs are ignored, to avoid an open redirect.
 	t.Run("ignores unsafe redirect_to", func(t *testing.T) {
 		t.Parallel()
 
@@ -627,7 +628,7 @@ func TestLogout(t *testing.T) {
 		}
 	})
 
-	// 保存先へ届かなくてもログアウト自体は成立させます（クッキーは落ちます）。
+	// Logout still succeeds when the store cannot be reached (the cookie is cleared).
 	t.Run("redirects even when the session cannot be cleared", func(t *testing.T) {
 		t.Parallel()
 		h := &Handler{store: unavailableStore{}, sessionName: "test-session"}
@@ -642,12 +643,12 @@ func TestLogout(t *testing.T) {
 	})
 }
 
-// TestLoginPrompt は、prompt を指定したときだけ認可 URL に載ること、
-// 載せても state と PKCE のチャレンジが失われないことを検証します。
+// TestLoginPrompt checks that prompt appears on the authorization URL only when
+// set, and that adding it loses neither the state nor the PKCE challenge.
 //
-// prompt は「ログアウトが効いて見えるか」を左右します。付けないと、
-// ログアウト直後にログイン画面へ送られた時点で Google が何も聞かずに
-// 承認を返し、利用者は元のログイン状態に戻ります。
+// prompt decides whether logout appears to work. Without it, Google approves
+// without asking anything as soon as the user is sent to the login page right
+// after logging out, and the user is back where they were, signed in.
 func TestLoginPrompt(t *testing.T) {
 	t.Parallel()
 
@@ -668,10 +669,10 @@ func TestLoginPrompt(t *testing.T) {
 		prompt Prompt
 		want   string
 	}{
-		{name: "未指定なら付けない", prompt: "", want: ""},
-		{name: "アカウント選択を挟む", prompt: PromptSelectAccount, want: "select_account"},
-		{name: "再認証まで要求する", prompt: PromptLogin, want: "login"},
-		{name: "空白だけなら付けない", prompt: "   ", want: ""},
+		{name: "omitted when unspecified", prompt: "", want: ""},
+		{name: "asks to select an account", prompt: PromptSelectAccount, want: "select_account"},
+		{name: "requires reauthentication", prompt: PromptLogin, want: "login"},
+		{name: "omitted when whitespace only", prompt: "   ", want: ""},
 	}
 
 	for _, tt := range tests {
@@ -683,26 +684,26 @@ func TestLoginPrompt(t *testing.T) {
 
 			loc, err := url.Parse(rr.Header().Get("Location"))
 			if err != nil {
-				t.Fatalf("Location が URL として読めません: %v", err)
+				t.Fatalf("Location is not a readable URL: %v", err)
 			}
 			query := loc.Query()
 
 			if got := query.Get("prompt"); got != tt.want {
 				t.Errorf("prompt = %q, want %q", got, tt.want)
 			}
-			// prompt を足しても、横取り対策の 2 つは必ず残っている必要があります。
+			// Even with prompt added, both protections against interception must remain.
 			if query.Get("state") == "" {
-				t.Error("state が認可 URL から失われています")
+				t.Error("state is missing from the authorization URL")
 			}
 			if query.Get("code_challenge") == "" || query.Get("code_challenge_method") != "S256" {
-				t.Errorf("PKCE のチャレンジが失われています: challenge=%q method=%q",
+				t.Errorf("the PKCE challenge is missing: challenge=%q method=%q",
 					query.Get("code_challenge"), query.Get("code_challenge_method"))
 			}
 		})
 	}
 }
 
-// TestWithPromptOption は、New 経由でも prompt が Handler へ届くことを確認します。
+// TestWithPromptOption checks that prompt reaches the Handler through New too.
 func TestWithPromptOption(t *testing.T) {
 	t.Parallel()
 
@@ -715,20 +716,20 @@ func TestWithPromptOption(t *testing.T) {
 	}
 }
 
-// TestSaveSessionAndRedirectRotatesSessionID は、ログインでセッション ID が
-// 振り直されることを検証します（セッション固定攻撃対策）。
+// TestSaveSessionAndRedirectRotatesSessionID checks that login assigns a new
+// session ID (against session fixation).
 //
-// クッキーが運ぶのは ID だけなので、攻撃者が事前に仕込んだ ID のまま認証済みに
-// してしまうと、攻撃者はその ID で被害者として振る舞えます。仕込む ID は発行と同じ
-// 形にします。形の合わない ID は読み出しの手前で捨てられるので、それでは
-// 「実体があるのに採用しない」ことを試せません。
+// The cookie carries only the ID, so authenticating under an ID an attacker
+// planted beforehand would let the attacker act as the victim with it. The
+// planted ID has the minted shape: an ID of the wrong shape is dropped before
+// the read, which would not test "stored, yet not adopted".
 func TestSaveSessionAndRedirectRotatesSessionID(t *testing.T) {
 	t.Parallel()
 
 	const email = "user@example.com"
 	store := newTestStore()
 
-	// 攻撃者が仕込んだセッションが、既にストアにある状態。
+	// The session the attacker planted is already in the store.
 	planted := seedSession(t, store, "test-session", map[string]string{
 		CSRFTokenKey: "token-fixed-before-login",
 	})
@@ -737,7 +738,7 @@ func TestSaveSessionAndRedirectRotatesSessionID(t *testing.T) {
 	h := &Handler{store: store, sessionName: "test-session"}
 	req := httptest.NewRequest(http.MethodGet, "/auth/callback", nil)
 	req.AddCookie(planted)
-	// ログイン前に控えた遷移先。Login が発行するクッキーと同じ形です。
+	// The target noted before login, in the same form as the cookie Login issues.
 	req.AddCookie(&http.Cookie{Name: DefaultRedirectCookie, Value: url.QueryEscape("/dashboard")})
 	rr := httptest.NewRecorder()
 
@@ -745,13 +746,14 @@ func TestSaveSessionAndRedirectRotatesSessionID(t *testing.T) {
 		t.Fatalf("saveSessionAndRedirect = %v", err)
 	}
 
-	// 仕込まれた ID の実体が消えていること。ストアに実体があるのは認証済みの
-	// セッションだけなので、残すと Logout では消せない有効なセッションが寿命いっぱい残る。
+	// The stored session under the planted ID is gone. Only authenticated
+	// sessions are in the store, so leaving it would keep a valid session that
+	// Logout cannot reach, for its full lifetime.
 	if values, err := store.Load(context.Background(), plantedID); err == nil {
-		t.Errorf("ログイン前のセッション実体が残っています: %v", values)
+		t.Errorf("the pre-login stored session remains: %v", values)
 	}
 
-	// ブラウザへ渡すクッキーが新しい ID で、その下に認証済みセッションがあること。
+	// The cookie sent to the browser carries a new ID with an authenticated session under it.
 	var cookieValue string
 	for _, c := range rr.Result().Cookies() {
 		if c.Name == "test-session" {
@@ -759,21 +761,21 @@ func TestSaveSessionAndRedirectRotatesSessionID(t *testing.T) {
 		}
 	}
 	if cookieValue == "" || cookieValue == plantedID {
-		t.Fatalf("応答のクッキー = %q、仕込まれた ID のままか空です", cookieValue)
+		t.Fatalf("response cookie = %q, still the planted ID or empty", cookieValue)
 	}
 	values, err := store.Load(context.Background(), cookieValue)
 	if err != nil {
-		t.Fatalf("新しい ID の実体が読めません: %v", err)
+		t.Fatalf("cannot read the session under the new ID: %v", err)
 	}
 	if values[DefaultUserSessionKey] != email {
-		t.Errorf("新しいセッションの email = %q, want %q", values[DefaultUserSessionKey], email)
+		t.Errorf("new session email = %q, want %q", values[DefaultUserSessionKey], email)
 	}
-	// ログイン前の CSRF トークンは持ち越さない。
+	// The pre-login CSRF token is not carried over.
 	if _, ok := values[CSRFTokenKey]; ok {
-		t.Error("ログイン前の CSRF トークンが新しいセッションへ持ち越されています")
+		t.Error("the pre-login CSRF token was carried into the new session")
 	}
 
-	// ID を振り直しても、ログイン前に控えた遷移先は失わない。
+	// Rotating the ID does not lose the target noted before login.
 	if got := rr.Header().Get("Location"); got != "/dashboard" {
 		t.Errorf("Location = %q, want /dashboard", got)
 	}

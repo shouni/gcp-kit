@@ -11,15 +11,16 @@ import (
 	"github.com/shouni/gcp-kit/auth"
 )
 
-// Routes は Login / Callback / Logout を、それぞれ loginPath() / callbackPath() /
-// logoutPath() で受ける http.Handler を返します。
+// Routes returns an http.Handler serving Login, Callback and Logout at
+// loginPath(), callbackPath() and logoutPath() respectively.
 //
-// 照合はリクエストの完全なパスに対して行うので、どのプレフィックスの下に置いても
-// 同じです（chi なら r.Handle("/auth/*", h.Routes())、標準の mux なら
-// mux.Handle("/auth/", h.Routes())）。3 つのパスを個別にマウントしていた頃は、
-// リダイレクト先を組み立てる側にも同じリテラルがあり、片方だけ変えてもビルドが通りました。
+// Matching runs against the request's full path, so it works the same under
+// any prefix (with chi, r.Handle("/auth/*", h.Routes()); with the standard
+// mux, mux.Handle("/auth/", h.Routes())). When the three paths were mounted
+// one by one, the code building the redirect URL held the same literal, and
+// changing only one of them still built.
 //
-// Login と Callback は GET だけを受けます。Logout はメソッドを限りません（Logout を参照）。
+// Login and Callback accept GET only. Logout accepts any method (see Logout).
 func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+h.loginPath(), h.Login)
@@ -28,26 +29,28 @@ func (h *Handler) Routes() http.Handler {
 	return mux
 }
 
-// Login は OAuth2 のログインを開始します。state と PKCE の verifier、
-// および redirect_to があれば戻り先を短命クッキーに残し、Google へ送ります。
+// Login starts the OAuth2 login. It leaves the state, the PKCE verifier and,
+// when redirect_to is given, the return target in short-lived cookies, then
+// sends the browser to Google.
 //
-// セッションの保存先には触れません。ログイン画面は誰でも開けるので、ここで実体を
-// 作ると未認証の相手がいくらでも書き込めることになります。
+// It never touches the session store. Anyone can open the login page, so
+// creating a stored session here would let unauthenticated callers write as
+// much as they like.
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	state, err := generateState()
 	if err != nil {
-		h.log().ErrorContext(r.Context(), "State生成失敗", "error", err)
+		h.log().ErrorContext(r.Context(), "failed to generate state", "error", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
 
-	// PKCE: 認可コードの横取りに備え、code_verifier をクライアント側に保持します。
+	// PKCE: the code_verifier is kept on the client side against interception of the authorization code.
 	verifier := oauth2.GenerateVerifier()
 
 	if redirectTo := r.URL.Query().Get("redirect_to"); redirectTo != "" {
-		// 同一オリジンの相対パスのみを載せます（オープンリダイレクタ対策）。
-		// エスケープするのはクッキー値として往復させるためで、読み出し側は
-		// 復元したうえで同じ判定をやり直します。
+		// Only a same-origin relative path is kept (against open redirects).
+		// It is escaped to survive the round trip as a cookie value; the
+		// reading side unescapes it and repeats the same check.
 		if isSafeRelativePath(redirectTo) {
 			h.setTemporaryCookie(w, DefaultRedirectCookie, url.QueryEscape(redirectTo))
 		} else {
@@ -58,8 +61,8 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	h.setTemporaryCookie(w, DefaultStateCookie, state)
 	h.setTemporaryCookie(w, DefaultVerifierCookie, verifier)
 
-	// PKCE のチャレンジは必ず載せます。prompt は指定があるときだけ足すので、
-	// state と code_challenge を上書きする余地はありません。
+	// The PKCE challenge is always included. prompt is added only when set, so
+	// there is no way for it to overwrite state or code_challenge.
 	authOpts := []oauth2.AuthCodeOption{oauth2.S256ChallengeOption(verifier)}
 	if prompt := h.promptParam(); prompt != "" {
 		authOpts = append(authOpts, oauth2.SetAuthURLParam("prompt", prompt))
@@ -69,20 +72,22 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, authURL, http.StatusTemporaryRedirect)
 }
 
-// Callback は Google からの戻りを受けます。state と PKCE verifier を確認し、
-// 認可コードをトークンへ交換し、許可された相手にセッションを発行します。
+// Callback receives the return from Google. It checks the state and the PKCE
+// verifier, exchanges the authorization code for a token, and issues a
+// session to an allowed user.
 func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	if !validateCallbackState(r) {
-		h.log().WarnContext(r.Context(), "CSRF攻撃の可能性を検知")
+		h.log().WarnContext(r.Context(), "OAuth state mismatch, possible CSRF attack")
 		http.Error(w, "Invalid state", http.StatusBadRequest)
 		return
 	}
 
-	// 利用者が同意画面でキャンセルした、あるいは prompt=none で対話が要った場合、
-	// Google は code ではなく error を付けて戻します。トークン交換へ進むと空の code で
-	// 失敗し、利用者の操作 1 つが ERROR ログ（ログベースのアラート）に載ります。
+	// When the user cancels on the consent screen, or prompt=none needed
+	// interaction, Google comes back with error instead of code. Proceeding to
+	// the token exchange fails on the empty code, and one user action ends up
+	// as an ERROR log line (and a log-based alert).
 	if oauthErr := r.URL.Query().Get("error"); oauthErr != "" {
-		h.log().WarnContext(r.Context(), "認可がエラーで戻されました",
+		h.log().WarnContext(r.Context(), "authorization returned an error",
 			"error", oauthErr, "description", r.URL.Query().Get("error_description"))
 		h.clearTemporaryCookies(w)
 		http.Error(w, "Login was not completed: "+oauthErr, http.StatusForbidden)
@@ -91,8 +96,8 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 
 	verifier, err := r.Cookie(DefaultVerifierCookie)
 	if err != nil || verifier.Value == "" {
-		// Login を経由していない、あるいはクッキーが期限切れ。再ログインさせます。
-		h.log().WarnContext(r.Context(), "PKCE verifier クッキーがありません")
+		// The flow did not go through Login, or the cookie expired. Make the user log in again.
+		h.log().WarnContext(r.Context(), "PKCE verifier cookie is missing")
 		h.clearTemporaryCookies(w)
 		http.Error(w, "Invalid state", http.StatusBadRequest)
 		return
@@ -102,7 +107,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 
 	token, err := h.exchangeCode(r, verifier.Value)
 	if err != nil {
-		h.log().ErrorContext(r.Context(), "トークン交換失敗", "error", err)
+		h.log().ErrorContext(r.Context(), "token exchange failed", "error", err)
 		http.Error(w, "Auth failed", http.StatusInternalServerError)
 		return
 	}
@@ -110,37 +115,38 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	email := h.resolveUserEmail(r, token)
 
 	if email == "" || !h.isAuthorized(email) {
-		h.log().WarnContext(r.Context(), "未許可ユーザーアクセス", "email", email)
+		h.log().WarnContext(r.Context(), "access by a user who is not allowed", "email", email)
 		http.Error(w, "Unauthorized", http.StatusForbidden)
 		return
 	}
 
 	if err := h.saveSessionAndRedirect(w, r, email); err != nil {
-		h.log().ErrorContext(r.Context(), "セッション保存失敗", "error", err)
+		h.log().ErrorContext(r.Context(), "failed to save session", "error", err)
 		http.Error(w, "Could not save session", http.StatusInternalServerError)
 		return
 	}
 }
 
-// Logout はセッションを破棄し、ログインページ（または redirect_to で指定された同一オリジンの
-// パス）へリダイレクトします。
+// Logout clears the session and redirects to the login page (or to the
+// same-origin path given in redirect_to).
 //
-// セッションの実体はストア側にあるので、これはサーバー側の失効です。クッキーを
-// 落とすだけでなく保存された実体も消えるため、盗まれたクッキーもその時点で無効です。
+// The session lives in the store, so this is server-side revocation. Not only
+// the cookie but the stored session goes too, so a stolen cookie is invalid
+// from that moment.
 //
-// ただし消えるのはこのアプリのセッションだけです。Google 側のログインは残るので、
-// ログイン画面へ送られた時点で何も聞かれずに承認が返ります。共用端末で「ログアウト」を
-// 成立させるには WithPrompt(PromptSelectAccount) が要ります。
+// Only this app's session goes, though. The Google-side login remains, so on
+// reaching the login page approval comes back without asking anything. Making
+// "log out" hold on a shared machine needs WithPrompt(PromptSelectAccount).
 func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	if err := h.clearSessionCookie(w, r); err != nil {
-		h.log().WarnContext(r.Context(), "ログアウト時のセッション破棄に失敗", "error", err)
+		h.log().WarnContext(r.Context(), "failed to clear session on logout", "error", err)
 	}
 
 	target := h.loginPath()
 	if redirectTo := r.URL.Query().Get("redirect_to"); isSafeRelativePath(redirectTo) {
 		target = redirectTo
 	}
-	//nolint:gosec // G710: target は isSafeRelativePath で同一オリジンの相対パスに限定済み
+	//nolint:gosec // G710: target is limited to a same-origin relative path by isSafeRelativePath
 	http.Redirect(w, r, target, http.StatusSeeOther)
 }
 
@@ -153,11 +159,12 @@ func validateCallbackState(r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(cookieState.Value), []byte(queryState)) == 1
 }
 
-// setTemporaryCookie は state / PKCE verifier のような短命のクッキーを発行します。
-// SameSite は Lax 固定です。Google からのコールバックはクロスサイトのトップレベル
-// GET ナビゲーションであるため、Strict にするとクッキーが送信されません。
+// setTemporaryCookie issues a short-lived cookie such as the state or the
+// PKCE verifier. SameSite is fixed at Lax: the callback from Google is a
+// cross-site top-level GET navigation, so with Strict the cookie would not be
+// sent.
 func (h *Handler) setTemporaryCookie(w http.ResponseWriter, name, value string) {
-	//nolint:gosec // G124: Secure はローカル開発(http)を許容するため設定値に従う。HttpOnly/SameSite は常に設定済み。
+	//nolint:gosec // G124: Secure follows the setting to allow local development over http. HttpOnly/SameSite are always set.
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,
 		Value:    value,
@@ -169,12 +176,13 @@ func (h *Handler) setTemporaryCookie(w http.ResponseWriter, name, value string) 
 	})
 }
 
-// clearTemporaryCookies は state / PKCE verifier / 戻り先クッキーを無効化します。
-// 属性（Path/SameSite など）は発行時と一致させる必要があります。破棄するのは応答側
-// だけなので、この後でも r からは読めます（Callback は戻り先を後で読みます）。
+// clearTemporaryCookies invalidates the state, PKCE verifier and return-target
+// cookies. The attributes (Path, SameSite and so on) must match those used
+// when they were issued. Only the response side is cleared, so r can still
+// read them afterwards (Callback reads the return target later).
 func (h *Handler) clearTemporaryCookies(w http.ResponseWriter) {
 	for _, name := range []string{DefaultStateCookie, DefaultVerifierCookie, DefaultRedirectCookie} {
-		//nolint:gosec // G124: Secure はローカル開発(http)を許容するため設定値に従う。HttpOnly/SameSite は常に設定済み。
+		//nolint:gosec // G124: Secure follows the setting to allow local development over http. HttpOnly/SameSite are always set.
 		http.SetCookie(w, &http.Cookie{
 			Name:     name,
 			Value:    "",
@@ -201,7 +209,7 @@ func (h *Handler) resolveUserEmail(r *http.Request, token *oauth2.Token) string 
 	var err error
 	email, err = h.fetchUserEmail(r.Context(), token)
 	if err != nil {
-		h.log().WarnContext(r.Context(), "API経由でのユーザーメールアドレス取得に失敗しました", "error", err)
+		h.log().WarnContext(r.Context(), "failed to fetch the user email address from the API", "error", err)
 	}
 	return email
 }
@@ -214,14 +222,14 @@ func (h *Handler) extractEmailFromIDToken(r *http.Request, token *oauth2.Token) 
 
 	payload, err := idtoken.Validate(r.Context(), rawIDToken, h.oauthConfig.ClientID)
 	if err != nil {
-		h.log().DebugContext(r.Context(), "IDトークンの検証に失敗しました", "error", err)
+		h.log().DebugContext(r.Context(), "ID token validation failed", "error", err)
 		return ""
 	}
 
-	// UserInfo API 経由 (fetchUserEmail) やサービス間検証と同じ基準を適用します。
+	// Applies the same standard as the UserInfo API path (fetchUserEmail) and service-to-service verification.
 	emailClaim, err := auth.VerifiedEmail(payload.Claims)
 	if err != nil {
-		h.log().WarnContext(r.Context(), "IDトークンのメールアドレスを採用できません", "error", err)
+		h.log().WarnContext(r.Context(), "cannot accept the email address in the ID token", "error", err)
 		return ""
 	}
 	return emailClaim
@@ -233,7 +241,7 @@ func (h *Handler) saveSessionAndRedirect(w http.ResponseWriter, r *http.Request,
 		return err
 	}
 
-	//nolint:gosec // G710: targetURL は isSafeRelativePath で同一オリジンの相対パスに限定済み
+	//nolint:gosec // G710: targetURL is limited to a same-origin relative path by isSafeRelativePath
 	http.Redirect(w, r, targetURL, http.StatusSeeOther)
 	return nil
 }

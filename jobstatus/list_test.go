@@ -8,9 +8,9 @@ import (
 	"cloud.google.com/go/firestore"
 )
 
-// TestNewListOptions は、絞り込みの組み立てを固定します。
+// TestNewListOptions pins how the filters are assembled.
 //
-// List そのものはエミュレータが要るので、ここで確かめるのは Firestore へ渡る前の形です。
+// List itself needs the emulator, so what is checked here is the shape before it reaches Firestore.
 func TestNewListOptions(t *testing.T) {
 	t.Parallel()
 
@@ -20,12 +20,12 @@ func TestNewListOptions(t *testing.T) {
 		want listOptions
 	}{
 		{
-			name: "既定は queued_at の降順",
+			name: "default is queued_at descending",
 			want: listOptions{orderBy: "queued_at", descending: true},
 		},
 		{
-			// 1 つの一覧に複数のコマンドが対応することがある。
-			name: "コマンドは重ねられる",
+			// One listing can correspond to several commands.
+			name: "commands accumulate",
 			opts: []ListOption{WithCommand("compose"), WithCommand("generate_from_recipe")},
 			want: listOptions{
 				commands: []string{"compose", "generate_from_recipe"},
@@ -33,8 +33,8 @@ func TestNewListOptions(t *testing.T) {
 			},
 		},
 		{
-			// 空を通すと Where("command", "==", "") になり、一覧が全部消える。
-			name: "空のコマンドは無視する",
+			// Letting empty through gives Where("command", "==", ""), and the whole listing disappears.
+			name: "ignores empty commands",
 			opts: []ListOption{WithCommand("compose", "", "generate_from_recipe")},
 			want: listOptions{
 				commands: []string{"compose", "generate_from_recipe"},
@@ -42,7 +42,7 @@ func TestNewListOptions(t *testing.T) {
 			},
 		},
 		{
-			name: "サービス固有のフィールドは複数指定できる",
+			name: "accepts several service-specific fields",
 			opts: []ListOption{WithField("title_applied", false), WithField("visual_mode", "anime")},
 			want: listOptions{
 				fields:  []fieldFilter{{path: "title_applied", value: false}, {path: "visual_mode", value: "anime"}},
@@ -50,18 +50,18 @@ func TestNewListOptions(t *testing.T) {
 			},
 		},
 		{
-			// パスが空だと Firestore がエラーを返す。オプション側で落とす。
-			name: "空のパスは無視する",
+			// Firestore returns an error on an empty path, so the option drops it.
+			name: "ignores empty paths",
 			opts: []ListOption{WithField("", true)},
 			want: listOptions{orderBy: "queued_at", descending: true},
 		},
 		{
-			name: "状態と並び順は上書きできる",
+			name: "state and order can be overridden",
 			opts: []ListOption{WithState(StateFailed), WithOrderBy("updated_at", false)},
 			want: listOptions{state: StateFailed, orderBy: "updated_at"},
 		},
 		{
-			name: "nil のオプションは読み飛ばす",
+			name: "skips nil options",
 			opts: []ListOption{nil, WithState(StateQueued)},
 			want: listOptions{state: StateQueued, orderBy: "queued_at", descending: true},
 		},
@@ -77,7 +77,7 @@ func TestNewListOptions(t *testing.T) {
 				t.Errorf("state = %q, want %q", got.state, tt.want.state)
 			}
 			if got.orderBy != tt.want.orderBy || got.descending != tt.want.descending {
-				t.Errorf("並び順 = (%q, %t), want (%q, %t)",
+				t.Errorf("order = (%q, %t), want (%q, %t)",
 					got.orderBy, got.descending, tt.want.orderBy, tt.want.descending)
 			}
 			if !slices.Equal(got.commands, tt.want.commands) {
@@ -90,17 +90,17 @@ func TestNewListOptions(t *testing.T) {
 	}
 }
 
-// TestListAndLatestRejectAnUnconfiguredStore は、両方の一覧が設定不足を同じように
-// 断ることを確かめます。
+// TestListAndLatestRejectAnUnconfiguredStore checks that both listings refuse
+// a missing configuration the same way.
 //
-// 組み立てを共有していても、入口の検査を片方でしか通していなければ、未設定の Store が
-// nil クライアントのまま Firestore を呼びに行きます。
+// Even with shared assembly, if only one of them ran the entry check, an
+// unconfigured Store would go to call Firestore with a nil client.
 func TestListAndLatestRejectAnUnconfiguredStore(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]*Store[Status]{
-		"クライアントが無い":  {},
-		"コレクション名が無い": {client: &firestore.Client{}},
+		"no client":          {},
+		"no collection name": {client: &firestore.Client{}},
 	}
 
 	for name, store := range tests {
@@ -117,12 +117,13 @@ func TestListAndLatestRejectAnUnconfiguredStore(t *testing.T) {
 	}
 }
 
-// TestFilteredQueryAppliesEveryFilter は、どのオプションもクエリに反映されることを
-// 確かめます。
+// TestFilteredQueryAppliesEveryFilter checks that every option is reflected in
+// the query.
 //
-// 実際に投げるにはエミュレータが要るので、組み立てたクエリを直列化して、絞り込み無しの
-// ものと違う形になることで見ます。組み立てが件数集計と本体取得で別々に書かれていた頃は、
-// 片方にだけ条件を足して「集計は全件・ページは絞り込み後」という食い違いを作れました。
+// Running it for real needs the emulator, so the built query is serialised and
+// checked to differ from the unfiltered one. When the count and the fetch were
+// assembled separately, a condition could be added to only one of them,
+// producing "the count covers everything, the page is filtered".
 func TestFilteredQueryAppliesEveryFilter(t *testing.T) {
 	t.Parallel()
 
@@ -134,7 +135,7 @@ func TestFilteredQueryAppliesEveryFilter(t *testing.T) {
 		if err != nil {
 			t.Fatalf("filteredQuery() error = %v", err)
 		}
-		// firestore.Query は比較可能ではないので、直列化した結果で見ます。
+		// firestore.Query is not comparable, so the serialised result is compared.
 		encoded, err := query.Serialize()
 		if err != nil {
 			t.Fatalf("Serialize() error = %v", err)
@@ -145,22 +146,22 @@ func TestFilteredQueryAppliesEveryFilter(t *testing.T) {
 	unfiltered := serialize(t)
 
 	for name, opt := range map[string]ListOption{
-		"状態":          WithState(StateSucceeded),
-		"コマンド 1 つ":    WithCommand("compose"),
-		"コマンド 2 つ":    WithCommand("compose", "generate_from_recipe"),
-		"サービス固有フィールド": WithField("title_pending", false),
+		"state":                  WithState(StateSucceeded),
+		"one command":            WithCommand("compose"),
+		"two commands":           WithCommand("compose", "generate_from_recipe"),
+		"service-specific field": WithField("title_pending", false),
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
 			if slices.Equal(serialize(t, opt), unfiltered) {
-				t.Error("オプションがクエリに反映されていません")
+				t.Error("the option is not reflected in the query")
 			}
 		})
 	}
 
-	// 並べ替えは filteredQuery では付きません（件数集計は並べ替えを要求しないため）。
+	// filteredQuery adds no ordering (the count does not need one).
 	if !slices.Equal(serialize(t, WithOrderBy("updated_at", false)), unfiltered) {
-		t.Error("絞り込みだけのクエリに並べ替えが混ざっています")
+		t.Error("ordering leaked into the filter-only query")
 	}
 }

@@ -10,9 +10,9 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// FuzzBuildLoginRedirectURL は、オープンリダイレクタ脆弱性の不変条件を検証します。
-// どんな入力に対しても、生成されるリダイレクト先はログインパスで始まる相対URLであり、
-// 外部ホストへ遷移させてはいけません。
+// FuzzBuildLoginRedirectURL checks the open-redirect invariant. For any input,
+// the generated redirect must be a relative URL starting with the login path
+// and must never lead to an external host.
 func FuzzBuildLoginRedirectURL(f *testing.F) {
 	seeds := []string{
 		"/private?x=1",
@@ -33,8 +33,8 @@ func FuzzBuildLoginRedirectURL(f *testing.F) {
 	h := &Handler{}
 
 	f.Fuzz(func(t *testing.T, target string) {
-		// httptest.NewRequest は不正なターゲットでパニックするため、
-		// リクエストとして成立するものだけを対象にします。
+		// httptest.NewRequest panics on an invalid target, so only inputs
+		// that form a valid request are used.
 		req, err := http.NewRequest(http.MethodGet, "http://example.com"+target, nil)
 		if err != nil {
 			t.Skip()
@@ -53,15 +53,15 @@ func FuzzBuildLoginRedirectURL(f *testing.F) {
 		if parsed.Scheme != "" || parsed.Host != "" {
 			t.Fatalf("buildLoginRedirectURL(%q) = %q, which points off-origin", target, got)
 		}
-		// "//host" 形式はブラウザにスキーマ相対URLとして解釈されます。
+		// Browsers read the "//host" form as a scheme-relative URL.
 		if strings.HasPrefix(got, "//") {
 			t.Fatalf("buildLoginRedirectURL(%q) = %q, which is protocol-relative", target, got)
 		}
 	})
 }
 
-// FuzzIsSafeRelativePath は、リダイレクト先として受理した文字列が
-// 常に同一オリジンの相対パスであることを検証します。
+// FuzzIsSafeRelativePath checks that a string accepted as a redirect target is
+// always a same-origin relative path.
 func FuzzIsSafeRelativePath(f *testing.F) {
 	for _, seed := range []string{"/ok", "//evil.com", "https://evil.com", "", "/", "\\/evil.com", "/\\evil.com", "/a\r\nSet-Cookie: x=1"} {
 		f.Add(seed)
@@ -82,15 +82,15 @@ func FuzzIsSafeRelativePath(f *testing.F) {
 		if !strings.HasPrefix(target, "/") || strings.HasPrefix(target, "//") {
 			t.Fatalf("isSafeRelativePath(%q) = true, but it is not a plain absolute path", target)
 		}
-		// バックスラッシュを '/' と正規化するブラウザでは "/\host" が
-		// スキーマ相対 URL として解釈されます。
+		// Browsers that normalise a backslash to '/' read "/\host" as a
+		// scheme-relative URL.
 		if strings.ContainsRune(target, '\\') {
 			t.Fatalf("isSafeRelativePath(%q) = true, but it contains a backslash", target)
 		}
 	})
 }
 
-// TestIsSafeRelativePath は、リダイレクト先の判定を代表的な入力で固定します。
+// TestIsSafeRelativePath pins the redirect-target check on representative inputs.
 func TestIsSafeRelativePath(t *testing.T) {
 	t.Parallel()
 
@@ -107,10 +107,10 @@ func TestIsSafeRelativePath(t *testing.T) {
 		{target: "//evil.com", want: false},
 		{target: "///evil.com", want: false},
 		{target: "https://evil.com/x", want: false},
-		// バックスラッシュを '/' に正規化するブラウザ向けの防御。
+		// Defence against browsers that normalise a backslash to '/'.
 		{target: `/\evil.com`, want: false},
 		{target: `\\evil.com`, want: false},
-		// 制御文字はヘッダー分割の材料になり得ます。
+		// Control characters can be material for header splitting.
 		{target: "/a\r\nSet-Cookie: x=1", want: false},
 		{target: "/a\nb", want: false},
 	}
@@ -125,8 +125,8 @@ func TestIsSafeRelativePath(t *testing.T) {
 	}
 }
 
-// TestLoginRejectsBackslashRedirect は、Login が "/\evil.com" のような
-// リダイレクト先を戻り先クッキーに載せないことを確認します。
+// TestLoginRejectsBackslashRedirect checks that Login never puts a redirect
+// target like "/\evil.com" into the return-target cookie.
 func TestLoginRejectsBackslashRedirect(t *testing.T) {
 	t.Parallel()
 
@@ -148,9 +148,9 @@ func TestLoginRejectsBackslashRedirect(t *testing.T) {
 	}
 }
 
-// TestRedirectTargetRejectsTamperedCookie は、戻り先クッキーが書き換えられていても
-// 外部サイトへ送らないことを確認します。クッキーは相手が差し替えられるので、
-// 書き込み時の検証だけでは足りません。
+// TestRedirectTargetRejectsTamperedCookie checks that a tampered return-target
+// cookie still never sends the user to an external site. The other side can
+// replace the cookie, so checking on write alone is not enough.
 func TestRedirectTargetRejectsTamperedCookie(t *testing.T) {
 	t.Parallel()
 
@@ -158,8 +158,8 @@ func TestRedirectTargetRejectsTamperedCookie(t *testing.T) {
 		url.QueryEscape("//evil.com"),
 		url.QueryEscape(`/\evil.com`),
 		url.QueryEscape("https://evil.com/"),
-		"%zz",        // QueryUnescape が失敗する値
-		"//evil.com", // エスケープすらされていない値
+		"%zz",        // a value QueryUnescape fails on
+		"//evil.com", // a value not even escaped
 	} {
 		req := httptest.NewRequest(http.MethodGet, "/auth/callback", nil)
 		req.AddCookie(&http.Cookie{Name: DefaultRedirectCookie, Value: value})

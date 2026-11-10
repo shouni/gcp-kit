@@ -1,4 +1,4 @@
-// Package tasks は、Cloud Tasks へのタスク投入（Enqueue）を行うユーティリティを提供します。
+// Package tasks provides utilities for enqueuing tasks to Cloud Tasks.
 package tasks
 
 import (
@@ -21,60 +21,68 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// taskIDPattern は Cloud Tasks が受け付けるタスクIDの文字種と長さです。
-// 不正な値を API 往復させずに検出するため、投入前にローカルで検証します。
+// taskIDPattern is the character set and length Cloud Tasks accepts for a
+// task ID. It is checked locally before enqueuing, to catch a bad value
+// without an API round trip.
 var taskIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,500}$`)
 
-// createTaskTimeout は CreateTask 1 回分の RPC に与える上限です。
-// Cloud Tasks はリクエストのデッドラインが 30 秒より先だと InvalidArgument を返すため、
-// 30 秒より短く取る必要があります。
+// createTaskTimeout bounds a single CreateTask RPC. Cloud Tasks returns
+// InvalidArgument when a request's deadline is more than 30 seconds out, so it
+// has to be shorter than 30 seconds.
 const createTaskTimeout = 20 * time.Second
 
-// Config は Enqueuer の初期化に必要な設定です。
+// Config holds the settings needed to initialise an Enqueuer.
 type Config struct {
 	ProjectID           string
 	LocationID          string
 	QueueID             string
-	WorkerURL           string // タスクの送信先。WorkerPath を使うならサービスの URL だけ
-	ServiceAccountEmail string // OIDCトークン生成用
-	// WorkerPath は、WorkerURL に継ぎ足す受信側のルートです（例: "/tasks/run"）。
+	WorkerURL           string // where tasks are sent; just the service URL when WorkerPath is used
+	ServiceAccountEmail string // for minting the OIDC token
+	// WorkerPath is the receiving route appended to WorkerURL (for example
+	// "/tasks/run").
 	//
-	// Cloud Tasks の配送先はワーカーが登録したルートと一字一句一致していないと届かず、
-	// 末尾のスラッシュ 1 つで全件 404 になります。それを避ける結合と正規化を、5 つの
-	// アプリが同じ 20 行で持っていたので、ここに置きます。WorkerURL が既にこのパスで
-	// 終わっていれば二重に継ぎ足さず、末尾のスラッシュは落とします。
+	// A Cloud Tasks target must match the worker's registered route byte for
+	// byte, or nothing arrives; one trailing slash turns every task into a
+	// 404. Five apps carried the same 20 lines of joining and normalising to
+	// avoid that, so it lives here. If WorkerURL already ends in this path it
+	// is not appended twice, and a trailing slash is dropped.
 	//
-	// 空なら WorkerURL をそのまま配送先にします。
+	// Empty means WorkerURL is the target as is.
 	WorkerPath string
-	// Audience はトークン検証用の audience です。空の場合は WorkerURL（WorkerPath を
-	// 継ぎ足す前の値）が使われます。受信側 (oidc.New に渡す audience) と一致させてください。
+	// Audience is the audience for token verification. When empty, WorkerURL
+	// (before WorkerPath is appended) is used. Match it to the receiving side
+	// (the audience passed to oidc.New).
 	Audience string
-	// DispatchDeadline は、このキューへ投入する全タスクに適用する応答待ち時間です。
-	// 未指定 (0) は Cloud Tasks の既定である 10 分を意味します。
+	// DispatchDeadline is how long to wait for a response, applied to every
+	// task enqueued to this queue. Unset (0) means Cloud Tasks' default of 10
+	// minutes.
 	//
-	// 「待つ時間」ではなく「ワーカーの実行時間の実効上限」である点に注意してください。
-	// これを超えるとワーカーがまだ処理中でも Cloud Tasks は待受を打ち切り、
-	// リトライ対象になります。Cloud Run の timeout をいくら長くしてもこの上限は動かないため、
-	// 長時間ジョブでは必ず明示してください。上限は HTTP ターゲットで 30 分です。
+	// Note that it is not "time to wait" but the worker's effective run-time
+	// limit. Past it, Cloud Tasks stops waiting even while the worker is still
+	// processing, and the task becomes subject to retry. No Cloud Run timeout
+	// moves this limit, so always set it explicitly for long jobs. The maximum
+	// for HTTP targets is 30 minutes.
 	//
-	// タスク個別に変えたい場合は WithDispatchDeadline を使ってください（そちらが優先されます）。
+	// To change it for a single task, use WithDispatchDeadline (which takes
+	// precedence).
 	DispatchDeadline time.Duration
-	// Logger は本パッケージが使うロガーです。未指定の場合は slog.Default() です。
+	// Logger is the logger this package uses. It defaults to slog.Default().
 	Logger *slog.Logger
 }
 
-// DefaultDispatchDeadline は、Config.DispatchDeadline を指定しなかったときに
-// Cloud Tasks 側で効く既定値です。
+// DefaultDispatchDeadline is the default Cloud Tasks applies when
+// Config.DispatchDeadline is not set.
 const DefaultDispatchDeadline = 10 * time.Minute
 
-// maxDispatchDeadline は HTTP ターゲットのタスクに指定できる応答待ち時間の上限です。
-// 超えると Cloud Tasks が InvalidArgument を返すため、投入前にローカルで弾きます。
+// maxDispatchDeadline is the longest dispatch deadline an HTTP-target task
+// may have. Beyond it Cloud Tasks returns InvalidArgument, so it is rejected
+// locally before enqueuing.
 const maxDispatchDeadline = 30 * time.Minute
 
-// minDispatchDeadline は同じく下限です。
+// minDispatchDeadline is the corresponding minimum.
 const minDispatchDeadline = 15 * time.Second
 
-// Enqueuer は任意の型 T のペイロードを Cloud Tasks に投入する汎用構造体です。
+// Enqueuer is a generic type that enqueues payloads of any type T to Cloud Tasks.
 type Enqueuer[T any] struct {
 	client    taskClient
 	cfg       Config
@@ -99,9 +107,9 @@ func (c cloudTasksClient) Close() error {
 	return c.client.Close()
 }
 
-// NewEnqueuer は新しい Enqueuer を生成します。
-// 生成されたインスタンスは内部で gRPC コネクションプールを保持するため、
-// アプリケーション全体でシングルトンとして再利用することが推奨されます。
+// NewEnqueuer creates a new Enqueuer. The instance holds a gRPC connection
+// pool internally, so reusing it as a singleton across the application is
+// recommended.
 func NewEnqueuer[T any](ctx context.Context, cfg Config) (*Enqueuer[T], error) {
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
@@ -114,7 +122,7 @@ func NewEnqueuer[T any](ctx context.Context, cfg Config) (*Enqueuer[T], error) {
 
 	enqueuer, err := newEnqueuerWithClient[T](cfg, cloudTasksClient{client: client})
 	if err != nil {
-		// コネクションを取りこぼさないよう、生成済みのクライアントを閉じます。
+		// Close the client already created so the connection is not leaked.
 		if closeErr := client.Close(); closeErr != nil {
 			err = errors.Join(err, fmt.Errorf("close cloud tasks client: %w", closeErr))
 		}
@@ -151,8 +159,8 @@ func newEnqueuerWithClient[T any](cfg Config, client taskClient) (*Enqueuer[T], 
 	}, nil
 }
 
-// workerTargetURL は、WorkerURL に WorkerPath を継ぎ足した配送先を返します。
-// 挙動は Config.WorkerPath のとおりです。
+// workerTargetURL returns the target built by appending WorkerPath to
+// WorkerURL, behaving as described on Config.WorkerPath.
 func workerTargetURL(workerURL, workerPath string) (string, error) {
 	workerPath = strings.TrimSpace(workerPath)
 	if workerPath == "" {
@@ -163,7 +171,7 @@ func workerTargetURL(workerURL, workerPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("tasks config WorkerURL is invalid: %w", err)
 	}
-	// 末尾スラッシュは落とします。ルータは登録どおりのパスでしか一致しません。
+	// Drop a trailing slash: routers match only the path exactly as registered.
 	if trimmed := strings.TrimSuffix(parsed.Path, "/"); strings.HasSuffix(trimmed, workerPath) {
 		parsed.Path = trimmed
 		return parsed.String(), nil
@@ -183,7 +191,7 @@ func (e *Enqueuer[T]) log() *slog.Logger {
 	return slog.Default()
 }
 
-// EnqueueOption は個別のタスク投入時の任意設定です。
+// EnqueueOption is an optional setting for one enqueue.
 type EnqueueOption func(*enqueueOptions)
 
 type enqueueOptions struct {
@@ -193,35 +201,35 @@ type enqueueOptions struct {
 	headers          map[string]string
 }
 
-// WithTaskID は、taskID から導出した決定的なタスク名を設定します。
-// 同じ taskID で複数回投入しても、Cloud Tasks が2回目以降を ALREADY_EXISTS で
-// 拒否するため、実際に作られるタスクは1つだけになります（成功として扱われます）。
+// WithTaskID sets a deterministic task name derived from taskID. Enqueuing
+// with the same taskID several times creates only one task, because Cloud
+// Tasks rejects the later ones with ALREADY_EXISTS (treated as success).
 func WithTaskID(taskID string) EnqueueOption {
 	return func(o *enqueueOptions) { o.taskID = taskID }
 }
 
-// WithScheduleTime は、タスクを実行する時刻を指定します（最大30日先まで）。
+// WithScheduleTime sets when the task runs (up to 30 days ahead).
 func WithScheduleTime(t time.Time) EnqueueOption {
 	return func(o *enqueueOptions) { o.scheduleTime = t }
 }
 
-// WithDelay は、現在時刻から d 後にタスクを実行するよう指定します。
+// WithDelay makes the task run d after now.
 func WithDelay(d time.Duration) EnqueueOption {
 	return func(o *enqueueOptions) { o.scheduleTime = time.Now().Add(d) }
 }
 
-// WithDispatchDeadline は、このタスクに限ってワーカーの応答を待つ時間を指定し、
-// Config.DispatchDeadline を上書きします。
-// この時間を超えるとリトライ対象になります（HTTPターゲットは15秒〜30分）。
+// WithDispatchDeadline sets how long to wait for the worker's response for
+// this task only, overriding Config.DispatchDeadline. Past it, the task
+// becomes subject to retry (15 seconds to 30 minutes for HTTP targets).
 func WithDispatchDeadline(d time.Duration) EnqueueOption {
 	return func(o *enqueueOptions) { o.dispatchDeadline = d }
 }
 
-// WithHeader は、ワーカーへのリクエストに付与するヘッダーを追加します。
+// WithHeader adds a header to the request sent to the worker.
 //
-// Content-Type の既定は application/json で、同じキーを渡せば上書きできます。
-// Authorization だけは指定しても効きません。OIDC トークンを設定してあるため、
-// Cloud Tasks が配送時にこのヘッダーを上書きします。
+// Content-Type defaults to application/json and can be overridden with the
+// same key. Authorization alone has no effect: an OIDC token is configured,
+// so Cloud Tasks overwrites that header on delivery.
 func WithHeader(key, value string) EnqueueOption {
 	return func(o *enqueueOptions) {
 		if o.headers == nil {
@@ -231,33 +239,39 @@ func WithHeader(key, value string) EnqueueOption {
 	}
 }
 
-// Enqueue はタスクを Cloud Tasks キューに投入します。名前は Cloud Tasks が自動採番するため、
-// 同じ内容で複数回呼び出すと重複したタスクが作成されます。呼び出し側の再試行等で同じ論理的な
-// タスクが二重に作られてはいけない場合は EnqueueWithName を使ってください。
+// Enqueue adds a task to the Cloud Tasks queue. Cloud Tasks assigns the name,
+// so calling it several times with the same content creates duplicate tasks.
+// When the same logical task must not be created twice (on a caller's retry,
+// for example), use EnqueueWithName.
 func (e *Enqueuer[T]) Enqueue(ctx context.Context, payload T) error {
 	_, err := e.EnqueueWithOptions(ctx, payload)
 	return err
 }
 
-// EnqueueWithName は、taskID から導出した決定的な名前でタスクを Cloud Tasks キューに投入します。
-// taskID には英数字とハイフン・アンダースコアのみを含む短い識別子を渡してください
-// （例: jobID + リビジョン/次カット番号）。同じ taskID で複数回呼び出しても、Cloud Tasks が
-// 2回目以降を ALREADY_EXISTS で拒否するため、実際に作られるタスクは1つだけです
-// （このメソッドはその ALREADY_EXISTS を成功として扱います）。
+// EnqueueWithName adds a task to the Cloud Tasks queue under a deterministic
+// name derived from taskID. Pass a short identifier of letters, digits,
+// hyphens and underscores only (for example jobID + revision / next cut
+// number). Calling it several times with the same taskID creates only one
+// task, because Cloud Tasks rejects the later ones with ALREADY_EXISTS (this
+// method treats that ALREADY_EXISTS as success).
 //
-// 呼び出し元が「同じ論理的な続きタスクを重複して作らない」ことを保証したい場合
-// （例: Cloud Tasks の at-least-once 配信により、続きタスクを enqueue する処理自体が
-// 再実行される可能性がある場合）に使います。ただし、これは重複した「タスク作成」を防ぐだけで、
-// 既存タスクの重複「配信」（同じタスクが2回ワーカーに届くこと）までは防げません。
-// 配信重複への対策は、ワーカー側で処理済み状態を確認してから実処理を行う（冪等な処理）
-// 必要があります。worker.MetadataFromContext で再試行回数を参照できます。
+// Use it when the caller must guarantee "never create the same logical
+// continuation task twice" (for example when, under Cloud Tasks'
+// at-least-once delivery, the code enqueuing the continuation may itself run
+// again). It prevents duplicate task *creation* only, not duplicate
+// *delivery* of an existing task (the same task reaching the worker twice).
+// Against duplicate delivery the worker has to check whether the work is
+// already done before doing it (idempotent processing).
+// worker.MetadataFromContext exposes the retry count.
 //
-// なお、名前付きタスクは Cloud Tasks 側で重複排除のためのインデックスが必要になるため
-// キューのスループットが低下し、また削除・完了したタスクの名前はしばらく再利用できません。
+// Named tasks need a deduplication index on the Cloud Tasks side, which
+// lowers the queue's throughput, and names of deleted or completed tasks
+// cannot be reused for a while.
 //
-// 空の taskID はエラーです。EnqueueWithOptions では空が「名前指定なし」を意味するため、
-// そのまま渡すと名前なしのタスクが作られ、呼び出し側の ID 計算が空を返しただけで
-// 重複排除がエラーも出さずに効かなくなります。
+// An empty taskID is an error. In EnqueueWithOptions an empty one means "no
+// name", so passing it through would create an unnamed task, and a caller's
+// ID computation merely returning empty would silently disable
+// deduplication.
 func (e *Enqueuer[T]) EnqueueWithName(ctx context.Context, taskID string, payload T) error {
 	if err := validateTaskID(taskID); err != nil {
 		return err
@@ -266,8 +280,9 @@ func (e *Enqueuer[T]) EnqueueWithName(ctx context.Context, taskID string, payloa
 	return err
 }
 
-// EnqueueWithOptions はオプション付きでタスクを投入し、作成されたタスクの完全修飾名を返します。
-// WithTaskID を指定した場合、ALREADY_EXISTS は成功として扱われ、その名前が返ります。
+// EnqueueWithOptions enqueues a task with options and returns the created
+// task's fully qualified name. With WithTaskID, ALREADY_EXISTS is treated as
+// success and that name is returned.
 func (e *Enqueuer[T]) EnqueueWithOptions(ctx context.Context, payload T, opts ...EnqueueOption) (string, error) {
 	var options enqueueOptions
 	for _, opt := range opts {
@@ -293,9 +308,9 @@ func (e *Enqueuer[T]) EnqueueWithOptions(ctx context.Context, payload T, opts ..
 
 	createdName, err := e.createTask(ctx, name, body, options)
 	if status.Code(err) == codes.AlreadyExists {
-		// 期待される（異常ではない）経路: 呼び出し元の再試行等で同じ taskID が
-		// 2回目以降に来た状態。createTask 側は ERROR ログを出さずに返しているため、
-		// ここで INFO として記録するだけでよい。
+		// An expected (not abnormal) path: the same taskID arriving a second
+		// time, on a caller's retry or the like. createTask returned without
+		// an ERROR log, so recording it as INFO here is enough.
 		e.log().InfoContext(ctx, "Task already enqueued, treating as success", "task", name)
 		return name, nil
 	}
@@ -310,7 +325,7 @@ func (e *Enqueuer[T]) EnqueueWithOptions(ctx context.Context, payload T, opts ..
 	return createdName, nil
 }
 
-// validateTaskID は Cloud Tasks に送る前にタスクIDの形式を検証します。
+// validateTaskID checks the task ID's format before it is sent to Cloud Tasks.
 func validateTaskID(taskID string) error {
 	if strings.TrimSpace(taskID) == "" {
 		return errors.New("taskID must not be empty")
@@ -333,7 +348,7 @@ func (e *Enqueuer[T]) createTask(ctx context.Context, name string, body []byte, 
 				Url:        e.targetURL,
 				Body:       body,
 				Headers:    headers,
-				// OIDC 認証の設定
+				// OIDC authentication
 				AuthorizationHeader: &cloudtaskspb.HttpRequest_OidcToken{
 					OidcToken: &cloudtaskspb.OidcToken{
 						ServiceAccountEmail: e.cfg.ServiceAccountEmail,
@@ -346,7 +361,7 @@ func (e *Enqueuer[T]) createTask(ctx context.Context, name string, body []byte, 
 	if !options.scheduleTime.IsZero() {
 		task.ScheduleTime = timestamppb.New(options.scheduleTime)
 	}
-	// タスク個別の指定が無ければキュー共通の設定を使います。
+	// Without a per-task value, the queue-wide setting is used.
 	deadline := options.dispatchDeadline
 	if deadline <= 0 {
 		deadline = e.cfg.DispatchDeadline
@@ -355,11 +370,12 @@ func (e *Enqueuer[T]) createTask(ctx context.Context, name string, body []byte, 
 		task.DispatchDeadline = durationpb.New(deadline)
 	}
 
-	// Cloud Tasks はリクエストのデッドラインが 30 秒より先だと、タスクの内容に関係なく
-	// InvalidArgument で拒否します。呼び出し元はジョブ全体の寿命を表す長い context
-	// （ワーカーのパイプライン上限など）をそのまま渡してくるのが自然なので、投入 RPC
-	// 用の期限はここで切り直します。元の期限のほうが早ければ WithTimeout がそちらを
-	// 残すため、短い context を渡している呼び出し元の意図は変わりません。
+	// Cloud Tasks rejects a request whose deadline is more than 30 seconds
+	// out with InvalidArgument, whatever the task contains. Callers naturally
+	// pass the long context covering the whole job's life (the worker's
+	// pipeline limit, for example) straight in, so the enqueue RPC's deadline
+	// is cut again here. If the original deadline is earlier, WithTimeout
+	// keeps it, so a caller passing a short context gets what it intended.
 	ctx, cancel := context.WithTimeout(ctx, createTaskTimeout)
 	defer cancel()
 
@@ -376,7 +392,7 @@ func (e *Enqueuer[T]) createTask(ctx context.Context, name string, body []byte, 
 }
 
 func validateConfig(cfg Config) error {
-	// エラーメッセージを再現可能にするため、map ではなく順序の定まったスライスで検証します。
+	// Checked over an ordered slice rather than a map so the error message is reproducible.
 	required := []struct {
 		name  string
 		value string
@@ -399,16 +415,16 @@ func validateConfig(cfg Config) error {
 		return errors.New("tasks config WorkerURL must be an absolute URL")
 	}
 
-	// パスだけを受けます。クエリや別ホストを混ぜると、どちらの値が配送先を決めるのか
-	// 読めなくなります。
+	// Only a path is accepted. Mixing in a query or another host would make it
+	// unclear which value decides the target.
 	if p := strings.TrimSpace(cfg.WorkerPath); p != "" {
 		if !strings.HasPrefix(p, "/") || strings.ContainsAny(p, "?#") {
 			return errors.New("tasks config WorkerPath must be an absolute path without query or fragment")
 		}
 	}
 
-	// Audience は未指定なら WorkerURL を使うため必須ではありませんが、
-	// 明示された場合は絶対URLである必要があります。
+	// Audience is optional, since WorkerURL is used when it is unset, but
+	// when given it must be an absolute URL.
 	if audience := strings.TrimSpace(cfg.Audience); audience != "" {
 		audienceURL, err := url.Parse(audience)
 		if err != nil || audienceURL.Scheme == "" || audienceURL.Host == "" {
@@ -423,8 +439,8 @@ func validateConfig(cfg Config) error {
 	return nil
 }
 
-// validateDispatchDeadline は応答待ち時間が Cloud Tasks の受け付ける範囲かを検査します。
-// 0 は「指定しない」を意味するため許容します。
+// validateDispatchDeadline checks that the dispatch deadline is within the
+// range Cloud Tasks accepts. 0 means "not set" and is allowed.
 func validateDispatchDeadline(d time.Duration) error {
 	if d == 0 {
 		return nil
@@ -436,7 +452,7 @@ func validateDispatchDeadline(d time.Duration) error {
 	return nil
 }
 
-// Close はクライアントを閉じ、保持しているリソース（コネクションなど）を解放します。
+// Close closes the client and releases the resources it holds (connections and so on).
 func (e *Enqueuer[T]) Close() error {
 	return e.client.Close()
 }

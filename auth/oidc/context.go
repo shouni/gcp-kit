@@ -6,19 +6,19 @@ import (
 	"google.golang.org/api/idtoken"
 )
 
-// contextKey は本パッケージ専用のコンテキストキー型です。
-// 他パッケージのキーと衝突しないよう、非公開型を使います。
+// contextKey is the context key type private to this package. It is
+// unexported so it cannot collide with other packages' keys.
 type contextKey int
 
 const payloadContextKey contextKey = iota
 
-// withPayload は検証済み OIDC トークンのペイロードをコンテキストに格納します。
+// withPayload stores the payload of a verified OIDC token in the context.
 func withPayload(ctx context.Context, payload *idtoken.Payload) context.Context {
 	return context.WithValue(ctx, payloadContextKey, payload)
 }
 
-// PayloadFromContext は、Verifier が格納した検証済みペイロードを返します。
-// 呼び出し元サービスアカウントの特定などに使えます。
+// PayloadFromContext returns the verified payload stored by the Verifier.
+// It can be used to identify the calling service account, for example.
 func PayloadFromContext(ctx context.Context) (*idtoken.Payload, bool) {
 	payload, ok := ctx.Value(payloadContextKey).(*idtoken.Payload)
 	return payload, ok && payload != nil

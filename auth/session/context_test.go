@@ -37,8 +37,8 @@ func TestEmailFromContext(t *testing.T) {
 	})
 }
 
-// TestAuthenticateInjectsEmail は、下流のハンドラーがセッションを再度開かずに
-// 認証済みユーザーを参照できることを確認します。
+// TestAuthenticateInjectsEmail checks that downstream handlers can read the
+// authenticated user without opening the session again.
 func TestAuthenticateInjectsEmail(t *testing.T) {
 	t.Parallel()
 

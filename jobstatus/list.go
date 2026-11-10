@@ -11,10 +11,10 @@ import (
 	"google.golang.org/api/iterator"
 )
 
-// countAlias は件数集計クエリの結果を取り出すためのキーです。
+// countAlias is the key the count aggregation result is read from.
 const countAlias = "all"
 
-// listOptions は List の絞り込みと並び順です。
+// listOptions holds List's filters and ordering.
 type listOptions struct {
 	state      State
 	commands   []string
@@ -23,16 +23,16 @@ type listOptions struct {
 	descending bool
 }
 
-// fieldFilter は、サービス固有のフィールド 1 つに対する等値の絞り込みです。
+// fieldFilter is an equality filter on one service-specific field.
 type fieldFilter struct {
 	path  string
 	value any
 }
 
-// ListOption は List の挙動を変更します。
+// ListOption changes how List behaves.
 type ListOption func(*listOptions)
 
-// newListOptions は既定値へオプションを適用します。
+// newListOptions applies the options on top of the defaults.
 func newListOptions(opts []ListOption) listOptions {
 	cfg := listOptions{orderBy: "queued_at", descending: true}
 	for _, opt := range opts {
@@ -43,16 +43,17 @@ func newListOptions(opts []ListOption) listOptions {
 	return cfg
 }
 
-// WithState は、指定した状態のジョブだけを一覧します。
+// WithState lists only jobs in the given state.
 func WithState(state State) ListOption {
 	return func(o *listOptions) { o.state = state }
 }
 
-// WithCommand は、指定したコマンドのジョブだけを一覧します。
+// WithCommand lists only jobs with the given commands.
 //
-// 複数渡すと、そのいずれかに一致するジョブを返します。1 つのコマンドが 1 つの一覧に
-// 対応するとは限らないためです（同じ履歴画面へ出したいコマンドが 2 つある、など）。
-// Firestore の in 検索になるので値は 30 個までです。空文字は無視します。
+// Given several, it returns jobs matching any of them, because one command
+// does not always map to one listing (two commands may belong on the same
+// history screen, for example). It becomes a Firestore in query, so at most
+// 30 values. Empty strings are ignored.
 func WithCommand(commands ...string) ListOption {
 	return func(o *listOptions) {
 		for _, command := range commands {
@@ -63,16 +64,18 @@ func WithCommand(commands ...string) ListOption {
 	}
 }
 
-// WithField は、サービス固有のフィールドが指定した値と等しいジョブだけを一覧します。
-// path は Firestore のフィールド名です（Go の識別子ではなく firestore タグの名前）。
+// WithField lists only jobs whose service-specific field equals value. path
+// is the Firestore field name (the firestore tag's name, not the Go
+// identifier).
 //
-// State と Command はどのサービスでも同じ意味を持つので専用のオプションがありますが、
-// それ以外の絞り込みはサービスごとに違います。ここが無いと、利用側は自分のフィールドで
-// 絞るために全件を読んでメモリで落とすことになり、一覧を Firestore へ移した意味が
-// 半分消えます。
+// State and Command mean the same in every service, so they have their own
+// options, but every other filter differs per service. Without this, a
+// caller filtering on its own field would read everything and drop rows in
+// memory, losing half the point of moving listings to Firestore.
 //
-// 等値だけです。範囲比較を許すと、Firestore が不等号のフィールドを並べ替えの先頭に
-// 要求するため、WithOrderBy と組み合わせたときに黙って別の並び順になります。
+// Equality only. Allowing a range comparison would make Firestore require the
+// inequality field first in the ordering, so combined with WithOrderBy it
+// would silently produce a different order.
 func WithField(path string, value any) ListOption {
 	return func(o *listOptions) {
 		if path != "" {
@@ -81,12 +84,13 @@ func WithField(path string, value any) ListOption {
 	}
 }
 
-// WithOrderBy は並べ替えるフィールドと向きを変えます。
-// 既定は queued_at の降順（新しい順）です。
+// WithOrderBy changes the field and direction to sort by. The default is
+// queued_at descending (newest first).
 //
-// 絞り込みと組み合わせると複合索引が要ります。索引は Terraform などコードの側で
-// 管理してください（手で足した索引が本番にだけ存在する状態にしないためです）。
-// 絞り込みを付けない並べ替えだけなら、単一フィールドの自動索引で足ります。
+// Combined with a filter it needs a composite index. Manage indexes in code,
+// with Terraform or the like (so no hand-added index ends up existing only in
+// production). Sorting without a filter is served by the automatic
+// single-field index.
 func WithOrderBy(field string, descending bool) ListOption {
 	return func(o *listOptions) {
 		o.orderBy = field
@@ -94,20 +98,20 @@ func WithOrderBy(field string, descending bool) ListOption {
 	}
 }
 
-// List は、ジョブ状態を新しい順に 1 ページ分返します。
+// List returns one page of job statuses, newest first.
 //
-// ページ番号は 1 始まり、perPage が 0 以下のときはページングせず全件を返します。
-// Total は全件の読み込みではなく件数集計クエリで求めるため、ページの外にある
-// ドキュメントは読みません。
+// Pages start at 1, and a perPage of 0 or less returns everything without
+// paging. Total comes from a count aggregation query rather than reading
+// everything, so documents outside the page are not read.
 //
-// デコードに失敗したドキュメントはエラーとして返します。一覧から黙って落とすと、
-// 壊れた記録があることに誰も気づきません。
+// A document that fails to decode is returned as an error. Dropping it from
+// the listing silently would leave nobody aware of the broken record.
 //
-// ページ送りは Offset なので、深いページほど読み取りが増えます。Firestore は
-// 読み飛ばしたドキュメントも課金対象に数えるため、page 番目のコストは
-// page × perPage 件ぶんです。任意のページへ飛べることと引き換えなので、
-// 「最新の数件」で足りる画面では Latest を使ってください。数百ページに届く
-// 一覧が要るなら、Offset ではなくカーソル（Query.StartAfter）を検討してください。
+// Paging uses Offset, so deeper pages read more. Firestore bills skipped
+// documents too, so page N costs N × perPage reads. That is the price of
+// jumping to any page; on screens where "the latest few" is enough, use
+// Latest. If a listing reaching hundreds of pages is needed, consider a
+// cursor (Query.StartAfter) instead of Offset.
 func (s *Store[T]) List(ctx context.Context, page, perPage int, opts ...ListOption) ([]T, PageMeta, error) {
 	cfg := newListOptions(opts)
 
@@ -138,17 +142,18 @@ func (s *Store[T]) List(ctx context.Context, page, perPage int, opts ...ListOpti
 	return items, meta, nil
 }
 
-// Latest は、絞り込みに一致するジョブ状態を新しい順に limit 件返します。
-// limit が 0 以下のときは一致するもの全件を返します。
+// Latest returns limit job statuses matching the filters, newest first. A
+// limit of 0 or less returns every match.
 //
-// **件数集計をしません。** List が総件数を先に数えるのはページ送りのためで、
-// 「最新の数件だけ並べる」画面には使い道がありません。抜粋しか出さない画面が、
-// 開くたびに使わない集計クエリで 1 往復ぶん余計に待つことになります。
+// **It runs no count.** List counts the total first for paging, which is of
+// no use to a screen that "lists only the latest few". A screen showing only
+// an excerpt would wait one extra round trip for an unused count every time
+// it opens.
 //
-// PageMeta を返さないのも同じ理由です。総件数を知らないままページ情報を組み立てると、
-// Total と TotalPages に 0 か当てずっぽうを入れることになり、受け取った側は
-// 「本当に 0 件」なのか「数えていない」のかを区別できません。ページ送りが要るなら
-// List を、要らないならこちらを使ってください。
+// It returns no PageMeta for the same reason. Building page information
+// without knowing the total means putting 0 or a guess in Total and
+// TotalPages, and the receiver cannot tell "really zero" from "not counted".
+// Use List when paging is needed, and this when it is not.
 func (s *Store[T]) Latest(ctx context.Context, limit int, opts ...ListOption) ([]T, error) {
 	cfg := newListOptions(opts)
 
@@ -164,8 +169,8 @@ func (s *Store[T]) Latest(ctx context.Context, limit int, opts ...ListOption) ([
 	return collect[T](ctx, query)
 }
 
-// filteredQuery は、絞り込みだけを適用したクエリを返します。
-// 件数集計と本体の取得が同じ条件を見るよう、組み立てを 1 か所に置きます。
+// filteredQuery returns the query with only the filters applied. It is built
+// in one place so the count and the fetch see the same conditions.
 func (s *Store[T]) filteredQuery(cfg listOptions) (firestore.Query, error) {
 	if s.client == nil {
 		return firestore.Query{}, errors.New("jobstatus: client is not configured")
@@ -191,7 +196,7 @@ func (s *Store[T]) filteredQuery(cfg listOptions) (firestore.Query, error) {
 	return query, nil
 }
 
-// orderedQuery は並べ替えを適用します。
+// orderedQuery applies the ordering.
 func orderedQuery(query firestore.Query, cfg listOptions) firestore.Query {
 	direction := firestore.Asc
 	if cfg.descending {
@@ -200,7 +205,7 @@ func orderedQuery(query firestore.Query, cfg listOptions) firestore.Query {
 	return query.OrderBy(cfg.orderBy, direction)
 }
 
-// collect はクエリの結果を T へデコードして集めます。
+// collect decodes the query results into T and collects them.
 func collect[T any](ctx context.Context, query firestore.Query) ([]T, error) {
 	iter := query.Documents(ctx)
 	defer iter.Stop()
@@ -217,7 +222,7 @@ func collect[T any](ctx context.Context, query firestore.Query) ([]T, error) {
 
 		var item T
 		if err := snap.DataTo(&item); err != nil {
-			return nil, fmt.Errorf("ジョブ状態のデコードに失敗しました (%s): %w", snap.Ref.ID, err)
+			return nil, fmt.Errorf("decode job status (%s): %w", snap.Ref.ID, err)
 		}
 		if e, ok := any(&item).(interface{ EnsureJobID(string) }); ok {
 			e.EnsureJobID(snap.Ref.ID)
@@ -226,11 +231,11 @@ func collect[T any](ctx context.Context, query firestore.Query) ([]T, error) {
 	}
 }
 
-// count は、絞り込みだけを適用したクエリの総件数を返します。
+// count returns the total number of results of the filtered query.
 //
-// ドキュメント本体は読まないため、一覧全体の件数を得るためにページの外を
-// 走査する必要がありません。オブジェクトストレージ上の一覧が全走査を強いられて
-// いたのは、これに相当する手段が無かったためです。
+// It does not read the documents themselves, so getting the whole listing's
+// count needs no scan outside the page. Listings on object storage were
+// forced into full scans because they had nothing equivalent.
 func count(ctx context.Context, query firestore.Query) (int, error) {
 	result, err := query.NewAggregationQuery().WithCount(countAlias).Get(ctx)
 	if err != nil {

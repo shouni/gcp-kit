@@ -11,51 +11,58 @@ import (
 )
 
 var (
-	// ErrNotFound は、Load が id の実体を見つけられなかったことを示します
-	// （保存されていない、または期限切れ）。
+	// ErrNotFound reports that Load found no stored session for id (never
+	// saved, or expired).
 	ErrNotFound = errors.New("session: not found")
 
-	// ErrStoreUnavailable は、保存先そのものへ到達できなかったことを示します
-	// （Firestore の一時障害など）。Store の実装は、この種の失敗を返すときだけ
-	// これでラップしてください。
+	// ErrStoreUnavailable reports that the store itself could not be reached
+	// (a transient Firestore outage, for example). Store implementations
+	// should wrap with it only when returning that kind of failure.
 	//
-	// 壊れたセッションと区別するのは、処置が正反対だからです。壊れた実体はクッキーを
-	// 消せば次のログインで直りますが、到達できないだけの相手に同じことをすると、
-	// バックエンドの瞬断がその瞬間の利用者全員のログアウトになります。しかも復旧後も
-	// 元に戻りません。Handler.Challenge はこれを 503 で返し、クッキーには触れません。
+	// It is kept apart from a broken session because the remedies are
+	// opposite. A broken stored session is fixed by the next login once the
+	// cookie is cleared, but doing the same when the store is merely
+	// unreachable turns a backend blip into a logout for every user at that
+	// moment, and recovery does not undo it. Handler.Challenge answers it with
+	// 503 and leaves the cookie alone.
 	ErrStoreUnavailable = errors.New("session: session store is unavailable")
 )
 
-// Store は、セッションの実体の保存先です。ID をキーにした値の読み書きだけを持ち、
-// HTTP には触れません。クッキーの発行と読み取り、ID を採用するかどうかの判断は
-// Handler が行います。
+// Store is where sessions are kept. It only reads and writes values keyed by
+// ID and never touches HTTP. Issuing and reading the cookie, and deciding
+// whether to adopt an ID, are the Handler's job.
 //
-// 以前はクッキーの発行まで Store が担っていて、Secure などの属性が Handler と Store の
-// 2 か所に分かれ、「MaxAge が負なら削除」という規約と Options の複製が両実装にありました。
-// 偽物を書くにも httptest が要りました。責務を値の永続化に絞ると、この 3 つで足ります。
+// The Store used to issue the cookie too, which split attributes such as
+// Secure between the Handler and the Store, and put the "negative MaxAge means
+// delete" convention and a copy of the Options in both implementations.
+// Writing a fake needed httptest. With the responsibility narrowed to
+// persisting values, these three methods are enough.
 type Store interface {
-	// Load は id の値を返します。無い・期限切れなら ErrNotFound です。
+	// Load returns the values for id, or ErrNotFound if missing or expired.
 	//
-	// ★ 保存先へ到達できなかった場合は ErrStoreUnavailable でラップしてください。
-	// それ以外のエラーは「実体が壊れている」と解釈され、クッキーが破棄されます。
+	// When the store could not be reached, wrap the error with
+	// ErrStoreUnavailable. Any other error is read as "the stored session is
+	// broken", and the cookie is cleared.
 	Load(ctx context.Context, id string) (map[string]string, error)
 
-	// Save は values を id の下に ttl の期限で保存します。既にあれば上書きです。
+	// Save stores values under id, expiring after ttl. An existing entry is overwritten.
 	Save(ctx context.Context, id string, values map[string]string, ttl time.Duration) error
 
-	// Delete は id の実体を消します。無くてもエラーにしません。
+	// Delete removes the stored session for id. A missing one is not an error.
 	Delete(ctx context.Context, id string) error
 }
 
-// sessionIDLen は newSessionID が返す長さです（32 バイトを base64 RawURL で表した 43 文字）。
+// sessionIDLen is the length newSessionID returns (32 bytes as base64 RawURL, 43 characters).
 const sessionIDLen = 43
 
-// newSessionID は、推測できないセッション ID を返します。中身を持たない値なので、
-// 必要な性質は推測できないことだけです（crypto/rand の 32 バイト）。
+// newSessionID returns an unguessable session ID. The value carries no
+// content, so the only property it needs is that it cannot be guessed (32
+// bytes from crypto/rand).
 //
-// 発行したものが isValidSessionID を通ることを、ここで確かめてから返します。乱数が
-// "__…__"（Firestore の予約形）を引く確率は 6×10⁻⁸ ほどですが、引いた回だけ保存が
-// 失敗してログインが 500 になるうえ、再現しないので原因にたどり着けません。
+// It confirms that what it minted passes isValidSessionID before returning
+// it. The chance of the random value landing on "__…__" (Firestore's reserved
+// form) is about 6×10⁻⁸, but on that one occasion the save fails and the login
+// is a 500, and since it never reproduces, nobody could find the cause.
 func newSessionID() (string, error) {
 	for range 4 {
 		id, err := randomToken(base64.RawURLEncoding)
@@ -69,19 +76,23 @@ func newSessionID() (string, error) {
 	return "", errors.New("session: could not mint a usable session ID")
 }
 
-// isValidSessionID は、newSessionID が発行しうる形かどうかを返します。
+// isValidSessionID reports whether id has a shape newSessionID can mint.
 //
-// ID はクッキーで届くので、中身は相手が決められます。Handler は Load へ渡す前に
-// これで確かめ、ID を保存先の識別子に使う実装（Firestore ストアはドキュメントのパス
-// に使います）も自分で確かめます。"/" を含む値は Doc() がサブコレクションのパスとして
-// 解釈するため、素通しにすると本来のコレクションの外を指せます。
+// The ID arrives in a cookie, so the other side decides its content. The
+// Handler checks it with this before passing it to Load, and implementations
+// that use the ID as a storage identifier (the Firestore store uses it as a
+// document path) check it themselves too. Doc() reads a value containing "/"
+// as a subcollection path, so passing one through unchecked can point outside
+// the intended collection.
 //
-// 判定は発行側の形そのもの（43 文字の base64 RawURL）に固定します。保存先ごとの
-// 禁則を数え上げるより、自分が出す形だけを通すほうが取りこぼしません。43 文字である
-// 時点で Firestore の "."、".."、1500 バイト上限は満たせなくなります。
+// The check is pinned to the minted shape itself (43 characters of base64
+// RawURL). Admitting only the shape we produce misses less than enumerating
+// each store's restrictions. At 43 characters, Firestore's ".", ".." and
+// 1500-byte limit can no longer be hit.
 //
-// ただし "__…__" だけは長さでも文字種でも排除できないので、明示的に落とします。
-// newSessionID もこの判定を通るまで振り直すので、発行と検証が食い違いません。
+// "__…__" alone cannot be excluded by length or character set, so it is
+// rejected explicitly. newSessionID mints again until this check passes, so
+// minting and validation cannot disagree.
 func isValidSessionID(id string) bool {
 	if len(id) != sessionIDLen {
 		return false
@@ -97,12 +108,12 @@ func isValidSessionID(id string) bool {
 	return true
 }
 
-// isSessionIDChar は base64 RawURL の文字集合です。
+// isSessionIDChar is the base64 RawURL character set.
 func isSessionIDChar(r rune) bool {
 	return r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_'
 }
 
-// memoryStore は、プロセス内にセッションを保持する Store です。
+// memoryStore is a Store that keeps sessions in the process.
 type memoryStore struct {
 	mu      sync.Mutex
 	entries map[string]memoryEntry
@@ -113,11 +124,12 @@ type memoryEntry struct {
 	expiresAt time.Time
 }
 
-// NewMemoryStore は、プロセス内にセッションを保持する Store を返します。
+// NewMemoryStore returns a Store that keeps sessions in the process.
 //
-// ★ 本番では使えません。Cloud Run のインスタンスごとに別のストアになるので、
-// インスタンスが替わった時点で利用者はログアウトされます。ローカル開発と、
-// Firestore を立てずに認証済みの画面を確かめるテスト向けです。
+// It is not usable in production. Each Cloud Run instance gets its own store,
+// so users are logged out whenever the instance changes. It is for local
+// development and for tests that check authenticated screens without running
+// Firestore.
 func NewMemoryStore() Store {
 	return &memoryStore{entries: map[string]memoryEntry{}}
 }

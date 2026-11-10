@@ -1,12 +1,13 @@
-// Package oidc は、サービス間呼び出しの受信検証を提供します。
+// Package oidc verifies inbound service-to-service calls.
 //
-// Cloud Tasks からの呼び出しも、他サービスからの M2M 呼び出しも、Google 署名付きの
-// OIDC ID トークンを Authorization: Bearer で提示する点は同じです。違うのは
-// 合成のされ方（拒否して止めるか、ブラウザセッションへ譲るか）だけなので、
-// 検証器は 1 つにまとめ、その使い分けは auth.Require / auth.Protected が持ちます。
+// Calls from Cloud Tasks and M2M calls from other services both present a
+// Google-signed OIDC ID token in Authorization: Bearer. They differ only in how
+// they are composed (reject and stop, or give way to the browser session), so
+// there is one verifier, and choosing between the two is left to auth.Require
+// and auth.Protected.
 //
-// このパッケージは OAuth2 の設定を要求しません。Web UI を持たない Worker が、
-// 使いもしないクライアントシークレットへのアクセス権を持たずに受信検証できます。
+// This package needs no OAuth2 configuration. A worker without a web UI can
+// verify inbound calls without access to a client secret it would never use.
 package oidc
 
 import (
@@ -21,32 +22,35 @@ import (
 	"github.com/shouni/gcp-kit/auth"
 )
 
-// Verifier は、Google 署名の OIDC ID トークンを audience と
-// サービスアカウント許可リストの両方に対して検証します。
+// Verifier verifies a Google-signed OIDC ID token against both the audience
+// and a service account allowlist.
 //
-// auth.Authenticator を満たすため、auth.Require（サービス専用のルート）にも
-// auth.Protected（人とサービスが同じルートを使う場合）にも渡せます。
+// It satisfies auth.Authenticator, so it can be passed to auth.Require (routes
+// only services call) as well as to auth.Protected (routes people and services
+// share).
 type Verifier struct {
 	audience string
 	allowed  map[string]struct{}
 	validate ValidateFunc
 }
 
-// ValidateFunc は idtoken.Validate と同じシグネチャです。差し替えは WithValidator で行います。
+// ValidateFunc has the same signature as idtoken.Validate. Swap it in with WithValidator.
 type ValidateFunc func(ctx context.Context, token, audience string) (*idtoken.Payload, error)
 
-// Option は New の任意設定です。
+// Option is an optional setting for New.
 type Option func(*Verifier)
 
-// WithValidator は、署名と audience の検証を行う関数を差し替えます。テスト専用です。
+// WithValidator replaces the function that verifies the signature and the
+// audience. It is for tests only.
 //
-// 利用側のルータテストは、これが無いと Bearer 経路を通せません。実際には、未設定の
-// Verifier を渡して ErrNotConfigured の経路でフォールバックだけを確かめている
-// テストが書かれていました。それは設定漏れの経路であって、Bearer が届いたときの
-// 経路ではありません。
+// Without it, a consuming app's router tests cannot exercise the Bearer path.
+// In practice, tests were written that passed an unconfigured Verifier and
+// checked only the fallback through the ErrNotConfigured path. That is the
+// missing-configuration path, not the path a Bearer takes when it arrives.
 //
-// 本番で idtoken.Validate 以外を渡す理由はありません。署名を確かめない関数を渡せば、
-// 誰でも任意の email を名乗れます。nil は無視され、idtoken.Validate のままです。
+// There is no reason to pass anything but idtoken.Validate in production. A
+// function that does not check signatures lets anyone claim any email. nil is
+// ignored and idtoken.Validate stays.
 func WithValidator(fn ValidateFunc) Option {
 	return func(v *Verifier) {
 		if fn != nil {
@@ -55,27 +59,29 @@ func WithValidator(fn ValidateFunc) Option {
 	}
 }
 
-// 検証失敗の種類。RFC 6750, Section 3.1 の error コードと状態コードに対応させるために分けています。
-// トークンが壊れている（401・取り直せば直る）のと、呼び出し元が許可されていない
-// （403・取り直しても直らない）のとでは、クライアントが次に取るべき行動が違います。
+// Kinds of verification failure, kept apart so they map onto the error codes
+// and status codes of RFC 6750, Section 3.1. A broken token (401, fixed by
+// fetching a new one) and a caller that is not allowed (403, not fixed by
+// fetching a new one) call for different next steps from the client.
 var (
 	errInvalidToken = errors.New("oidc: invalid token")
 	errNotAllowed   = errors.New("oidc: caller is not allowed")
 )
 
-// New は Verifier を初期化します。
+// New initialises a Verifier.
 //
-// allowedServiceAccounts が空の場合、検証は安全側に倒して常に失敗します（fail-closed）。
-// 「許可リストが空 = 誰でも通す」にすると、設定を1つ書き忘れただけで
-// 内部エンドポイントが開くためです。
+// With an empty allowedServiceAccounts, verification errs on the safe side
+// and always fails (fail-closed). Making "empty allowlist = let everyone in"
+// would open internal endpoints after forgetting a single setting.
 //
-// どちらかが欠けていれば、何が欠けているかを添えて auth.ErrNotConfigured を返します。
-// 起動時に落とすためで、未設定のまま動かすと全ての呼び出しがセッション認証へ
-// フォールバックし、設定漏れが分かりにくい形で現れます。
+// If either is missing, it returns auth.ErrNotConfigured along with what is
+// missing. This is to fail at startup: running unconfigured would send every
+// call to the session fallback, and the missing setting would surface in a
+// confusing form.
 //
-// 検証が任意のルート（機械からの呼び出しを受けなくてもよい Web 面など）では、
-// このエラーで止めるのではなく nil の *Verifier を auth.Protected に渡してください。
-// nil の方式は飛ばされます。
+// On a route where verification is optional (a web face that need not accept
+// machine callers, for example), pass a nil *Verifier to auth.Protected rather
+// than stopping on this error. A nil method is skipped.
 func New(audience string, allowedServiceAccounts []string, opts ...Option) (*Verifier, error) {
 	v := &Verifier{
 		audience: strings.TrimSpace(audience),
@@ -98,21 +104,23 @@ func New(audience string, allowedServiceAccounts []string, opts ...Option) (*Ver
 	return v, nil
 }
 
-// configured は、検証に必要な設定が揃っているかを返します。New はこれを満たさない
-// Verifier を返しませんが、ゼロ値や nil で組み立てられた場合にも fail-closed で
-// 応えるため、Authenticate は毎回確かめます。
+// configured reports whether the settings verification needs are present.
+// New never returns a Verifier that fails this, but Authenticate checks it
+// every time so that one built as a zero value or nil still answers
+// fail-closed.
 func (v *Verifier) configured() bool {
 	return v != nil && v.audience != "" && len(v.allowed) > 0
 }
 
-// Authenticate は auth.Authenticator を実装します。
+// Authenticate implements auth.Authenticator.
 //
-// Bearer トークンが提示されていなければ auth.ErrNotAttempted を返し、
-// 合成側に次の方式を試させます。検証器が未設定の場合は auth.ErrNotConfigured を
-// 返すため、フォールバックではなく設定ミスとして扱われます。
+// When no Bearer token is presented it returns auth.ErrNotAttempted, so the
+// composer tries the next method. When the verifier is not configured it
+// returns auth.ErrNotConfigured, so the case is treated as a configuration
+// error rather than a fallback.
 //
-// w は使いません。応答へ書き込む必要がある方式（セッションの更新など）と
-// 口を揃えるために受け取っています。
+// w is unused. It is taken to match the methods that do need to write to the
+// response (updating a session, for example).
 func (v *Verifier) Authenticate(_ http.ResponseWriter, r *http.Request) (context.Context, error) {
 	if !v.configured() {
 		return nil, auth.ErrNotConfigured
@@ -130,7 +138,7 @@ func (v *Verifier) Authenticate(_ http.ResponseWriter, r *http.Request) (context
 	return withPayload(r.Context(), payload), nil
 }
 
-// verifyToken は署名・audience・email クレーム・許可リストの順に検証します。
+// verifyToken checks the signature, the audience, the email claim and the allowlist, in that order.
 func (v *Verifier) verifyToken(ctx context.Context, token string) (*idtoken.Payload, error) {
 	validate := v.validate
 	if validate == nil {
@@ -145,8 +153,9 @@ func (v *Verifier) verifyToken(ctx context.Context, token string) (*idtoken.Payl
 		return nil, fmt.Errorf("%w: validation returned no payload", errInvalidToken)
 	}
 
-	// audience は誰でも指定できる文字列に過ぎないため、署名検証だけでは
-	// 呼び出し元を特定できません。必ず email クレームで発行者を確認します。
+	// The audience is just a string anyone can name, so a verified signature
+	// does not identify the caller. Always confirm the issuer by its email
+	// claim.
 	emailClaim, err := auth.VerifiedEmail(payload.Claims)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", errInvalidToken, err)
@@ -159,8 +168,8 @@ func (v *Verifier) verifyToken(ctx context.Context, token string) (*idtoken.Payl
 	return payload, nil
 }
 
-// extractBearerToken は Authorization ヘッダーから "Bearer " プレフィックス
-// （大文字小文字を区別しない）を除いたトークン本体を取り出します。
+// extractBearerToken takes the token from the Authorization header, with the
+// "Bearer " prefix (case-insensitive) removed.
 func extractBearerToken(r *http.Request) (token string, ok bool) {
 	const prefix = "Bearer "
 	authHeader := r.Header.Get("Authorization")
@@ -170,9 +179,10 @@ func extractBearerToken(r *http.Request) (token string, ok bool) {
 	return strings.TrimSpace(authHeader[len(prefix):]), true
 }
 
-// toLowerMap は許可リストを正規化（トリム + 小文字化）して map にします。
-// 空白のみの要素を捨てるのは、環境変数を分割した値に空要素が混ざっても、
-// 「空ではないが誰も許可しない」リストにならないようにするためです。
+// toLowerMap normalises the allowlist (trim + lowercase) into a map.
+// Whitespace-only entries are dropped so that empty elements from splitting
+// an environment variable cannot make a list that is "not empty but allows
+// nobody".
 func toLowerMap(slice []string) map[string]struct{} {
 	m := make(map[string]struct{}, len(slice))
 	for _, s := range slice {
@@ -183,16 +193,17 @@ func toLowerMap(slice []string) map[string]struct{} {
 	return m
 }
 
-// Challenge は auth.Challenger を実装し、RFC 6750 に沿った応答を返します。
+// Challenge implements auth.Challenger and answers per RFC 6750.
 //
-// RFC 9110, Section 15.5.2 は、401 を返すサーバーが WWW-Authenticate を送ることを要求します。
-// これが無いと、クライアントは「このリソースが Bearer を受け付ける」ことを知る手段が
-// ありません。状態コードは RFC 6750, Section 3.1 の対応に従います。
+// RFC 9110, Section 15.5.2 requires a server answering 401 to send
+// WWW-Authenticate. Without it the client has no way to learn that the
+// resource accepts Bearer. Status codes follow the mapping in RFC 6750,
+// Section 3.1.
 //
-//   - 資格情報なし:       401 Bearer
-//   - トークンが不正:     401 error="invalid_token"（取り直せば直る）
-//   - 呼び出し元が不許可: 403 error="insufficient_scope"（取り直しても直らない）
-//   - 検証器が未設定:     500。サーバー側の落ち度なのでチャレンジは返しません
+//   - no credentials:       401 Bearer
+//   - invalid token:        401 error="invalid_token" (fixed by fetching a new one)
+//   - caller not allowed:   403 error="insufficient_scope" (not fixed by fetching a new one)
+//   - verifier unconfigured: 500. The fault is on the server, so no challenge is sent
 func (v *Verifier) Challenge(w http.ResponseWriter, _ *http.Request, err error) {
 	switch {
 	case errors.Is(err, auth.ErrNotConfigured):

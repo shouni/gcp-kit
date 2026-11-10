@@ -13,37 +13,38 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// FirestoreConfig は、Firestore に置く Store の設定です。
+// FirestoreConfig configures a Store kept in Firestore.
 type FirestoreConfig struct {
-	// Client は接続済みの Firestore クライアントです（必須）。
+	// Client is a connected Firestore client (required).
 	//
-	// ★ ジョブ状態とは別のデータベースを指してください。データベース名は識別子で
-	// 後から変えられないので、兼ねると片方で名前が実態と合わなくなります。
+	// Point it at a different database from the one for job status. A
+	// database name is an identifier that cannot be changed later, so sharing
+	// one leaves the name not matching what it holds for one of the two uses.
 	Client *firestore.Client
 
-	// Collection は、セッションを置くコレクション名です（必須）。
+	// Collection is the name of the collection sessions are kept in (required).
 	Collection string
 }
 
-// sessionDoc は、セッション 1 件のドキュメント表現です。ExpiresAt は Firestore の
-// TTL ポリシーが見るフィールドでもありますが、削除は最大 24 時間遅れるので、
-// 読み出し側でも必ず期限を見ます。
+// sessionDoc is the document form of one session. ExpiresAt is also the field
+// Firestore's TTL policy reads, but deletion can be up to 24 hours late, so
+// the reading side always checks the expiry too.
 type sessionDoc struct {
 	Values    map[string]string `firestore:"values"`
 	ExpiresAt time.Time         `firestore:"expiresAt"`
 }
 
-// firestoreStore は、Firestore にセッションを保持する Store です。
+// firestoreStore is a Store that keeps sessions in Firestore.
 type firestoreStore struct {
 	client     *firestore.Client
 	collection string
 }
 
-// NewFirestoreStore は、Firestore にセッションを保持する Store を返します。
+// NewFirestoreStore returns a Store that keeps sessions in Firestore.
 //
-// ★ 期限切れドキュメントの掃除は Firestore の TTL ポリシー（ExpiresAt が対象）に
-// 任せます。設定しないとセッションが無期限に溜まります。クッキーと違い、保存した
-// 実体は自分では消えません。
+// Cleaning up expired documents is left to a Firestore TTL policy (on
+// ExpiresAt). Without one, sessions accumulate forever: unlike cookies, stored
+// sessions do not expire by themselves.
 func NewFirestoreStore(cfg FirestoreConfig) (Store, error) {
 	if cfg.Client == nil {
 		return nil, errors.New("session: FirestoreConfig.Client must not be nil")
@@ -57,14 +58,15 @@ func NewFirestoreStore(cfg FirestoreConfig) (Store, error) {
 	}, nil
 }
 
-// OwnedFirestoreStore は、自分で開いた Firestore クライアントを持つ Store です。
-// Close で閉じます。クライアントを注入する NewFirestoreStore と違い、寿命をこちらが持ちます。
+// OwnedFirestoreStore is a Store holding a Firestore client it opened itself,
+// closed by Close. Unlike NewFirestoreStore, which takes an injected client, it
+// owns the client's lifetime.
 type OwnedFirestoreStore struct {
 	Store
 	client *firestore.Client
 }
 
-// Close は、開いた Firestore クライアントを閉じます。
+// Close closes the Firestore client it opened.
 func (s *OwnedFirestoreStore) Close() error {
 	if s == nil || s.client == nil {
 		return nil
@@ -72,19 +74,20 @@ func (s *OwnedFirestoreStore) Close() error {
 	return s.client.Close()
 }
 
-// OpenFirestoreStore は、Firestore クライアントを開いてセッションの Store を返します。
+// OpenFirestoreStore opens a Firestore client and returns a session Store on it.
 //
-// 各サービスが「クライアントを開く → Closers に登録 → NewFirestoreStore に渡す」を
-// 同じ 12 行で書いていたので、その配線をまとめたものです。返り値は io.Closer でもある
-// ので、そのまま Closers に登録できます。databaseID はジョブ状態とは別のデータベースを
-// 指してください（FirestoreConfig.Client の注記）。
+// Every service wrote "open the client → register it in Closers → pass it to
+// NewFirestoreStore" in the same twelve lines, and this is that wiring in one
+// place. The result is also an io.Closer, so it can be registered in Closers
+// as is. Point databaseID at a different database from the one for job status
+// (see the note on FirestoreConfig.Client).
 func OpenFirestoreStore(ctx context.Context, projectID, databaseID, collection string, opts ...option.ClientOption) (*OwnedFirestoreStore, error) {
 	if strings.TrimSpace(databaseID) == "" {
 		return nil, errors.New("session: databaseID must not be empty")
 	}
 	client, err := firestore.NewClientWithDatabase(ctx, projectID, databaseID, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("session: firestore クライアントの初期化に失敗しました: %w", err)
+		return nil, fmt.Errorf("session: initialize firestore client: %w", err)
 	}
 	store, err := NewFirestoreStore(FirestoreConfig{Client: client, Collection: collection})
 	if err != nil {
@@ -94,14 +97,15 @@ func OpenFirestoreStore(ctx context.Context, projectID, databaseID, collection s
 	return &OwnedFirestoreStore{Store: store, client: client}, nil
 }
 
-// errForeignID は、この実装が発行していない形の ID を受け取ったときのエラーです。
-// ID はドキュメントのパスになるので、形を確かめずに渡すと相手にパスを決めさせることに
-// なります（isValidSessionID を参照）。
+// errForeignID is the error for an ID in a shape this implementation does not
+// mint. The ID becomes a document path, so passing it on unchecked would let
+// the other side choose the path (see isValidSessionID).
 var errForeignID = errors.New("session: refusing a session ID that was not minted here")
 
 func (s *firestoreStore) Load(ctx context.Context, id string) (map[string]string, error) {
-	// 発行した形でない ID は、Firestore へ問い合わせる前に「無い」と答えます。
-	// 実体があるはずもなく、問い合わせればパスを相手に決めさせることになります。
+	// An ID not in the minted shape is answered "not found" before asking
+	// Firestore. There cannot be a stored session for it, and asking would let
+	// the other side choose the path.
 	if !isValidSessionID(id) {
 		return nil, ErrNotFound
 	}
@@ -112,17 +116,18 @@ func (s *firestoreStore) Load(ctx context.Context, id string) (map[string]string
 		case codes.NotFound, codes.InvalidArgument:
 			return nil, ErrNotFound
 		}
-		// ここから先は Firestore へ到達できていません（ErrStoreUnavailable を参照）。
+		// From here on, Firestore could not be reached (see ErrStoreUnavailable).
 		return nil, fmt.Errorf("%w: %w", ErrStoreUnavailable, err)
 	}
 
 	var doc sessionDoc
 	if err := snap.DataTo(&doc); err != nil {
-		// 読めたが解釈できない実体は壊れたセッションです。ラップしないことで、
-		// 呼び出し側にクッキーを消させて作り直させます。
+		// A stored session that was read but cannot be decoded is broken.
+		// Leaving it unwrapped makes the caller clear the cookie and start
+		// over.
 		return nil, fmt.Errorf("session: decode stored session: %w", err)
 	}
-	// TTL の削除は遅れるので、期限は読み出し側でも見ます。
+	// TTL deletion runs late, so the expiry is checked on read as well.
 	if time.Now().After(doc.ExpiresAt) {
 		return nil, ErrNotFound
 	}

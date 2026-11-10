@@ -8,14 +8,14 @@ import (
 	"time"
 )
 
-// testStatus は、利用側が定義する状態型の代わりです。
+// testStatus stands in for the status type a caller defines.
 type testStatus struct {
 	Status
 	OutputDir string `json:"output_dir,omitempty" firestore:"output_dir,omitempty"`
 }
 
-// fakeStore は StatusStore の偽実装です。Recorder は StatusStore しか見ないので、
-// ガード・引き継ぎ・巻き戻しの判定はこれで漏れなく検査できます。
+// fakeStore is a fake StatusStore. The Recorder sees only the StatusStore, so
+// the guard, the carry-over and the rollback check can all be tested with it.
 type fakeStore struct {
 	prev    testStatus
 	prevSet bool
@@ -43,7 +43,7 @@ func (f *fakeStore) Save(_ context.Context, _ string, status testStatus) error {
 	return nil
 }
 
-// newTestRecorder は、警告ログを捨てる Recorder を返します。
+// newTestRecorder returns a Recorder that discards warning logs.
 func newTestRecorder(store StatusStore[testStatus]) *Recorder[testStatus] {
 	return NewRecorder(store, WithLogger(slog.New(slog.DiscardHandler)))
 }
@@ -61,30 +61,31 @@ func TestRecorderBegin(t *testing.T) {
 		wantSaved int
 	}{
 		{
-			// 未記録は正常系。記録前の投入やこの機能より前のジョブで起こる。
-			name:      "未記録なら処理を続ける",
+			// Not recorded is a normal case: an enqueue before recording, or a job older than this feature.
+			name:      "continues when unrecorded",
 			store:     &fakeStore{},
 			wantDone:  false,
 			wantSaved: 1,
 		},
 		{
-			// 再配信されたタスクをここで打ち切らないと、生成コストが二重に出る。
-			name:      "完了済みなら打ち切り、記録もしない",
+			// Not stopping a redelivered task here would pay for the generation twice.
+			name:      "stops without recording when already succeeded",
 			store:     &fakeStore{prevSet: true, prev: testStatus{State: StateSucceeded}},
 			wantDone:  true,
 			wantSaved: 0,
 		},
 		{
-			// failed は Cloud Tasks が再試行しうるので終了ではない。
-			name:      "失敗済みは打ち切らない",
+			// failed may be retried by Cloud Tasks, so it is not the end.
+			name:      "does not stop when already failed",
 			store:     &fakeStore{prevSet: true, prev: testStatus{State: StateFailed}},
 			wantDone:  false,
 			wantSaved: 1,
 		},
 		{
-			// 「未完了」に倒すと完了済みを作り直し、「完了済み」に倒すと二度と実行
-			// されない。どちらへも倒さずエラーを返し、再配信に委ねる。
-			name:      "読めなければエラーを返し、記録もしない",
+			// Falling to "unfinished" redoes a finished job; falling to "finished"
+			// never runs it again. Fall to neither: return an error and leave it
+			// to redelivery.
+			name:      "returns an error without recording when unreadable",
 			store:     &fakeStore{getErr: ErrUnavailable},
 			wantErr:   ErrUnavailable,
 			wantSaved: 0,
@@ -110,7 +111,7 @@ func TestRecorderBegin(t *testing.T) {
 				t.Errorf("done = %v, want %v", done, tt.wantDone)
 			}
 			if got := len(tt.store.saved); got != tt.wantSaved {
-				t.Errorf("保存回数 = %d, want %d", got, tt.wantSaved)
+				t.Errorf("saves = %d, want %d", got, tt.wantSaved)
 			}
 		})
 	}
@@ -128,7 +129,7 @@ func TestRecorderRecordCarriesOver(t *testing.T) {
 
 	rec := newTestRecorder(store)
 
-	// ワーカーは毎回タスクから状態を組み立て直すので、試行回数も投入時刻も持たない。
+	// The worker rebuilds the status from the task every time, so it has neither the attempt count nor the enqueue time.
 	rec.Record(t.Context(), "job-1", testStatus{State: StateSucceeded},
 		func(next, prev *testStatus) {
 			if prev != nil {
@@ -137,27 +138,27 @@ func TestRecorderRecordCarriesOver(t *testing.T) {
 		})
 
 	if len(store.saved) != 1 {
-		t.Fatalf("保存回数 = %d, want 1", len(store.saved))
+		t.Fatalf("saves = %d, want 1", len(store.saved))
 	}
 	got := store.saved[0]
 
 	if got.Attempts != 2 {
-		t.Errorf("Attempts = %d, want 2（組み立て直しで失わせない）", got.Attempts)
+		t.Errorf("Attempts = %d, want 2 (not lost by rebuilding)", got.Attempts)
 	}
 	if !got.QueuedAt.Equal(queuedAt) {
 		t.Errorf("QueuedAt = %v, want %v", got.QueuedAt, queuedAt)
 	}
 	if got.Title != "作品名" || got.Command != "generate" {
-		t.Errorf("Title/Command = %q/%q, 空のときは引き継ぐ", got.Title, got.Command)
+		t.Errorf("Title/Command = %q/%q, should carry over when empty", got.Title, got.Command)
 	}
 	if got.Error != "" {
-		t.Errorf("Error = %q, 成功後に古い失敗理由を残してはいけない", got.Error)
+		t.Errorf("Error = %q, an old failure reason must not remain after success", got.Error)
 	}
 	if got.State != StateSucceeded {
 		t.Errorf("State = %q, want %q", got.State, StateSucceeded)
 	}
 	if got.OutputDir != "gs://bucket/jobs/job-1" {
-		t.Errorf("OutputDir = %q, apply による引き継ぎが効いていない", got.OutputDir)
+		t.Errorf("OutputDir = %q, carry-over through apply did not work", got.OutputDir)
 	}
 }
 
@@ -167,7 +168,7 @@ func TestRecorderRecordKeepsNewerTitle(t *testing.T) {
 	store := &fakeStore{prevSet: true, prev: testStatus{State: StateRunning, Title: "仮の題目"}}
 
 	rec := newTestRecorder(store)
-	// 生成の途中で確定した題目を、古い値で上書きしない。
+	// A title decided partway through generation is not overwritten by an old one.
 	rec.Record(t.Context(), "job-1", testStatus{State: StateRunning, Title: "確定した題目"})
 
 	if got := store.saved[0].Title; got != "確定した題目" {
@@ -184,9 +185,9 @@ func TestRecorderRecordAppliesAfterCarryOver(t *testing.T) {
 	rec.Record(t.Context(), "job-1", testStatus{State: StateRunning},
 		func(next, _ *testStatus) { next.Attempts++ })
 
-	// 引き継ぎ（2）の後に apply が走るので 3。順序が逆なら 1 になる。
+	// apply runs after the carry-over (2), giving 3. In the reverse order it would be 1.
 	if got := store.saved[0].Attempts; got != 3 {
-		t.Errorf("Attempts = %d, want 3（引き継ぎの後に apply）", got)
+		t.Errorf("Attempts = %d, want 3 (apply after the carry-over)", got)
 	}
 }
 
@@ -198,13 +199,13 @@ func TestRecorderRecordSkipsRollback(t *testing.T) {
 		next      State
 		wantSaved int
 	}{
-		// 完了済みが running や failed へ巻き戻ると、画面も再実行ガードも
-		// 「まだ終わっていない」と読む。
-		{name: "running へは巻き戻さない", next: StateRunning, wantSaved: 0},
-		{name: "failed へは巻き戻さない", next: StateFailed, wantSaved: 0},
-		// queued を書くのは新しい依頼だけ。ここで弾くと、同じジョブ ID での
-		// 作り直しが記録上ずっと succeeded のままになり、一度も実行されない。
-		{name: "queued は作り直しなので通す", next: StateQueued, wantSaved: 1},
+		// If a finished job rolls back to running or failed, both the screen
+		// and the rerun guard read it as "not done yet".
+		{name: "does not roll back to running", next: StateRunning, wantSaved: 0},
+		{name: "does not roll back to failed", next: StateFailed, wantSaved: 0},
+		// Only a new request writes queued. Rejecting it here would leave a redo
+		// under the same job ID recorded as succeeded forever, never run.
+		{name: "allows queued as a resubmission", next: StateQueued, wantSaved: 1},
 	}
 
 	for _, tt := range tests {
@@ -217,7 +218,7 @@ func TestRecorderRecordSkipsRollback(t *testing.T) {
 			rec.Record(t.Context(), "job-1", testStatus{State: tt.next})
 
 			if got := len(store.saved); got != tt.wantSaved {
-				t.Errorf("保存回数 = %d, want %d", got, tt.wantSaved)
+				t.Errorf("saves = %d, want %d", got, tt.wantSaved)
 			}
 		})
 	}
@@ -229,12 +230,12 @@ func TestRecorderRecordChecksRollbackAfterApply(t *testing.T) {
 	store := &fakeStore{prevSet: true, prev: testStatus{State: StateSucceeded}}
 	rec := newTestRecorder(store)
 
-	// apply は状態を書き換えられるので、実際に保存される値で判定しないと素通りする。
+	// apply can rewrite the state, so the check must use the value actually saved or it slips through.
 	rec.Record(t.Context(), "job-1", testStatus{State: StateQueued},
 		func(next, _ *testStatus) { next.State = StateRunning })
 
 	if len(store.saved) != 0 {
-		t.Errorf("保存回数 = %d, apply 後の値で巻き戻しを判定していない", len(store.saved))
+		t.Errorf("saves = %d, rollback not checked on the value after apply", len(store.saved))
 	}
 }
 
@@ -244,11 +245,11 @@ func TestRecorderRecordSavesDespiteUnreadablePrevious(t *testing.T) {
 	store := &fakeStore{getErr: ErrUnavailable}
 	rec := newTestRecorder(store)
 
-	// 観測の欠けを理由に記録そのものを止めない（引き継ぎだけが失われる）。
+	// A gap in observation does not stop the record itself (only the carry-over is lost).
 	rec.Record(t.Context(), "job-1", testStatus{State: StateFailed})
 
 	if len(store.saved) != 1 {
-		t.Errorf("保存回数 = %d, want 1", len(store.saved))
+		t.Errorf("saves = %d, want 1", len(store.saved))
 	}
 }
 
@@ -258,7 +259,7 @@ func TestRecorderRecordSwallowsSaveFailure(t *testing.T) {
 	store := &fakeStore{saveErr: errors.New("boom")}
 	rec := newTestRecorder(store)
 
-	// 書けなかったことを理由に生成を中断するほうが害が大きいので、警告ログに留める。
+	// Aborting the generation because the record could not be written does more harm, so it is only a warning log.
 	rec.Record(t.Context(), "job-1", testStatus{State: StateSucceeded})
 }
 
@@ -271,13 +272,13 @@ func TestRecorderAlreadySucceeded(t *testing.T) {
 		want    bool
 		wantErr error
 	}{
-		{name: "未記録は未完了", store: &fakeStore{}, want: false},
+		{name: "unrecorded is not done", store: &fakeStore{}, want: false},
 		{
-			name:  "完了済み",
+			name:  "succeeded",
 			store: &fakeStore{prevSet: true, prev: testStatus{State: StateSucceeded}},
 			want:  true,
 		},
-		{name: "読めなければエラー", store: &fakeStore{getErr: ErrUnavailable}, wantErr: ErrUnavailable},
+		{name: "error when unreadable", store: &fakeStore{getErr: ErrUnavailable}, wantErr: ErrUnavailable},
 	}
 
 	for _, tt := range tests {
@@ -305,7 +306,7 @@ func TestRecorderAlreadySucceeded(t *testing.T) {
 func TestRecorderDisabled(t *testing.T) {
 	t.Parallel()
 
-	// 状態の記録を任意機能として組み込めるようにするため、nil でも呼び出せる。
+	// Callable even when nil, so status recording can be an optional feature.
 	rec := NewRecorder[testStatus](nil)
 
 	if rec.Enabled() {
@@ -320,16 +321,16 @@ func TestRecorderDisabled(t *testing.T) {
 	rec.Record(t.Context(), "job-1", testStatus{})
 }
 
-// fakeModifier は Modifier も満たす偽実装です。Modify は、トランザクションの
-// やり直しを再現するため、fn を呼んだ後に race が立っていれば記録を書き換えて
-// fn をもう一度呼びます（読んだ後に別の配信が書き込んだ状況）。
+// fakeModifier is a fake that also satisfies Modifier. To reproduce a
+// transaction retry, Modify rewrites the record and calls fn again when race
+// is set after the first fn call (another delivery writing after the read).
 type fakeModifier struct {
 	fakeStore
 
-	// race は、1 回目の fn の後に割り込む書き込みです。
+	// race is the write that cuts in after the first fn call.
 	race      *testStatus
-	modErr    error // 読み取りの失敗（fn を呼ばない）
-	commitErr error // 書き込みの失敗（fn の後）
+	modErr    error // a read failure (fn is not called)
+	commitErr error // a write failure (after fn)
 
 	getCalls int
 	fnCalls  int
@@ -356,8 +357,8 @@ func (f *fakeModifier) Modify(_ context.Context, _ string, fn func(prev *testSta
 			return err
 		}
 		if f.race != nil {
-			// 読んでから書くまでの間に別の書き込みが入った。Firestore はこの
-			// トランザクションを捨て、fn を最新の記録でやり直させる。
+			// Another write landed between the read and the write. Firestore
+			// discards this transaction and reruns fn on the latest record.
 			f.prev, f.prevSet, f.race = *f.race, true, nil
 			continue
 		}
@@ -376,7 +377,7 @@ func (f *fakeModifier) Modify(_ context.Context, _ string, fn func(prev *testSta
 func TestRecorderBeginUsesModifier(t *testing.T) {
 	t.Parallel()
 
-	t.Run("Modify だけで判定と記録を行う", func(t *testing.T) {
+	t.Run("decides and records through Modify alone", func(t *testing.T) {
 		t.Parallel()
 		store := &fakeModifier{}
 		done, err := newTestRecorder(store).Begin(t.Context(), "job-1", testStatus{Status: Status{State: StateRunning}})
@@ -384,17 +385,18 @@ func TestRecorderBeginUsesModifier(t *testing.T) {
 			t.Fatalf("Begin() = (%v, %v), want (false, nil)", done, err)
 		}
 		if store.getCalls != 0 {
-			t.Errorf("Get が %d 回呼ばれた（トランザクションの外で読んでいる）", store.getCalls)
+			t.Errorf("Get called %d times (reading outside the transaction)", store.getCalls)
 		}
 		if len(store.saved) != 1 || store.saved[0].State != StateRunning {
-			t.Errorf("saved = %+v, want running を 1 件", store.saved)
+			t.Errorf("saved = %+v, want one running record", store.saved)
 		}
 	})
 
-	t.Run("判定の後に succeeded が書かれたら、やり直した判定で打ち切る", func(t *testing.T) {
+	t.Run("stops on the retried check when succeeded is written after the first", func(t *testing.T) {
 		t.Parallel()
-		// 前回の配信が完了を記録した直後に、再配信の Begin が走る状況。
-		// Get と Save が別々だと running で上書きし、もう一度生成してしまう。
+		// A redelivery's Begin runs right after the previous delivery recorded
+		// completion. With separate Get and Save it would overwrite with
+		// running and generate again.
 		store := &fakeModifier{
 			fakeStore: fakeStore{prevSet: true, prev: testStatus{Status: Status{State: StateRunning}}},
 			race:      &testStatus{Status: Status{State: StateSucceeded}},
@@ -404,14 +406,14 @@ func TestRecorderBeginUsesModifier(t *testing.T) {
 			t.Fatalf("Begin() = (%v, %v), want (true, nil)", done, err)
 		}
 		if len(store.saved) != 0 {
-			t.Errorf("saved = %+v, want none（succeeded を巻き戻さない）", store.saved)
+			t.Errorf("saved = %+v, want none (succeeded must not roll back)", store.saved)
 		}
 		if store.fnCalls != 2 {
-			t.Errorf("fn の呼び出し = %d, want 2（やり直しで最新を見る）", store.fnCalls)
+			t.Errorf("fn calls = %d, want 2 (the retry sees the latest)", store.fnCalls)
 		}
 	})
 
-	t.Run("読めなければエラーを返し、記録もしない", func(t *testing.T) {
+	t.Run("returns an error without recording when unreadable", func(t *testing.T) {
 		t.Parallel()
 		store := &fakeModifier{modErr: ErrUnavailable}
 		done, err := newTestRecorder(store).Begin(t.Context(), "job-1", testStatus{Status: Status{State: StateRunning}})
@@ -423,9 +425,9 @@ func TestRecorderBeginUsesModifier(t *testing.T) {
 		}
 	})
 
-	t.Run("書き込みだけの失敗は警告に留めて続ける", func(t *testing.T) {
+	t.Run("write-only failure is a warning and continues", func(t *testing.T) {
 		t.Parallel()
-		// 記録は観測のためのもので、書けなかったことを理由に生成を止めない。
+		// The record is for observation; failing to write it does not stop the generation.
 		store := &fakeModifier{commitErr: ErrUnavailable}
 		done, err := newTestRecorder(store).Begin(t.Context(), "job-1", testStatus{Status: Status{State: StateRunning}})
 		if err != nil || done {
@@ -433,7 +435,7 @@ func TestRecorderBeginUsesModifier(t *testing.T) {
 		}
 	})
 
-	t.Run("引き継ぎと apply は前回の記録から行う", func(t *testing.T) {
+	t.Run("carry-over and apply start from the previous record", func(t *testing.T) {
 		t.Parallel()
 		queuedAt := time.Date(2026, 8, 30, 9, 0, 0, 0, time.UTC)
 		store := &fakeModifier{

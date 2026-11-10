@@ -669,10 +669,10 @@ func TestLoginPrompt(t *testing.T) {
 		prompt Prompt
 		want   string
 	}{
-		{name: "未指定なら付けない", prompt: "", want: ""},
-		{name: "アカウント選択を挟む", prompt: PromptSelectAccount, want: "select_account"},
-		{name: "再認証まで要求する", prompt: PromptLogin, want: "login"},
-		{name: "空白だけなら付けない", prompt: "   ", want: ""},
+		{name: "omitted when unspecified", prompt: "", want: ""},
+		{name: "asks to select an account", prompt: PromptSelectAccount, want: "select_account"},
+		{name: "requires reauthentication", prompt: PromptLogin, want: "login"},
+		{name: "omitted when whitespace only", prompt: "   ", want: ""},
 	}
 
 	for _, tt := range tests {

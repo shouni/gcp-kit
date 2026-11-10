@@ -347,7 +347,7 @@ and `oidc` share is `auth`, which callers legitimately use to plug in their own 
 - **Comments, doc comments, error/log/panic messages and test assertion messages are English.** They
   moved from Japanese on 2026-11-10; do not mix Japanese back in. Go style applies to error strings
   (lowercase, no trailing punctuation, ST1005). Subtest names (`t.Run` names and table `name` fields)
-  and test fixture values are still Japanese for now. HTTP response bodies were already English.
+  are English too; test fixture values may stay Japanese. HTTP response bodies were already English.
 - **`README.md` is English and `README.ja.md` is its Japanese version; update the two together.** Both
   carry the language switch under the badges.
 - **The README's feature list carries only what is expensive not to know.** Signatures belong in godoc and

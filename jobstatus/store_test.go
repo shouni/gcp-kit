@@ -22,11 +22,11 @@ func TestStoreRejectsInvalidJobID(t *testing.T) {
 		jobID     string
 		wantCause error
 	}{
-		{name: "空", jobID: "", wantCause: jobid.ErrEmpty},
-		{name: "空白のみ", jobID: "   ", wantCause: jobid.ErrEmpty},
-		{name: "親ディレクトリ参照", jobID: "../..", wantCause: jobid.ErrInvalidFormat},
-		{name: "ハイフン始まり", jobID: "-job", wantCause: jobid.ErrInvalidFormat},
-		{name: "長すぎる", jobID: strings.Repeat("a", jobid.MaxLength+1), wantCause: jobid.ErrTooLong},
+		{name: "empty", jobID: "", wantCause: jobid.ErrEmpty},
+		{name: "whitespace only", jobID: "   ", wantCause: jobid.ErrEmpty},
+		{name: "parent directory reference", jobID: "../..", wantCause: jobid.ErrInvalidFormat},
+		{name: "leading hyphen", jobID: "-job", wantCause: jobid.ErrInvalidFormat},
+		{name: "too long", jobID: strings.Repeat("a", jobid.MaxLength+1), wantCause: jobid.ErrTooLong},
 	}
 
 	for _, tt := range tests {
@@ -76,8 +76,8 @@ func TestStoreRequiresConfiguration(t *testing.T) {
 		name  string
 		store *Store[testStatus]
 	}{
-		{name: "client 未設定", store: NewStore[testStatus](nil, "jobs")},
-		{name: "collection 未設定", store: NewStore[testStatus](nil, "")},
+		{name: "client unset", store: NewStore[testStatus](nil, "jobs")},
+		{name: "collection unset", store: NewStore[testStatus](nil, "")},
 	}
 
 	for _, tt := range tests {

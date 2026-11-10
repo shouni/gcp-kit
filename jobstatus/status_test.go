@@ -91,8 +91,8 @@ func TestStatusEnsureJobID(t *testing.T) {
 		want    string
 	}{
 		// Do not return a struct without an ID when reading an old record that has no job_id.
-		{name: "空なら補う", initial: "", want: "job-1"},
-		{name: "入っていれば触らない", initial: "job-9", want: "job-9"},
+		{name: "fills when empty", initial: "", want: "job-1"},
+		{name: "leaves an existing value", initial: "job-9", want: "job-9"},
 	}
 
 	for _, tt := range tests {

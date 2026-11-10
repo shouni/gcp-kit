@@ -301,11 +301,11 @@ func TestIssueSessionFailsClosed(t *testing.T) {
 		handler *Handler
 		email   string
 	}{
-		"許可リストに無いアドレス": {
+		"address not on the allowlist": {
 			handler: &Handler{store: newTestStore(), sessionName: "test-session", allowedDomains: testAllowedDomains()},
 			email:   "intruder@evil.example",
 		},
-		"許可リストが空": {
+		"empty allowlist": {
 			handler: &Handler{store: newTestStore(), sessionName: "test-session"},
 			email:   "user@example.com",
 		},

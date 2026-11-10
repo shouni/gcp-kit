@@ -18,7 +18,7 @@ func newCSRFTestHandler() *Handler {
 func TestAuthenticatePutsCSRFTokenOnContext(t *testing.T) {
 	t.Parallel()
 
-	t.Run("GET ではトークンを自動生成してコンテキストとセッションへ入れる", func(t *testing.T) {
+	t.Run("GET generates a token into the context and session", func(t *testing.T) {
 		t.Parallel()
 
 		h := newCSRFTestHandler()
@@ -42,7 +42,7 @@ func TestAuthenticatePutsCSRFTokenOnContext(t *testing.T) {
 
 	// Minting on POST would hand a valid token to a request that arrived
 	// without one, making CSRF verification meaningless.
-	t.Run("POST ではトークンを生成しない", func(t *testing.T) {
+	t.Run("POST does not generate a token", func(t *testing.T) {
 		t.Parallel()
 
 		h := newCSRFTestHandler()
@@ -61,7 +61,7 @@ func TestAuthenticatePutsCSRFTokenOnContext(t *testing.T) {
 		}
 	})
 
-	t.Run("既存トークンがあれば作り直さない", func(t *testing.T) {
+	t.Run("keeps an existing token", func(t *testing.T) {
 		t.Parallel()
 
 		h := newCSRFTestHandler()

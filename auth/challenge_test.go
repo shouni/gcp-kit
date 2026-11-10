@@ -57,29 +57,29 @@ func TestChallengeMatrix(t *testing.T) {
 	}{
 		{
 			// A redirect would hand the agent an HTML login page.
-			name: "Protected: エージェントが Bearer を忘れた", accept: "application/json",
+			name: "Protected: agent omitted the Bearer", accept: "application/json",
 			protected: true, wantStatus: http.StatusUnauthorized, wantVary: true,
 		},
 		{
-			name: "Protected: エージェントの Bearer が不正", accept: "application/json", authz: "Bearer bogus",
+			name: "Protected: agent's Bearer is invalid", accept: "application/json", authz: "Bearer bogus",
 			protected: true, wantStatus: http.StatusUnauthorized, wantWWW: `Bearer error="invalid_token"`,
 		},
 		{
 			// Browser behaviour is unchanged.
-			name: "Protected: 未ログインのブラウザ", accept: browserAccept,
+			name: "Protected: browser not logged in", accept: browserAccept,
 			protected: true, wantStatus: http.StatusFound, wantRedir: true, wantVary: true,
 		},
 		{
-			name: "Require: 資格情報なし", accept: "application/json",
+			name: "Require: no credentials", accept: "application/json",
 			wantStatus: http.StatusUnauthorized, wantWWW: "Bearer",
 		},
 		{
-			name: "Require: トークンが不正", accept: "application/json", authz: "Bearer bogus",
+			name: "Require: invalid token", accept: "application/json", authz: "Bearer bogus",
 			wantStatus: http.StatusUnauthorized, wantWWW: `Bearer error="invalid_token"`,
 		},
 		{
 			// A missing setting is the server's fault, so no challenge is sent.
-			name: "Require: 検証器が未設定", accept: "application/json", authz: "Bearer x",
+			name: "Require: verifier not configured", accept: "application/json", authz: "Bearer x",
 			badConfig: true, wantStatus: http.StatusInternalServerError,
 		},
 	}

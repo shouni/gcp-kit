@@ -32,7 +32,7 @@ func TestStoreModify(t *testing.T) {
 	store := newEmulatorStore(t)
 	ctx := t.Context()
 
-	t.Run("未記録なら prev は nil で、書いた値が残る", func(t *testing.T) {
+	t.Run("unrecorded gives nil prev and keeps the written value", func(t *testing.T) {
 		err := store.Modify(ctx, "job-new", func(prev *testStatus) (testStatus, bool, error) {
 			if prev != nil {
 				t.Errorf("prev = %+v, want nil", prev)
@@ -48,7 +48,7 @@ func TestStoreModify(t *testing.T) {
 		}
 	})
 
-	t.Run("write=false なら書かない", func(t *testing.T) {
+	t.Run("write=false does not write", func(t *testing.T) {
 		if err := store.Save(ctx, "job-done", testStatus{Status: Status{State: StateSucceeded}}); err != nil {
 			t.Fatal(err)
 		}
@@ -66,7 +66,7 @@ func TestStoreModify(t *testing.T) {
 		}
 	})
 
-	t.Run("fn のエラーは包まずに返す", func(t *testing.T) {
+	t.Run("returns fn's error unwrapped", func(t *testing.T) {
 		sentinel := errors.New("stop")
 		err := store.Modify(ctx, "job-err", func(*testStatus) (testStatus, bool, error) {
 			return testStatus{}, false, sentinel
@@ -76,7 +76,7 @@ func TestStoreModify(t *testing.T) {
 		}
 	})
 
-	t.Run("同時に Begin しても succeeded は巻き戻らない", func(t *testing.T) {
+	t.Run("concurrent Begin does not roll back succeeded", func(t *testing.T) {
 		// Race the completion record against a redelivery's Begin, concurrently.
 		rec := newTestRecorder(store)
 		const jobID = "job-race"

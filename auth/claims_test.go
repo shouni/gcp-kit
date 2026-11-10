@@ -24,18 +24,18 @@ func TestVerifiedEmail(t *testing.T) {
 		wantErr string // a word the error must contain
 	}{
 		{
-			name:   "検証済みなら通す",
+			name:   "passes when verified",
 			claims: map[string]any{"email": addr, "email_verified": true},
 			want:   addr,
 		},
 		{
-			name:    "未検証は拒否",
+			name:    "rejects unverified",
 			claims:  map[string]any{"email": addr, "email_verified": false},
 			wantErr: "not verified",
 		},
 		{
 			// A missing claim is not "verified".
-			name:    "email_verified が無い場合は拒否",
+			name:    "rejects missing email_verified",
 			claims:  map[string]any{"email": addr},
 			wantErr: "not verified",
 		},
@@ -43,33 +43,33 @@ func TestVerifiedEmail(t *testing.T) {
 			// A JSON value can arrive as a string rather than a bool. Trying to
 			// interpret it as a boolean could make even "false" true, so a wrong
 			// type is rejected.
-			name:    "email_verified が文字列なら拒否",
+			name:    "rejects string email_verified",
 			claims:  map[string]any{"email": addr, "email_verified": "true"},
 			wantErr: "not verified",
 		},
 		{
-			name:    "email_verified が数値なら拒否",
+			name:    "rejects numeric email_verified",
 			claims:  map[string]any{"email": addr, "email_verified": 1},
 			wantErr: "not verified",
 		},
 		{
-			name:    "email が無い場合は拒否",
+			name:    "rejects missing email",
 			claims:  map[string]any{"email_verified": true},
 			wantErr: "no email claim",
 		},
 		{
 			// Letting an empty string through would hand an empty address to the allowlist check.
-			name:    "email が空文字なら拒否",
+			name:    "rejects empty email",
 			claims:  map[string]any{"email": "", "email_verified": true},
 			wantErr: "no email claim",
 		},
 		{
-			name:    "email が文字列でないなら拒否",
+			name:    "rejects non-string email",
 			claims:  map[string]any{"email": 12345, "email_verified": true},
 			wantErr: "no email claim",
 		},
 		{
-			name:    "クレームが nil なら拒否",
+			name:    "rejects nil claims",
 			claims:  nil,
 			wantErr: "no email claim",
 		},

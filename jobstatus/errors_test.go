@@ -16,20 +16,20 @@ func TestClassify(t *testing.T) {
 		code codes.Code
 		want error
 	}{
-		{name: "不在は未記録", code: codes.NotFound, want: ErrNotFound},
+		{name: "not found is unrecorded", code: codes.NotFound, want: ErrNotFound},
 
 		// Each of these is "should exist but could not be read". Treating them as
 		// not recorded would mistake a finished job for an unfinished one and
 		// redo the whole generation.
-		{name: "一時的な障害", code: codes.Unavailable, want: ErrUnavailable},
-		{name: "期限切れ", code: codes.DeadlineExceeded, want: ErrUnavailable},
-		{name: "上限超過", code: codes.ResourceExhausted, want: ErrUnavailable},
-		{name: "サーバー側の失敗", code: codes.Internal, want: ErrUnavailable},
-		{name: "競合による中断", code: codes.Aborted, want: ErrUnavailable},
+		{name: "transient outage", code: codes.Unavailable, want: ErrUnavailable},
+		{name: "deadline exceeded", code: codes.DeadlineExceeded, want: ErrUnavailable},
+		{name: "resource exhausted", code: codes.ResourceExhausted, want: ErrUnavailable},
+		{name: "server-side failure", code: codes.Internal, want: ErrUnavailable},
+		{name: "aborted by contention", code: codes.Aborted, want: ErrUnavailable},
 
 		// Keeps every job from looking "not recorded" the moment permissions are misconfigured.
-		{name: "権限不足", code: codes.PermissionDenied, want: ErrUnavailable},
-		{name: "未認証", code: codes.Unauthenticated, want: ErrUnavailable},
+		{name: "permission denied", code: codes.PermissionDenied, want: ErrUnavailable},
+		{name: "unauthenticated", code: codes.Unauthenticated, want: ErrUnavailable},
 	}
 
 	for _, tt := range tests {

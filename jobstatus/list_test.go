@@ -20,12 +20,12 @@ func TestNewListOptions(t *testing.T) {
 		want listOptions
 	}{
 		{
-			name: "既定は queued_at の降順",
+			name: "default is queued_at descending",
 			want: listOptions{orderBy: "queued_at", descending: true},
 		},
 		{
 			// One listing can correspond to several commands.
-			name: "コマンドは重ねられる",
+			name: "commands accumulate",
 			opts: []ListOption{WithCommand("compose"), WithCommand("generate_from_recipe")},
 			want: listOptions{
 				commands: []string{"compose", "generate_from_recipe"},
@@ -34,7 +34,7 @@ func TestNewListOptions(t *testing.T) {
 		},
 		{
 			// Letting empty through gives Where("command", "==", ""), and the whole listing disappears.
-			name: "空のコマンドは無視する",
+			name: "ignores empty commands",
 			opts: []ListOption{WithCommand("compose", "", "generate_from_recipe")},
 			want: listOptions{
 				commands: []string{"compose", "generate_from_recipe"},
@@ -42,7 +42,7 @@ func TestNewListOptions(t *testing.T) {
 			},
 		},
 		{
-			name: "サービス固有のフィールドは複数指定できる",
+			name: "accepts several service-specific fields",
 			opts: []ListOption{WithField("title_applied", false), WithField("visual_mode", "anime")},
 			want: listOptions{
 				fields:  []fieldFilter{{path: "title_applied", value: false}, {path: "visual_mode", value: "anime"}},
@@ -51,17 +51,17 @@ func TestNewListOptions(t *testing.T) {
 		},
 		{
 			// Firestore returns an error on an empty path, so the option drops it.
-			name: "空のパスは無視する",
+			name: "ignores empty paths",
 			opts: []ListOption{WithField("", true)},
 			want: listOptions{orderBy: "queued_at", descending: true},
 		},
 		{
-			name: "状態と並び順は上書きできる",
+			name: "state and order can be overridden",
 			opts: []ListOption{WithState(StateFailed), WithOrderBy("updated_at", false)},
 			want: listOptions{state: StateFailed, orderBy: "updated_at"},
 		},
 		{
-			name: "nil のオプションは読み飛ばす",
+			name: "skips nil options",
 			opts: []ListOption{nil, WithState(StateQueued)},
 			want: listOptions{state: StateQueued, orderBy: "queued_at", descending: true},
 		},
@@ -99,8 +99,8 @@ func TestListAndLatestRejectAnUnconfiguredStore(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]*Store[Status]{
-		"クライアントが無い":  {},
-		"コレクション名が無い": {client: &firestore.Client{}},
+		"no client":          {},
+		"no collection name": {client: &firestore.Client{}},
 	}
 
 	for name, store := range tests {
@@ -146,10 +146,10 @@ func TestFilteredQueryAppliesEveryFilter(t *testing.T) {
 	unfiltered := serialize(t)
 
 	for name, opt := range map[string]ListOption{
-		"状態":          WithState(StateSucceeded),
-		"コマンド 1 つ":    WithCommand("compose"),
-		"コマンド 2 つ":    WithCommand("compose", "generate_from_recipe"),
-		"サービス固有フィールド": WithField("title_pending", false),
+		"state":                  WithState(StateSucceeded),
+		"one command":            WithCommand("compose"),
+		"two commands":           WithCommand("compose", "generate_from_recipe"),
+		"service-specific field": WithField("title_pending", false),
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

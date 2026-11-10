@@ -115,64 +115,64 @@ func TestParseTraceContext(t *testing.T) {
 		wantSpan  string
 	}{
 		{
-			name:      "Cloud Run が送る形。10 進数の SPAN_ID を 16 進 16 桁へ直す",
+			name:      "Cloud Run form: decimal SPAN_ID becomes 16 hex digits",
 			header:    testTraceHeader,
 			wantTrace: testTraceID,
 			wantSpan:  testSpanID,
 		},
 		{
-			name:      "サンプリング指定なし",
+			name:      "no sampling flag",
 			header:    testTraceID + "/456",
 			wantTrace: testTraceID,
 			wantSpan:  "00000000000001c8",
 		},
 		{
-			name:      "32 桁に満たない TRACE_ID は 0 で左詰めする",
+			name:      "TRACE_ID shorter than 32 digits is zero-padded",
 			header:    "abc123/1",
 			wantTrace: "00000000000000000000000000abc123",
 			wantSpan:  testSpanID,
 		},
 		{
-			name:      "大文字の 16 進数は小文字へ揃える",
+			name:      "uppercase hex is lowercased",
 			header:    "ABC123/1",
 			wantTrace: "00000000000000000000000000abc123",
 			wantSpan:  testSpanID,
 		},
 		{
-			name:      "SPAN_ID なし",
+			name:      "no SPAN_ID",
 			header:    testTraceID,
 			wantTrace: testTraceID,
 		},
 		{
-			name:      "SPAN_ID が無く、サンプリング指定だけある形",
+			name:      "sampling flag without SPAN_ID",
 			header:    testTraceID + ";o=1",
 			wantTrace: testTraceID,
 		},
 		{
-			name:   "16 進数でない TRACE_ID は相関に使わない",
+			name:   "non-hex TRACE_ID is not correlated",
 			header: "trace-abc/1",
 		},
 		{
-			name:   "32 桁を超える TRACE_ID は相関に使わない",
+			name:   "TRACE_ID longer than 32 digits is not correlated",
 			header: strings.Repeat("a", 33) + "/1",
 		},
 		{
-			name:      "10 進数でない SPAN_ID は捨てるが、TRACE_ID は残す",
+			name:      "non-decimal SPAN_ID is dropped but TRACE_ID kept",
 			header:    testTraceID + "/span-1",
 			wantTrace: testTraceID,
 		},
 		{
-			name:      "SPAN_ID 0 は「スパンなし」の意味",
+			name:      "SPAN_ID 0 means no span",
 			header:    testTraceID + "/0",
 			wantTrace: testTraceID,
 		},
 		{
-			name:      "64 ビットに収まらない SPAN_ID は捨てる",
+			name:      "SPAN_ID overflowing 64 bits is dropped",
 			header:    testTraceID + "/18446744073709551616",
 			wantTrace: testTraceID,
 		},
 		{
-			name:   "空",
+			name:   "empty",
 			header: "",
 		},
 	}

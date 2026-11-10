@@ -104,7 +104,7 @@ func TestRequireDelegatesToChallenger(t *testing.T) {
 func TestProtected(t *testing.T) {
 	t.Parallel()
 
-	t.Run("最初に成立した方式で通す", func(t *testing.T) {
+	t.Run("passes on the first method that succeeds", func(t *testing.T) {
 		t.Parallel()
 
 		first := &fakeAuth{}
@@ -122,7 +122,7 @@ func TestProtected(t *testing.T) {
 		}
 	})
 
-	t.Run("未着手なら次の方式を試す", func(t *testing.T) {
+	t.Run("tries the next method when not attempted", func(t *testing.T) {
 		t.Parallel()
 
 		first := &fakeAuth{err: ErrNotAttempted}
@@ -142,7 +142,7 @@ func TestProtected(t *testing.T) {
 
 	// A missing setting does not stop the fallback. Stopping it would lock even
 	// people out until the other setting is fixed. It is still logged.
-	t.Run("未設定でも次の方式へ進む", func(t *testing.T) {
+	t.Run("moves to the next method when unconfigured", func(t *testing.T) {
 		t.Parallel()
 
 		reached := false
@@ -158,7 +158,7 @@ func TestProtected(t *testing.T) {
 	// When no method was presented with credentials, the last method decides
 	// the response. With the browser-facing method last, a browser is sent to
 	// the login page.
-	t.Run("誰も提示していなければ最後の方式が応答を決める", func(t *testing.T) {
+	t.Run("last method decides the response when none was presented", func(t *testing.T) {
 		t.Parallel()
 
 		last := &challenger{fakeAuth{err: errors.New("no session")}}
@@ -182,7 +182,7 @@ func TestProtected(t *testing.T) {
 	// The method that was presented and failed answers. Letting the last
 	// method answer here would send an HTML login page to an agent that asked
 	// for JSON.
-	t.Run("提示して落ちた方式が応答を決める", func(t *testing.T) {
+	t.Run("method that was presented and failed decides the response", func(t *testing.T) {
 		t.Parallel()
 
 		presented := &fakeAuth{err: errors.New("bad signature")}
@@ -206,7 +206,7 @@ func TestProtected(t *testing.T) {
 
 	// Scanning continues past a decisive failure, so a call holding both bad
 	// credentials and a valid session is not locked out.
-	t.Run("提示して落ちても、後続が成立すれば通す", func(t *testing.T) {
+	t.Run("passes when a later method succeeds after a failed one", func(t *testing.T) {
 		t.Parallel()
 
 		reached := false
@@ -221,7 +221,7 @@ func TestProtected(t *testing.T) {
 
 	// A missing setting is not treated as a decisive failure. Stopping on it
 	// would lock even people out until the service configuration is fixed.
-	t.Run("未設定は応答役にならない", func(t *testing.T) {
+	t.Run("unconfigured method does not decide the response", func(t *testing.T) {
 		t.Parallel()
 
 		last := &challenger{fakeAuth{err: errors.New("no session")}}
@@ -240,7 +240,7 @@ func TestProtected(t *testing.T) {
 		_ = reached
 	})
 
-	t.Run("nil の方式は読み飛ばす", func(t *testing.T) {
+	t.Run("skips nil methods", func(t *testing.T) {
 		t.Parallel()
 
 		reached := false
@@ -252,7 +252,7 @@ func TestProtected(t *testing.T) {
 		}
 	})
 
-	t.Run("方式が1つも無ければ 401", func(t *testing.T) {
+	t.Run("401 with no methods", func(t *testing.T) {
 		t.Parallel()
 
 		reached := false

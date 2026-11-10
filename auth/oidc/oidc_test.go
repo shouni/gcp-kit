@@ -116,32 +116,32 @@ func TestVerifierAuthenticate(t *testing.T) {
 		wantErr  error // compared with errors.Is; nil expects success
 	}{
 		{
-			name:     "許可済みサービスアカウントは通過する",
+			name:     "allowed service account passes",
 			allowed:  []string{testAccount},
 			authz:    "Bearer valid-token",
 			validate: stubValidate(testAccount, nil),
 		},
 		{
-			name:     "大文字小文字が違っても許可リストに一致する",
+			name:     "matches the allowlist case-insensitively",
 			allowed:  []string{testAccount},
 			authz:    "Bearer valid-token",
 			validate: stubValidate("Tasks@Project.IAM.gserviceaccount.com", nil),
 		},
 		{
-			name:     "小文字の bearer スキームでも通過する",
+			name:     "passes with a lowercase bearer scheme",
 			allowed:  []string{testAccount},
 			authz:    "bearer valid-token",
 			validate: stubValidate(testAccount, nil),
 		},
 		{
-			name:     "許可リストに無いサービスアカウントは拒否する",
+			name:     "rejects a service account not on the allowlist",
 			allowed:  []string{testAccount},
 			authz:    "Bearer valid-token",
 			validate: stubValidate("attacker@evil.iam.gserviceaccount.com", nil),
 			wantErr:  errSentinel,
 		},
 		{
-			name:     "署名検証に失敗したら拒否する",
+			name:     "rejects on signature verification failure",
 			allowed:  []string{testAccount},
 			authz:    "Bearer invalid-token",
 			validate: stubValidate("", errors.New("bad signature")),
@@ -149,7 +149,7 @@ func TestVerifierAuthenticate(t *testing.T) {
 		},
 		{
 			// An unverified email address does not prove ownership.
-			name:    "未検証のメールアドレスは拒否する",
+			name:    "rejects an unverified email",
 			allowed: []string{testAccount},
 			authz:   "Bearer valid-token",
 			validate: func(context.Context, string, string) (*idtoken.Payload, error) {
@@ -158,7 +158,7 @@ func TestVerifierAuthenticate(t *testing.T) {
 			wantErr: errSentinel,
 		},
 		{
-			name:    "email クレームが無ければ拒否する",
+			name:    "rejects a missing email claim",
 			allowed: []string{testAccount},
 			authz:   "Bearer valid-token",
 			validate: func(context.Context, string, string) (*idtoken.Payload, error) {
@@ -167,7 +167,7 @@ func TestVerifierAuthenticate(t *testing.T) {
 			wantErr: errSentinel,
 		},
 		{
-			name:    "ペイロードが nil なら拒否する",
+			name:    "rejects a nil payload",
 			allowed: []string{testAccount},
 			authz:   "Bearer valid-token",
 			validate: func(context.Context, string, string) (*idtoken.Payload, error) {
@@ -177,7 +177,7 @@ func TestVerifierAuthenticate(t *testing.T) {
 		},
 		{
 			// Calls from browsers land here. The composer moves on to the next method.
-			name:     "Authorization ヘッダーが無ければ未着手",
+			name:     "not attempted without an Authorization header",
 			allowed:  []string{testAccount},
 			authz:    "",
 			validate: stubValidate(testAccount, nil),
@@ -185,7 +185,7 @@ func TestVerifierAuthenticate(t *testing.T) {
 		},
 		{
 			// An empty allowlist is a missing setting. Mixed with not-attempted, it would hide behind the fallback.
-			name:     "許可リストが空なら未設定",
+			name:     "unconfigured with an empty allowlist",
 			allowed:  nil,
 			authz:    "Bearer valid-token",
 			validate: stubValidate(testAccount, nil),
@@ -266,23 +266,23 @@ func TestVerifierChallenge(t *testing.T) {
 		wantWWW    string
 	}{
 		{
-			name: "資格情報なし", allowed: []string{testAccount}, authz: "",
+			name: "no credentials", allowed: []string{testAccount}, authz: "",
 			validate:   stubValidate(testAccount, nil),
 			wantStatus: http.StatusUnauthorized, wantWWW: "Bearer",
 		},
 		{
-			name: "トークンが不正", allowed: []string{testAccount}, authz: "Bearer bogus",
+			name: "invalid token", allowed: []string{testAccount}, authz: "Bearer bogus",
 			validate:   stubValidate("", errors.New("bad signature")),
 			wantStatus: http.StatusUnauthorized, wantWWW: `Bearer error="invalid_token"`,
 		},
 		{
-			name: "許可リストに無い呼び出し元", allowed: []string{testAccount}, authz: "Bearer valid",
+			name: "caller not on the allowlist", allowed: []string{testAccount}, authz: "Bearer valid",
 			validate:   stubValidate("stranger@evil.iam.gserviceaccount.com", nil),
 			wantStatus: http.StatusForbidden, wantWWW: `Bearer error="insufficient_scope"`,
 		},
 		{
 			// A missing setting is the server's fault, so no challenge is sent.
-			name: "検証器が未設定", allowed: nil, authz: "Bearer valid",
+			name: "verifier not configured", allowed: nil, authz: "Bearer valid",
 			validate:   stubValidate(testAccount, nil),
 			wantStatus: http.StatusInternalServerError, wantWWW: "",
 		},

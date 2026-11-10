@@ -37,8 +37,8 @@ func TestMetadataFromHeader(t *testing.T) {
 	}
 }
 
-// TestMetadataFromHeaderMalformed は、Cloud Tasks 以外からの呼び出しや壊れた
-// ヘッダーでもパニックせずゼロ値になることを確認します。
+// TestMetadataFromHeaderMalformed checks that calls not from Cloud Tasks and
+// broken headers give zero values without panicking.
 func TestMetadataFromHeaderMalformed(t *testing.T) {
 	t.Parallel()
 
@@ -78,7 +78,7 @@ func TestMetadataFromContext(t *testing.T) {
 		}
 	})
 
-	// Cloud Tasks 以外からの呼び出しではタスク名が無いため ok=false になります。
+	// Calls not from Cloud Tasks have no task name, so ok is false.
 	t.Run("empty metadata is not reported as present", func(t *testing.T) {
 		t.Parallel()
 		ctx := WithMetadata(context.Background(), Metadata{})
@@ -88,7 +88,7 @@ func TestMetadataFromContext(t *testing.T) {
 	})
 }
 
-// metadataCapturingExecutor は Execute に渡されたコンテキストのメタデータを記録します。
+// metadataCapturingExecutor records the metadata in the context passed to Execute.
 type metadataCapturingExecutor struct {
 	md Metadata
 	ok bool

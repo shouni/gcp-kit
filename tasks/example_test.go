@@ -8,7 +8,7 @@ import (
 	"github.com/shouni/gcp-kit/tasks"
 )
 
-// Job は producer と worker の間の JSON ペイロード契約です。
+// Job is the JSON payload contract between producer and worker.
 type Job struct {
 	JobID string `json:"job_id"`
 	Step  int    `json:"step"`
@@ -23,13 +23,13 @@ func ExampleNewEnqueuer() {
 		QueueID:             "jobs",
 		WorkerURL:           "https://worker.example.com/tasks/run",
 		ServiceAccountEmail: "tasks@my-project.iam.gserviceaccount.com",
-		// Audience は省略すると WorkerURL が使われます。
+		// Audience falls back to WorkerURL when omitted.
 	})
 	if err != nil {
 		slog.Error("failed to create enqueuer", "error", err)
 		return
 	}
-	// gRPC コネクションを保持するため、シングルトンとして再利用し終了時に閉じます。
+	// It holds a gRPC connection, so reuse it as a singleton and close it on exit.
 	defer func() { _ = enqueuer.Close() }()
 
 	if err := enqueuer.Enqueue(ctx, Job{JobID: "job-1", Step: 1}); err != nil {
@@ -37,7 +37,7 @@ func ExampleNewEnqueuer() {
 	}
 }
 
-// newExampleEnqueuer は、以降の例で「生成済みの Enqueuer」を表すヘルパーです。
+// newExampleEnqueuer is a helper standing for "an Enqueuer already created" in the examples below.
 func newExampleEnqueuer() *tasks.Enqueuer[Job] {
 	enqueuer, err := tasks.NewEnqueuer[Job](context.Background(), tasks.Config{
 		ProjectID:           "my-project",
@@ -52,7 +52,7 @@ func newExampleEnqueuer() *tasks.Enqueuer[Job] {
 	return enqueuer
 }
 
-// 同じ論理タスクを二重に作らせたくない場合は、決定的な名前で投入します。
+// When the same logical task must not be created twice, enqueue under a deterministic name.
 func ExampleEnqueuer_EnqueueWithName() {
 	ctx := context.Background()
 	enqueuer := newExampleEnqueuer()
@@ -61,14 +61,14 @@ func ExampleEnqueuer_EnqueueWithName() {
 	}
 	defer func() { _ = enqueuer.Close() }()
 
-	// 同じ taskID での2回目以降は ALREADY_EXISTS となり、成功として扱われます。
+	// A second enqueue with the same taskID gets ALREADY_EXISTS, treated as success.
 	taskID := "job-1-step-2"
 	if err := enqueuer.EnqueueWithName(ctx, taskID, Job{JobID: "job-1", Step: 2}); err != nil {
 		slog.Error("enqueue failed", "error", err)
 	}
 }
 
-// 遅延実行・応答待ち時間・追加ヘッダーを指定する例です。
+// An example setting a delay, a dispatch deadline and an extra header.
 func ExampleEnqueuer_EnqueueWithOptions() {
 	ctx := context.Background()
 	enqueuer := newExampleEnqueuer()

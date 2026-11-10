@@ -1,8 +1,9 @@
-// Package cloudrun は、Cloud Run 上で HTTP サーバーを動かすときに毎回同じ答えに
-// なる部分を持ちます。ヘルスチェックの公開と、起動から停止までの面倒です。
+// Package cloudrun holds the parts of running an HTTP server on Cloud Run
+// whose answer is the same every time: serving the health check, and looking
+// after everything from startup to shutdown.
 //
-// 語彙（web / worker）は serverrole、ログは cloudlog が持ちます。ここにあるのは
-// 「プロセスがどう受けて、どう止まるか」だけです。
+// The vocabulary (web / worker) lives in serverrole and logging in cloudlog.
+// What is here is only "how the process takes requests and how it stops".
 package cloudrun
 
 import (
@@ -15,89 +16,96 @@ import (
 	"time"
 )
 
-// HealthPath は、ヘルスチェックを公開するパスです。
+// HealthPath is the path the health check is served on.
 //
-// "/healthz" を使いません。Cloud Run の既定ドメイン (*.run.app) では GFE 側が
-// このパスを予約パス的に扱い、リクエストがコンテナへ届く前に汎用の 404 へ
-// 置き換えられます。ローカルでは通るのにデプロイすると 404 になる、という形で
-// しか現れないので、名前をここに固定しておきます。
+// It is not "/healthz". On Cloud Run's default domain (*.run.app) the GFE
+// treats that path as reserved and replaces the request with a generic 404
+// before it reaches the container. It only shows up as "works locally, 404s
+// once deployed", so the name is pinned here.
 const HealthPath = "/health"
 
-// Health は、200 と "ok" を返すヘルスチェックハンドラーです。
+// Health is a health check handler that returns 200 and "ok".
 //
-// 依存の生死は見ません。Cloud Run のヘルスチェックが落ちるとインスタンスごと
-// 入れ替えられるため、ここで下流の障害を伝えると、下流が復旧するまで
-// 再起動を繰り返すだけになります。プロセスが応答できることだけを答えます。
+// It does not look at whether dependencies are alive. A failing Cloud Run
+// health check gets the whole instance replaced, so reporting a downstream
+// outage here would only restart it over and over until the downstream
+// recovers. It answers only that the process can respond.
 func Health(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
 }
 
-// 既定値。Cloud Run の性質から決まる値です。
+// Defaults, decided by how Cloud Run behaves.
 const (
-	// DefaultReadHeaderTimeout はヘッダー読み取りに許す時間です。
+	// DefaultReadHeaderTimeout is how long reading the headers may take.
 	//
-	// Cloud Run は同時リクエスト数でスケールするため、ヘッダーを少しずつ送り
-	// 続ける接続に数本掴まれるだけでインスタンスが詰まります（Slowloris）。
-	// 正常なクライアントには十分すぎる短さで足ります。
+	// Cloud Run scales on concurrent requests, so a few connections that keep
+	// trickling headers are enough to jam an instance (Slowloris). A value
+	// short enough is still more than enough for a well-behaved client.
 	DefaultReadHeaderTimeout = 5 * time.Second
 
-	// DefaultIdleTimeout は keep-alive 接続を保持する上限です。
+	// DefaultIdleTimeout is the longest a keep-alive connection is held.
 	DefaultIdleTimeout = 120 * time.Second
 
-	// DefaultShutdownTimeout は SIGTERM 後に停止を待つ上限です。
+	// DefaultShutdownTimeout is the longest to wait for shutdown after SIGTERM.
 	//
-	// Cloud Run は SIGTERM から 10 秒で SIGKILL します（container runtime contract）。
-	// この上限をそれ以上にすると、待ち切る前にプロセスごと消えるため、shutdown の
-	// 強制クローズの分岐（掴んでいる接続を切って終わらせる）が本番では一度も走りません。
-	// 8 秒にしているのは、強制クローズと最後のログを書き出す余地を 2 秒残すためです。
-	// 猶予を延ばしたデプロイでは Config.ShutdownTimeout で上書きしてください。
+	// Cloud Run sends SIGKILL 10 seconds after SIGTERM (the container runtime
+	// contract). With a limit at or above that, the process disappears before
+	// the wait ends, so shutdown's force-close branch (cutting held
+	// connections to finish) never runs in production. It is 8 seconds to
+	// leave 2 seconds for the force close and the last log lines. On a
+	// deployment with a longer grace period, override it with
+	// Config.ShutdownTimeout.
 	DefaultShutdownTimeout = 8 * time.Second
 )
 
-// Config は Serve の設定です。Port と Handler だけが必須です。
+// Config configures Serve. Only Port and Handler are required.
 type Config struct {
-	// Port は待ち受けるポートです。Cloud Run が PORT 環境変数で渡します。
-	// Listener を指定した場合は使いません。
+	// Port is the port to listen on, which Cloud Run passes in the PORT
+	// environment variable. It is unused when Listener is set.
 	Port string
-	// Handler はルーターです。
+	// Handler is the router.
 	Handler http.Handler
 
-	// Listener を指定すると、Port で待ち受ける代わりにこのリスナーを使います。
+	// Listener, when set, is used instead of listening on Port.
 	//
-	// テストのためにあります。ポート 0 で開いたリスナーを渡せば、空きポートを
-	// 探して接続できるまでポーリングする、という迂回をせずにサーバーを起動できます。
-	// 起動と正常停止をキットが持つ以上、それを試せる形にするのもキットの役目です
-	// （さもないと、テストしたいアプリが自前のサーブループを抱え続けます）。
+	// It exists for tests. Passing a listener opened on port 0 starts the
+	// server without the detour of finding a free port and polling until it
+	// accepts connections. Since the kit owns startup and graceful shutdown,
+	// making them testable is the kit's job too (otherwise an app that wants
+	// to test them keeps carrying its own serve loop).
 	//
-	// Serve は、自分で開いたリスナーもここで渡されたリスナーも閉じます。
+	// Serve closes both a listener it opened itself and one passed here.
 	Listener net.Listener
 
-	// ReadHeaderTimeout / IdleTimeout は 0 なら既定値です。
+	// ReadHeaderTimeout and IdleTimeout use the defaults when 0.
 	ReadHeaderTimeout time.Duration
 	IdleTimeout       time.Duration
 
-	// ReadTimeout / WriteTimeout は 0 なら設定しません（無制限）。
+	// ReadTimeout and WriteTimeout are not set when 0 (no limit).
 	//
-	// WriteTimeout に既定値を置かないのは意図的です。worker 面のハンドラーは
-	// 数分から数十分かかることがあり、既定値を置くと正常な応答を途中で切ります。
-	// 実行時間の上限は Cloud Tasks の DispatchDeadline とアプリ側のタイムアウトが
-	// 受け持つので、ここは既定では縛りません。
+	// Having no default for WriteTimeout is deliberate. Worker handlers can
+	// take from minutes to tens of minutes, and a default would cut a healthy
+	// response in half. The run-time limit belongs to Cloud Tasks'
+	// DispatchDeadline and the app's own timeout, so nothing is bound here by
+	// default.
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 
-	// ShutdownTimeout は 0 なら DefaultShutdownTimeout です。
+	// ShutdownTimeout is DefaultShutdownTimeout when 0.
 	ShutdownTimeout time.Duration
 
-	// Logger は未指定なら slog.Default() です。
+	// Logger defaults to slog.Default().
 	Logger *slog.Logger
 }
 
-// Serve はサーバーを起動し、ctx が終わるまで動かしてから正常に停止します。
+// Serve starts the server, runs it until ctx is done, and then shuts it down
+// gracefully.
 //
-// シグナルの購読はしません。signal.NotifyContext などで作った ctx を渡して
-// ください。停止の理由（シグナルか、上位の失敗か）を決めるのは呼び出し側です。
+// It does not subscribe to signals. Pass a ctx made with signal.NotifyContext
+// or similar. What counts as a reason to stop (a signal, or a failure higher
+// up) is the caller's decision.
 //
 //	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 //	defer stop()
@@ -107,17 +115,17 @@ func Serve(ctx context.Context, cfg Config) error {
 		return errors.New("cloudrun: Handler must not be nil")
 	}
 	if cfg.Port == "" && cfg.Listener == nil {
-		return errors.New("cloudrun: Port または Listener のどちらかが要ります")
+		return errors.New("cloudrun: either Port or Listener is required")
 	}
 
 	ln := cfg.Listener
 	if ln == nil {
-		// ListenConfig を使うのは ctx を尊重させるためです。起動直後に停止が
-		// 掛かった場合、待ち受けの確立まで待たずに諦められます。
+		// ListenConfig is used so that ctx is honoured: if a stop arrives right
+		// after startup, it can give up without waiting for the listener.
 		var lc net.ListenConfig
 		var err error
 		if ln, err = lc.Listen(ctx, "tcp", net.JoinHostPort("", cfg.Port)); err != nil {
-			return fmt.Errorf("cloudrun: ポート %s で待ち受けられません: %w", cfg.Port, err)
+			return fmt.Errorf("cloudrun: cannot listen on port %s: %w", cfg.Port, err)
 		}
 	}
 
@@ -126,8 +134,8 @@ func Serve(ctx context.Context, cfg Config) error {
 
 	serverErrors := make(chan error, 1)
 	go func() {
-		log.InfoContext(ctx, "HTTP サーバーを起動しました", "addr", ln.Addr().String())
-		// Serve はリスナーを閉じて返るため、渡されたリスナーもここで閉じられます。
+		log.InfoContext(ctx, "HTTP server started", "addr", ln.Addr().String())
+		// Serve closes the listener when it returns, so a passed-in listener is closed here too.
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serverErrors <- err
 		}
@@ -135,15 +143,15 @@ func Serve(ctx context.Context, cfg Config) error {
 
 	select {
 	case err := <-serverErrors:
-		return fmt.Errorf("cloudrun: サーバーが異常終了しました: %w", err)
+		return fmt.Errorf("cloudrun: server exited unexpectedly: %w", err)
 	case <-ctx.Done():
-		log.InfoContext(ctx, "停止シグナルを受け取りました。正常停止を開始します")
+		log.InfoContext(ctx, "received stop signal, starting graceful shutdown")
 		return shutdown(srv, cfg.shutdownTimeout(), log)
 	}
 }
 
-// NewServer は Serve が使う *http.Server を組み立てます。
-// 自分でライフサイクルを持ちたい場合に、既定値だけを借りられるよう公開しています。
+// NewServer builds the *http.Server Serve uses. It is exported so a caller
+// that wants to own the lifecycle can still borrow the defaults.
 func NewServer(cfg Config) *http.Server {
 	return cfg.newServer()
 }
@@ -154,30 +162,32 @@ func (c Config) newServer() *http.Server {
 		Handler:           c.Handler,
 		ReadHeaderTimeout: orDefault(c.ReadHeaderTimeout, DefaultReadHeaderTimeout),
 		IdleTimeout:       orDefault(c.IdleTimeout, DefaultIdleTimeout),
-		// 0 は「設定しない」の意味なので、そのまま渡します。
+		// 0 means "not set", so the values are passed through as is.
 		ReadTimeout:  c.ReadTimeout,
 		WriteTimeout: c.WriteTimeout,
 	}
 }
 
-// shutdown は、猶予の内に停止しなければ強制的に閉じます。
+// shutdown force-closes the server if it does not stop within the grace
+// period.
 //
-// Shutdown が失敗したまま返ると、接続を掴んだままプロセスが残り、Cloud Run の
-// SIGKILL を待つことになります。掴んでいる接続を切ってでも終わらせます。
+// Returning while Shutdown has failed leaves the process holding connections
+// until Cloud Run's SIGKILL. It finishes even if that means cutting the held
+// connections.
 func shutdown(srv *http.Server, timeout time.Duration, log *slog.Logger) error {
-	// 停止の猶予は、キャンセル済みの ctx とは別に取ります。
+	// The grace period is taken separately from the already-cancelled ctx.
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
-		log.ErrorContext(ctx, "正常停止に失敗しました。強制的に閉じます", "error", err)
+		log.ErrorContext(ctx, "graceful shutdown failed, force-closing", "error", err)
 		if closeErr := srv.Close(); closeErr != nil {
-			return errors.Join(err, fmt.Errorf("cloudrun: 強制クローズにも失敗しました: %w", closeErr))
+			return errors.Join(err, fmt.Errorf("cloudrun: force close failed too: %w", closeErr))
 		}
-		return fmt.Errorf("cloudrun: 正常停止に失敗したため強制停止しました: %w", err)
+		return fmt.Errorf("cloudrun: graceful shutdown failed, force-closed: %w", err)
 	}
 
-	log.InfoContext(ctx, "サーバーは正常に停止しました")
+	log.InfoContext(ctx, "server stopped gracefully")
 	return nil
 }
 

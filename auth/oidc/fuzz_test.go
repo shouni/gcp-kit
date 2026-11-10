@@ -7,8 +7,9 @@ import (
 	"testing"
 )
 
-// FuzzExtractBearerToken は、Authorization ヘッダーの解析がパニックせず、
-// 受理したトークンに "Bearer " プレフィックスや前後の空白が残らないことを検証します。
+// FuzzExtractBearerToken checks that parsing the Authorization header never
+// panics, and that an accepted token keeps no "Bearer " prefix or surrounding
+// whitespace.
 func FuzzExtractBearerToken(f *testing.F) {
 	for _, seed := range []string{"Bearer abc", "bearer abc", "BEARER  abc  ", "Basic abc", "Bearer", "", "Bearer\tabc"} {
 		f.Add(seed)
@@ -20,7 +21,7 @@ func FuzzExtractBearerToken(f *testing.F) {
 
 		token, ok := extractBearerToken(req)
 
-		// Set したヘッダーは正規化され得るため、実際に届く値を基準に判定します。
+		// A header that was Set may be normalised, so judge by the value that actually arrives.
 		const prefix = "Bearer "
 		received := req.Header.Get("Authorization")
 		wantOK := len(received) >= len(prefix) && strings.EqualFold(received[:len(prefix)], prefix)
@@ -35,8 +36,8 @@ func FuzzExtractBearerToken(f *testing.F) {
 			return
 		}
 
-		// トークン本体は任意の文字列であり得ますが、スキーム部分は必ず取り除かれ、
-		// 前後の空白も残りません。
+		// The token itself can be any string, but the scheme is always removed
+		// and no surrounding whitespace remains.
 		if want := strings.TrimSpace(received[len(prefix):]); token != want {
 			t.Fatalf("extractBearerToken(%q) = %q, want %q", received, token, want)
 		}

@@ -124,9 +124,10 @@ func TestFetchUserEmail(t *testing.T) {
 		}
 	})
 
-	// 判定を auth.VerifiedEmail に委ねる前は、この経路だけ空アドレスを素通しして
-	// いました（ID トークン経路は弾いていました）。基準を書き写すのではなく同じ
-	// 関数を呼ぶようにした理由がこれで、片側だけが緩んだ状態が実際に起きていました。
+	// Before the check was handed to auth.VerifiedEmail, this path alone let an
+	// empty address through (the ID token path rejected it). That is why it
+	// calls the same function instead of restating the rule: one side really
+	// had loosened.
 	t.Run("verified but empty email fails", func(t *testing.T) {
 		t.Parallel()
 		h, ctx := newFetchUserEmailHandler(t, func(w http.ResponseWriter, _ *http.Request) {
@@ -140,8 +141,8 @@ func TestFetchUserEmail(t *testing.T) {
 		}
 	})
 
-	// エラー応答をそのままデコードすると「未検証」という実態と異なるエラーに
-	// なってしまうため、ステータスコードを先に確認します。
+	// Decoding an error response as is would give an "unverified" error that
+	// misstates what happened, so the status code is checked first.
 	t.Run("non-200 response reports the status", func(t *testing.T) {
 		t.Parallel()
 		h, ctx := newFetchUserEmailHandler(t, func(w http.ResponseWriter, _ *http.Request) {
@@ -191,8 +192,9 @@ func TestClearSessionCookie(t *testing.T) {
 	}
 }
 
-// TestClearSessionCookieDeletesTheEntity は、クッキーを落とすだけでなく保存された実体も
-// 消すことを確認します。盗まれたクッキーが有効なままなら、ログアウトになりません。
+// TestClearSessionCookieDeletesTheEntity checks that not only the cookie but the
+// stored session is deleted. If a stolen cookie stayed valid, it would not be a
+// logout.
 func TestClearSessionCookieDeletesTheEntity(t *testing.T) {
 	t.Parallel()
 
@@ -212,8 +214,9 @@ func TestClearSessionCookieDeletesTheEntity(t *testing.T) {
 	}
 }
 
-// TestClearSessionCookieUnreachableStore は、実体を消せなくてもクッキーは落とし、
-// エラーは呼び出し元へ返すことを確認します。
+// TestClearSessionCookieUnreachableStore checks that the cookie is cleared even
+// when the stored session cannot be deleted, and the error goes back to the
+// caller.
 func TestClearSessionCookieUnreachableStore(t *testing.T) {
 	t.Parallel()
 
@@ -255,9 +258,9 @@ func TestRandomTokenAndGenerateState(t *testing.T) {
 	}
 }
 
-// TestIssueSessionProducesAcceptedCookie は、IssueSession が出したクッキーを
-// Authenticate がそのまま受け付けることを確認します。この往復が IssueSession の
-// 存在理由なので、クッキーの作り方を変えたらここが壊れます。
+// TestIssueSessionProducesAcceptedCookie checks that Authenticate accepts the
+// cookie IssueSession produced as is. This round trip is why IssueSession
+// exists, so changing how the cookie is built breaks here.
 func TestIssueSessionProducesAcceptedCookie(t *testing.T) {
 	t.Parallel()
 
@@ -269,9 +272,9 @@ func TestIssueSessionProducesAcceptedCookie(t *testing.T) {
 	}
 	cookies := rr.Result().Cookies()
 	if len(cookies) == 0 {
-		t.Fatal("IssueSession() がセッションクッキーを出していません")
+		t.Fatal("IssueSession() did not set a session cookie")
 	}
-	// リダイレクトを書くと、ハンドラーの前でログイン状態を作る用途に使えません。
+	// Writing a redirect would make it useless for creating a logged-in state before a handler.
 	if rr.Code != http.StatusOK {
 		t.Errorf("status = %d, want %d", rr.Code, http.StatusOK)
 	}
@@ -289,8 +292,8 @@ func TestIssueSessionProducesAcceptedCookie(t *testing.T) {
 	}
 }
 
-// TestIssueSessionFailsClosed は、許可リストに無いアドレスと許可リストが空の
-// Handler の両方で、セッションを発行しないことを確認します。
+// TestIssueSessionFailsClosed checks that no session is issued either for an
+// address not on the allowlist or by a Handler with an empty allowlist.
 func TestIssueSessionFailsClosed(t *testing.T) {
 	t.Parallel()
 
@@ -314,17 +317,18 @@ func TestIssueSessionFailsClosed(t *testing.T) {
 
 			rr := httptest.NewRecorder()
 			if err := tt.handler.IssueSession(rr, httptest.NewRequest(http.MethodGet, "/", nil), tt.email); err == nil {
-				t.Fatal("セッションが発行されました")
+				t.Fatal("a session was issued")
 			}
 			if got := rr.Result().Cookies(); len(got) != 0 {
-				t.Errorf("エラーを返しつつクッキーを出しています: %v", got)
+				t.Errorf("returned an error but set a cookie anyway: %v", got)
 			}
 		})
 	}
 }
 
-// TestIssueSessionRotatesSessionID は、IssueSession でも ID が振り直されることを確認し、
-// 2 つの入口が同じ issueSession を通ることを振る舞いで固定します。
+// TestIssueSessionRotatesSessionID checks that IssueSession also assigns a new
+// ID, pinning by behaviour that both entry points go through the same
+// issueSession.
 func TestIssueSessionRotatesSessionID(t *testing.T) {
 	t.Parallel()
 
@@ -343,7 +347,7 @@ func TestIssueSessionRotatesSessionID(t *testing.T) {
 
 	if values, err := store.Load(context.Background(), planted.Value); err == nil {
 		if _, authenticated := values[DefaultUserSessionKey]; authenticated {
-			t.Error("攻撃者が知っている ID がそのまま認証済みになりました（セッション固定）")
+			t.Error("an ID the attacker knows became authenticated as is (session fixation)")
 		}
 	}
 
@@ -354,13 +358,13 @@ func TestIssueSessionRotatesSessionID(t *testing.T) {
 		}
 	}
 	if issued == "" || issued == planted.Value {
-		t.Fatalf("発行されたクッキー = %q、仕込まれた ID のままか空です", issued)
+		t.Fatalf("issued cookie = %q, still the planted ID or empty", issued)
 	}
 	values, err := store.Load(context.Background(), issued)
 	if err != nil || values[DefaultUserSessionKey] != email {
-		t.Fatalf("新しい ID の実体 = %v (err %v), want email %q", values, err, email)
+		t.Fatalf("session under the new ID = %v (err %v), want email %q", values, err, email)
 	}
 	if _, ok := values[CSRFTokenKey]; ok {
-		t.Error("ログイン前の CSRF トークンが新しいセッションへ持ち越されています")
+		t.Error("the pre-login CSRF token was carried into the new session")
 	}
 }

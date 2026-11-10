@@ -17,8 +17,8 @@ const (
 	testAccount  = "tasks@project.iam.gserviceaccount.com"
 )
 
-// stubValidate は idtoken.Validate を差し替え、指定した email を持つ
-// 検証済みペイロードを返します。err が非 nil ならそれを返します。
+// stubValidate stands in for idtoken.Validate and returns a verified payload
+// with the given email, or err if it is non-nil.
 func stubValidate(email string, err error) ValidateFunc {
 	return func(context.Context, string, string) (*idtoken.Payload, error) {
 		if err != nil {
@@ -31,15 +31,16 @@ func stubValidate(email string, err error) ValidateFunc {
 	}
 }
 
-// newTestVerifier は、New の検査を通さずに Verifier を組み立てます。
-// 未設定の Verifier に対する Authenticate / Challenge の挙動を試すためです。
+// newTestVerifier builds a Verifier without New's checks, to exercise
+// Authenticate and Challenge on an unconfigured Verifier.
 func newTestVerifier(allowed []string, validate ValidateFunc) *Verifier {
 	return &Verifier{audience: testAudience, allowed: toLowerMap(allowed), validate: validate}
 }
 
-// TestWithValidatorDrivesAuthenticate は、WithValidator で差し替えた検証関数が Authenticate
-// の Bearer 経路にそのまま効くことを確認します。利用側がこれで Bearer 経路を端から端まで
-// 試せることが目的です。
+// TestWithValidatorDrivesAuthenticate checks that a validation function
+// swapped in with WithValidator takes effect on Authenticate's Bearer path as
+// is. The point is that callers can exercise the Bearer path end to end with
+// it.
 func TestWithValidatorDrivesAuthenticate(t *testing.T) {
 	t.Parallel()
 
@@ -59,7 +60,7 @@ func TestWithValidatorDrivesAuthenticate(t *testing.T) {
 		t.Fatalf("payload in context = %+v, ok = %v", payload, ok)
 	}
 
-	// nil は無視され、既定（idtoken.Validate）のままです。
+	// nil is ignored and the default (idtoken.Validate) stays.
 	v, err = New(testAudience, []string{testAccount}, WithValidator(nil), nil)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -69,8 +70,9 @@ func TestWithValidatorDrivesAuthenticate(t *testing.T) {
 	}
 }
 
-// TestNewRequiresAudienceAndAllowlist は、設定が欠けた Verifier を New が返さないことを
-// 確認します。「許可リストが空 = 誰でも通す」にしないための入口です。
+// TestNewRequiresAudienceAndAllowlist checks that New never returns a Verifier
+// with missing settings. It is the entry point that keeps "empty allowlist =
+// let everyone in" from happening.
 func TestNewRequiresAudienceAndAllowlist(t *testing.T) {
 	t.Parallel()
 
@@ -111,7 +113,7 @@ func TestVerifierAuthenticate(t *testing.T) {
 		allowed  []string
 		authz    string
 		validate ValidateFunc
-		wantErr  error // errors.Is で比較。nil なら成功を期待する
+		wantErr  error // compared with errors.Is; nil expects success
 	}{
 		{
 			name:     "許可済みサービスアカウントは通過する",
@@ -146,7 +148,7 @@ func TestVerifierAuthenticate(t *testing.T) {
 			wantErr:  errSentinel,
 		},
 		{
-			// 未検証のメールアドレスは所有者であることを保証しません。
+			// An unverified email address does not prove ownership.
 			name:    "未検証のメールアドレスは拒否する",
 			allowed: []string{testAccount},
 			authz:   "Bearer valid-token",
@@ -174,7 +176,7 @@ func TestVerifierAuthenticate(t *testing.T) {
 			wantErr: errSentinel,
 		},
 		{
-			// ブラウザからの呼び出しはここに落ちる。合成側は次の方式へ進む。
+			// Calls from browsers land here. The composer moves on to the next method.
 			name:     "Authorization ヘッダーが無ければ未着手",
 			allowed:  []string{testAccount},
 			authz:    "",
@@ -182,7 +184,7 @@ func TestVerifierAuthenticate(t *testing.T) {
 			wantErr:  auth.ErrNotAttempted,
 		},
 		{
-			// 許可リストが空＝設定漏れ。未着手と混ぜるとフォールバックに隠れる。
+			// An empty allowlist is a missing setting. Mixed with not-attempted, it would hide behind the fallback.
 			name:     "許可リストが空なら未設定",
 			allowed:  nil,
 			authz:    "Bearer valid-token",
@@ -211,10 +213,10 @@ func TestVerifierAuthenticate(t *testing.T) {
 				}
 				payload, ok := PayloadFromContext(ctx)
 				if !ok || payload.Subject == "" {
-					t.Fatal("検証済みペイロードがコンテキストに載っていません")
+					t.Fatal("verified payload is not in the context")
 				}
 			case errors.Is(tt.wantErr, errSentinel):
-				// センチネルを持たない一般の検証失敗。
+				// A general verification failure without a sentinel.
 				if err == nil {
 					t.Fatal("Authenticate() error = nil, want a verification failure")
 				}
@@ -234,10 +236,10 @@ func TestVerifierAuthenticate(t *testing.T) {
 	}
 }
 
-// errSentinel は「センチネルを持たない検証失敗」を表すテスト内の目印です。
+// errSentinel is the test's marker for "a verification failure without a sentinel".
 var errSentinel = errors.New("verification failure")
 
-// TestVerifierNilReceiver は、未構築の Verifier でも panic しないことを確認します。
+// TestVerifierNilReceiver checks that an unbuilt Verifier does not panic.
 func TestVerifierNilReceiver(t *testing.T) {
 	t.Parallel()
 
@@ -249,9 +251,9 @@ func TestVerifierNilReceiver(t *testing.T) {
 	}
 }
 
-// Challenge は RFC 6750, Section 3.1 に沿って、トークンの不正（取り直せば直る）と
-// 呼び出し元の不許可（取り直しても直らない）を別の応答で伝えます。
-// 実際の Authenticate の失敗をそのまま渡して確認します。
+// Challenge, per RFC 6750, Section 3.1, answers an invalid token (fixed by
+// fetching a new one) and a caller that is not allowed (not fixed by fetching
+// a new one) differently. Checked by passing real Authenticate failures as is.
 func TestVerifierChallenge(t *testing.T) {
 	t.Parallel()
 
@@ -279,7 +281,7 @@ func TestVerifierChallenge(t *testing.T) {
 			wantStatus: http.StatusForbidden, wantWWW: `Bearer error="insufficient_scope"`,
 		},
 		{
-			// 設定漏れはサーバー側の落ち度なので、チャレンジは返しません。
+			// A missing setting is the server's fault, so no challenge is sent.
 			name: "検証器が未設定", allowed: nil, authz: "Bearer valid",
 			validate:   stubValidate(testAccount, nil),
 			wantStatus: http.StatusInternalServerError, wantWWW: "",

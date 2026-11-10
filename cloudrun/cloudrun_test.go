@@ -35,11 +35,11 @@ func TestHealth(t *testing.T) {
 	}
 }
 
-// TestHealthPath は、Cloud Run の GFE に食われる /healthz を選ばないことを固定します。
-// ローカルでは通るのにデプロイすると 404 になるため、テストでしか守れません。
+// TestHealthPath pins that /healthz, which Cloud Run's GFE swallows, is not
+// chosen. It works locally and 404s once deployed, so only a test can guard it.
 func TestHealthPath(t *testing.T) {
 	if cloudrun.HealthPath != "/health" {
-		t.Errorf("HealthPath = %q, want /health（/healthz は *.run.app の GFE が横取りする）",
+		t.Errorf("HealthPath = %q, want /health (/healthz is intercepted by the GFE on *.run.app)",
 			cloudrun.HealthPath)
 	}
 }
@@ -56,12 +56,12 @@ func TestNewServerDefaults(t *testing.T) {
 	if srv.IdleTimeout != cloudrun.DefaultIdleTimeout {
 		t.Errorf("IdleTimeout = %v, want %v", srv.IdleTimeout, cloudrun.DefaultIdleTimeout)
 	}
-	// WriteTimeout に既定値を置くと、数分かかる worker の応答を途中で切ります。
+	// A default WriteTimeout would cut a worker response that takes minutes in half.
 	if srv.WriteTimeout != 0 {
-		t.Errorf("WriteTimeout = %v, want 0（既定では縛らない）", srv.WriteTimeout)
+		t.Errorf("WriteTimeout = %v, want 0 (no limit by default)", srv.WriteTimeout)
 	}
 	if srv.ReadTimeout != 0 {
-		t.Errorf("ReadTimeout = %v, want 0（既定では縛らない）", srv.ReadTimeout)
+		t.Errorf("ReadTimeout = %v, want 0 (no limit by default)", srv.ReadTimeout)
 	}
 }
 
@@ -103,14 +103,14 @@ func TestServeRejectsIncompleteConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if err := cloudrun.Serve(context.Background(), tt.cfg); err == nil {
-				t.Error("Serve = nil, want エラー")
+				t.Error("Serve = nil, want an error")
 			}
 		})
 	}
 }
 
-// TestServeShutsDownOnContextCancel は、ctx が終わったらサーバーが止まり、
-// Serve が返ることを検証します。
+// TestServeShutsDownOnContextCancel checks that the server stops and Serve
+// returns once ctx is done.
 func TestServeShutsDownOnContextCancel(t *testing.T) {
 	ln, addr := testListener(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -128,17 +128,17 @@ func TestServeShutsDownOnContextCancel(t *testing.T) {
 		})
 	}()
 
-	// リスナーは既に開いているため、待ち受け開始を待つ必要がありません。
+	// The listener is already open, so there is no need to wait for it to start.
 	resp, err := (&http.Client{Timeout: 5 * time.Second}).Get("http://" + addr + "/")
 	if err != nil {
-		t.Fatalf("リクエストが通りません: %v", err)
+		t.Fatalf("request failed: %v", err)
 	}
 	_ = resp.Body.Close()
 
 	select {
 	case <-served:
 	case <-time.After(5 * time.Second):
-		t.Fatal("ハンドラーに到達しませんでした")
+		t.Fatal("the handler was not reached")
 	}
 
 	cancel()
@@ -149,23 +149,23 @@ func TestServeShutsDownOnContextCancel(t *testing.T) {
 			t.Errorf("Serve = %v, want nil", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("ctx をキャンセルしても Serve が返りません")
+		t.Fatal("Serve did not return after ctx was cancelled")
 	}
 }
 
-// TestServeReportsListenFailure は、待ち受けに失敗したら ctx を待たずに
-// 返ることを検証します。ポートが塞がっているのに黙って動き続けると、
-// デプロイが「起動したのに応答しない」形で失敗します。
+// TestServeReportsListenFailure checks that a failure to listen returns
+// without waiting for ctx. Carrying on silently with the port taken would make
+// a deployment fail as "started but not answering".
 //
-// 実際の引き金は使用中のポートですが、それを再現しようと 127.0.0.1 を占有しても
-// macOS では全インターフェースへのバインドが通ってしまい、失敗しませんでした。
-// 検証したいのは「待ち受けの失敗が Serve から返る」ことなので、OS の挙動に
-// 依存しない不正なポート番号で起こします。
+// The real trigger is a port in use, but occupying 127.0.0.1 to reproduce it
+// did not fail on macOS, where binding to all interfaces still succeeded. What
+// is being checked is "a listen failure comes back from Serve", so it is
+// caused with an invalid port number that does not depend on OS behaviour.
 func TestServeReportsListenFailure(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- cloudrun.Serve(context.Background(), cloudrun.Config{
-			Port:    "99999", // 65535 を超える
+			Port:    "99999", // above 65535
 			Handler: http.NotFoundHandler(),
 			Logger:  discardLogger(),
 		})
@@ -174,15 +174,16 @@ func TestServeReportsListenFailure(t *testing.T) {
 	select {
 	case err := <-done:
 		if err == nil {
-			t.Error("Serve = nil, want 待ち受け失敗のエラー")
+			t.Error("Serve = nil, want a listen failure error")
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("待ち受けに失敗しても Serve が返りません")
+		t.Fatal("Serve did not return after failing to listen")
 	}
 }
 
-// TestServeForcesCloseOnSlowHandler は、猶予内に終わらない接続があっても
-// Serve が返ることを検証します。返らなければ Cloud Run の SIGKILL 待ちになります。
+// TestServeForcesCloseOnSlowHandler checks that Serve returns even with a
+// connection that does not finish within the grace period. Otherwise it would
+// wait for Cloud Run's SIGKILL.
 func TestServeForcesCloseOnSlowHandler(t *testing.T) {
 	ln, addr := testListener(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -199,15 +200,15 @@ func TestServeForcesCloseOnSlowHandler(t *testing.T) {
 			ShutdownTimeout: 50 * time.Millisecond,
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				close(handling)
-				<-release // 猶予を超えて掴み続ける
+				<-release // hold on past the grace period
 				w.WriteHeader(http.StatusOK)
 			}),
 		})
 	}()
 
 	go func() {
-		// 応答は返らない。接続を掴ませるためだけのリクエストなので、
-		// テストが終わったら諦めるようタイムアウトを付けます。
+		// No response comes back. The request only exists to hold a
+		// connection, so it gets a timeout to give up once the test ends.
 		client := &http.Client{Timeout: 10 * time.Second}
 		resp, err := client.Get("http://" + addr + "/slow")
 		if err == nil {
@@ -218,27 +219,27 @@ func TestServeForcesCloseOnSlowHandler(t *testing.T) {
 	select {
 	case <-handling:
 	case <-time.After(5 * time.Second):
-		t.Fatal("ハンドラーに到達しませんでした")
+		t.Fatal("the handler was not reached")
 	}
 
 	cancel()
 
 	select {
 	case err := <-done:
-		// 強制クローズに至ったことはエラーで分かる。返ってくることが要点。
+		// The error shows a force close happened. What matters is that it returns.
 		if err == nil {
-			t.Log("猶予内に停止しました（掴んでいる接続が既に切れていた）")
+			t.Log("stopped within the grace period (the held connection was already gone)")
 		} else if !errors.Is(err, context.DeadlineExceeded) {
-			t.Logf("強制停止しました: %v", err)
+			t.Logf("force-closed: %v", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("掴んでいる接続があると Serve が返りません")
+		t.Fatal("Serve does not return while a connection is held")
 	}
 }
 
-// testListener は、ポート 0 で開いたリスナーとその接続先を返します。
+// testListener returns a listener opened on port 0 and its address.
 //
-// Serve はリスナーを閉じて返るため、ここでは閉じません（二重クローズを避けます）。
+// Serve closes the listener when it returns, so it is not closed here (avoiding a double close).
 func testListener(t *testing.T) (net.Listener, string) {
 	t.Helper()
 
@@ -249,8 +250,8 @@ func testListener(t *testing.T) (net.Listener, string) {
 	return ln, ln.Addr().String()
 }
 
-// TestServeUsesDefaultLogger は、Logger 未指定でも slog.Default() へ倒れることを
-// 検証します。他の設定と同じくゼロ値で動く必要があります。
+// TestServeUsesDefaultLogger checks that an unset Logger falls back to
+// slog.Default(). Like the other settings, it has to work at the zero value.
 func TestServeUsesDefaultLogger(t *testing.T) {
 	var buf syncBuffer
 	restore := slog.Default()
@@ -265,7 +266,7 @@ func TestServeUsesDefaultLogger(t *testing.T) {
 		done <- cloudrun.Serve(ctx, cloudrun.Config{Listener: ln, Handler: http.NotFoundHandler()})
 	}()
 
-	// 起動ログが出るまで待ってから止めます。
+	// Wait for the startup log before stopping.
 	deadline := time.Now().Add(5 * time.Second)
 	for buf.Len() == 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
@@ -278,16 +279,16 @@ func TestServeUsesDefaultLogger(t *testing.T) {
 			t.Errorf("Serve = %v, want nil", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("Serve が返りません")
+		t.Fatal("Serve did not return")
 	}
 	if buf.Len() == 0 {
-		t.Error("slog.Default() へ出力されていません")
+		t.Error("nothing was written to slog.Default()")
 	}
 }
 
-// TestServeReportsListenFailureBeforeLogging は、待ち受けに失敗したときに
-// 「起動しました」と記録しないことを検証します。出てしまうと、ログだけ見て
-// 動いていると誤解します。
+// TestServeReportsListenFailureBeforeLogging checks that a listen failure does
+// not log "started". If it did, someone reading only the logs would think the
+// server was running.
 func TestServeReportsListenFailureBeforeLogging(t *testing.T) {
 	var buf bytes.Buffer
 	restore := slog.Default()
@@ -298,15 +299,15 @@ func TestServeReportsListenFailureBeforeLogging(t *testing.T) {
 		Port:    "99999",
 		Handler: http.NotFoundHandler(),
 	}); err == nil {
-		t.Fatal("Serve = nil, want エラー")
+		t.Fatal("Serve = nil, want an error")
 	}
 	if buf.Len() != 0 {
-		t.Errorf("待ち受けに失敗したのに記録が出ています: %s", buf.String())
+		t.Errorf("a log line was written although listening failed: %s", buf.String())
 	}
 }
 
-// syncBuffer は、ログを書くゴルーチンと読むテストの両方から触れるバッファです。
-// bytes.Buffer をそのまま共有すると競合します。
+// syncBuffer is a buffer both the goroutine writing logs and the test reading
+// them can touch. Sharing a bytes.Buffer directly would race.
 type syncBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer

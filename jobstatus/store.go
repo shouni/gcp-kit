@@ -14,39 +14,43 @@ import (
 	"github.com/shouni/go-utils/jobid"
 )
 
-// Store は、Firestore を裏付けとしたジョブ状態の読み書きを行います。
+// Store reads and writes job statuses backed by Firestore.
 //
-// 型引数 T にはサービス固有の状態型（Status を埋め込んだ構造体）を指定します。
-// ドキュメント ID はジョブ ID そのもので、1 ジョブ 1 ドキュメントです。
+// The type parameter T is the service-specific status type (a struct
+// embedding Status). The document ID is the job ID itself: one document per
+// job.
 type Store[T any] struct {
 	client     *firestore.Client
 	collection string
 	now        func() time.Time
 }
 
-// mustNotBePointer は、型引数にポインタ型を渡す誤用を構築時に弾きます。
+// mustNotBePointer rejects, at construction, the mistake of passing a pointer
+// type as the type parameter.
 //
-// Status の埋め込みは値型 T のメソッド集合を通して見つけます（Save は any(&status) を
-// Stamper へアサートします）。T が *X だとアサート対象が **X になり、Stamper も
-// Carrier も IsTerminal も満たしません。その結果、打刻されず・引き継がれず・
-// 再実行ガードが常に false になったドキュメントが、エラーもログも無しに書かれます。
+// The embedded Status is found through the method set of the value type T
+// (Save asserts any(&status) to Stamper). With T = *X the assertion target
+// becomes **X, which satisfies none of Stamper, Carrier and IsTerminal. The
+// result is documents written unstamped, without carry-over and with the
+// rerun guard always false, with no error and no log.
 //
-// Store[*X] は Go として自然に書けてしまい、しかも壊れ方が静かなので、データを
-// 書く前に落とします。埋め込みの無い型（T = X で Stamper を満たさない）は doc の
-// とおり引き続き許容します。そちらは打刻も引き継ぎも行われないだけで、誤って
-// 静かに壊れるわけではないためです。
+// Store[*X] is natural to write in Go and breaks quietly, so it fails before
+// any data is written. A type without the embedding (T = X not satisfying
+// Stamper) is still allowed, as documented: it simply gets no stamping or
+// carry-over, rather than breaking quietly by mistake.
 func mustNotBePointer[T any](fn string) {
 	if t := reflect.TypeFor[T](); t.Kind() == reflect.Pointer {
 		panic(fmt.Sprintf(
-			"jobstatus: %s[%s]: 型引数にポインタ型を渡さないでください。"+
-				"打刻・引き継ぎ・再実行ガードが無効になります（値型で instantiate してください）", fn, t))
+			"jobstatus: %s[%s]: do not pass a pointer type as the type parameter; "+
+				"stamping, carry-over and the rerun guard would be disabled (instantiate with the value type)", fn, t))
 	}
 }
 
-// NewStore は Store を構築します。
+// NewStore builds a Store.
 //
-// collection はジョブ状態を置くコレクションのパスです（例: "jobs"）。
-// 型引数にポインタ型を渡した場合は panic します（mustNotBePointer を参照）。
+// collection is the path of the collection holding job statuses (for
+// example "jobs"). It panics when given a pointer type as the type parameter
+// (see mustNotBePointer).
 func NewStore[T any](client *firestore.Client, collection string) *Store[T] {
 	mustNotBePointer[T]("NewStore")
 
@@ -57,11 +61,11 @@ func NewStore[T any](client *firestore.Client, collection string) *Store[T] {
 	}
 }
 
-// Save はジョブ状態を保存します。
+// Save saves a job status.
 //
-// ドキュメントは常に最新の 1 世代だけを保持し、上書きで更新します。
-// status が Status を埋め込んでいれば、JobID と UpdatedAt はここで打刻されます
-// （引数の値は変更しません）。
+// The document always holds only the latest generation and is updated by
+// overwriting. If status embeds Status, JobID and UpdatedAt are stamped here
+// (the argument's value is not modified).
 func (s *Store[T]) Save(ctx context.Context, jobID string, status T) error {
 	doc, safeJobID, err := s.doc(jobID)
 	if err != nil {
@@ -78,10 +82,11 @@ func (s *Store[T]) Save(ctx context.Context, jobID string, status T) error {
 	return nil
 }
 
-// Get はジョブ状態を取得します。未記録の場合は ErrNotFound を返します。
+// Get fetches a job status, returning ErrNotFound if none is recorded.
 //
-// デコードに失敗した記録は未記録ではなくエラーとして返します。未記録と同じ扱いに
-// すると、破損に気づかないまま再生成が走り続けるためです。
+// A record that fails to decode is returned as an error, not as "not
+// recorded". Treating it the same as missing would keep regeneration running
+// with nobody noticing the corruption.
 func (s *Store[T]) Get(ctx context.Context, jobID string) (T, error) {
 	var out T
 
@@ -97,42 +102,43 @@ func (s *Store[T]) Get(ctx context.Context, jobID string) (T, error) {
 	return decode[T](snap, safeJobID)
 }
 
-// decode はスナップショットを T へ読み出します。Get と Modify で読み方を揃えます。
+// decode reads a snapshot into T, so Get and Modify read the same way.
 func decode[T any](snap *firestore.DocumentSnapshot, safeJobID string) (T, error) {
 	var out T
 	if err := snap.DataTo(&out); err != nil {
-		return out, fmt.Errorf("ジョブ状態のデコードに失敗しました (%s): %w", safeJobID, err)
+		return out, fmt.Errorf("decode job status (%s): %w", safeJobID, err)
 	}
 
-	// job_id を持たない古い記録を読んだときに、ID 無しの構造体を返さない。
+	// Do not return a struct without an ID when reading an old record that has no job_id.
 	if e, ok := any(&out).(interface{ EnsureJobID(string) }); ok {
 		e.EnsureJobID(safeJobID)
 	}
 	return out, nil
 }
 
-// Modify は、記録を読んでから書くまでを Firestore のトランザクションで行います。
-// Modifier を満たし、Recorder.Begin はこれがあれば使います。
+// Modify reads a record and writes it back inside a Firestore transaction.
+// It satisfies Modifier, and Recorder.Begin uses it when available.
 //
-// fn は前回の記録（未記録なら nil）を受け取り、書く値と、書くかどうかを返します。
-// Get と Save を別々に呼ぶと、その間に別の書き込みが入りえます。Cloud Tasks の
-// 再配信が、完了を記録した直後の succeeded を running で上書きするのがその例です。
-// トランザクションの中なら、読んだ後に記録が変わっていれば Firestore が fn を
-// やり直させるので、fn は必ず最新の記録を見て判断します。
+// fn receives the previous record (nil if none) and returns the value to
+// write and whether to write it. Calling Get and Save separately lets another
+// write land in between; a Cloud Tasks redelivery overwriting a just-recorded
+// succeeded with running is an example. Inside a transaction, Firestore makes
+// fn run again if the record changed after it was read, so fn always decides
+// on the latest record.
 //
-// fn はやり直しで複数回呼ばれることがあります。外へ副作用を出さず、引数だけから
-// 結果を決めてください。
+// fn may be called several times on retries. Keep it free of outside side
+// effects and decide the result from its argument alone.
 //
-// 読み取りやデコードに失敗した場合は、fn を呼ばずにそのエラーを返します（Get と
-// 同じ分類です）。fn のエラーは包まずにそのまま返します。
+// If reading or decoding fails, that error is returned without calling fn
+// (classified as in Get). An error from fn is returned as is, unwrapped.
 func (s *Store[T]) Modify(ctx context.Context, jobID string, fn func(prev *T) (next T, write bool, err error)) error {
 	doc, safeJobID, err := s.doc(jobID)
 	if err != nil {
 		return err
 	}
 
-	// デコード失敗と fn のエラーは、Firestore のエラーと一緒に classify へ通さないよう
-	// ここに退避し、素のまま返します。
+	// Decode failures and fn's errors are kept aside here and returned as is,
+	// so they do not go through classify along with Firestore's errors.
 	var innerErr error
 	err = s.client.RunTransaction(ctx, func(_ context.Context, tx *firestore.Transaction) error {
 		innerErr = nil
@@ -174,7 +180,7 @@ func (s *Store[T]) Modify(ctx context.Context, jobID string, fn func(prev *T) (n
 	return nil
 }
 
-// Delete はジョブ状態を削除します。不在はエラーになりません。
+// Delete removes a job status. A missing one is not an error.
 func (s *Store[T]) Delete(ctx context.Context, jobID string) error {
 	doc, safeJobID, err := s.doc(jobID)
 	if err != nil {
@@ -187,10 +193,10 @@ func (s *Store[T]) Delete(ctx context.Context, jobID string) error {
 	return nil
 }
 
-// doc は、正規化済みのジョブ ID を ID とするドキュメント参照を返します。
+// doc returns the document reference whose ID is the normalised job ID.
 //
-// ジョブ ID は URL パスとドキュメント ID の双方に現れるため、検証はセキュリティ
-// 境界を兼ねます。呼び出し側で正規化する必要はありません。
+// The job ID appears both in URL paths and as a document ID, so validation
+// doubles as a security boundary. Callers need not normalise it.
 func (s *Store[T]) doc(jobID string) (*firestore.DocumentRef, string, error) {
 	safeJobID, err := jobid.Sanitize(jobID)
 	if err != nil {

@@ -10,100 +10,117 @@ import (
 	"time"
 )
 
-// ErrPanicked は、Validate または Run が panic で終わったことを表すセンチネルエラーです。
+// ErrPanicked is the sentinel error reporting that Validate or Run ended in a
+// panic.
 //
-// Lifecycle は panic を回復してこのエラーに畳み、Finish へ渡します。畳まないと
-// 結末の記録まで到達せず、HTTP 側の Recoverer が 500 を返して終わります。状態は
-// running のまま、通知も出ず、max_attempts = 1 のキューでは再試行も来ないので、
-// そのジョブは永久に running です。
+// Lifecycle recovers the panic, folds it into this error and passes it to
+// Finish. Unfolded, the outcome is never recorded and the HTTP-side Recoverer
+// answers 500. The state stays running, no notification goes out, and a
+// max_attempts = 1 queue never retries, so the job is running forever.
 var ErrPanicked = errors.New("worker: run panicked")
 
-// ErrTimedOut は、Run が Lifecycle.Timeout で打ち切られたことを表すセンチネルエラーです。
+// ErrTimedOut is the sentinel error reporting that Run was cut off by
+// Lifecycle.Timeout.
 //
-// 下流呼び出し 1 回の期限切れ（HTTP クライアントのタイムアウトなど）もパイプライン
-// 全体の打ち切りも、同じ context.DeadlineExceeded で返ります。この印が無いと、
-// 通知の文面を「打ち切り」に切り替える判定を呼び出し側が DeadlineExceeded で行う
-// ことになり、両者を区別できません。errors.Is(err, ErrTimedOut) で判定でき、
-// Unwrap は Run が返した元のエラーです（文面はそのまま）。
+// A single downstream call expiring (an HTTP client timeout, for example) and
+// the whole pipeline being cut off both come back as the same
+// context.DeadlineExceeded. Without this mark, a caller switching its
+// notification to "timed out" would have to decide on DeadlineExceeded and
+// could not tell the two apart. Check it with errors.Is(err, ErrTimedOut);
+// Unwrap returns the original error from Run (its text unchanged).
 var ErrTimedOut = errors.New("worker: run exceeded Lifecycle.Timeout")
 
-// DefaultFinishTimeout は、Finish（結末の記録と通知）に与える既定の上限です。
+// DefaultFinishTimeout is the default limit given to Finish (recording and notifying the outcome).
 const DefaultFinishTimeout = 30 * time.Second
 
-// Lifecycle は、ジョブ 1 件の一生を固定した TaskExecutor です。
+// Lifecycle is a TaskExecutor that fixes the life of one job.
 //
-// 順序は Prepare → Begin → Validate → Run → Finish で、アプリはそれぞれの中身だけを
-// 渡します。順序をライブラリが持つのは、この順序自体が過去の障害の再発防止だからです。
+// The order is Prepare → Begin → Validate → Run → Finish, and the app supplies
+// only what each step does. The library owns the order because the order
+// itself is what keeps past incidents from recurring.
 //
-//   - Begin を Validate より前に置く。全試行が記録に載り、どのジョブも running を
-//     経由して終端に至る。逆にすると、検証で落ちたジョブは queued のまま消える。
-//   - Run にだけ Timeout を被せる。呼び出し元の ctx に被せると、打ち切られた直後の
-//     Finish まで期限切れの ctx で走り、いちばん記録が要る場面で残らない。
-//   - Finish は成功・失敗・panic のすべてで、切り離した ctx（context.WithoutCancel）で
-//     必ず 1 度だけ呼ぶ。5 アプリのうち 3 つが失敗パスだけを切り離し、成功パスを
-//     生の ctx で記録していた時期があり、期限と前後して完了したジョブが running の
-//     まま固着した。成功と失敗が同じ関数を通る形にすると、片方だけ忘れる書き方が
-//     表現できなくなる。
+//   - Begin comes before Validate. Every attempt reaches the record, and
+//     every job passes through running on its way to a terminal state.
+//     Reversed, a job rejected by validation vanishes while still queued.
+//   - Timeout wraps Run only. Wrapping the caller's ctx would run even the
+//     Finish right after the cut-off on an expired ctx, losing the record
+//     exactly when it matters most.
+//   - Finish is called exactly once, on a detached ctx
+//     (context.WithoutCancel), on success, failure and panic alike. For a
+//     while three of five apps detached only the failure path and recorded
+//     the success path on the raw ctx, and jobs finishing around the
+//     deadline got stuck at running. Routing success and failure through
+//     one function makes forgetting one of them impossible to write.
 //
-// 使わないフックは nil のままでよく、Run だけが必須です。
+// Unused hooks can stay nil; only Run is required.
 type Lifecycle[T, R any] struct {
-	// Prepare は、以降のログに載せる相関キー（job_id など）を ctx へ足すためのフックです。
-	// 返した ctx がこの先のすべてのフックに渡ります。nil なら何もしません。
+	// Prepare is a hook for adding correlation keys (job_id and so on) to ctx
+	// for the log lines that follow. The returned ctx is passed to every later
+	// hook. nil does nothing.
 	Prepare func(ctx context.Context, task T) context.Context
 
-	// Labels は、pprof のゴルーチンラベルに載せるキーと値です（job_id / command など）。
-	// Go 1.27 以降、ラベルはパニックのトレースバックの見出し行にも出るため、落ちたときに
-	// どのジョブだったかがスタックだけで分かります。ログの相関は panic の経路では
-	// 効かないので、そこを埋めるのがラベルの役目です。ラベルは子ゴルーチンにも継承されます。
+	// Labels are the keys and values put on pprof goroutine labels (job_id,
+	// command and so on). Since Go 1.27 labels also appear in the header line
+	// of a panic traceback, so the stack alone says which job crashed. Log
+	// correlation does not work on the panic path, and labels fill that gap.
+	// Labels are inherited by child goroutines.
 	Labels func(task T) map[string]string
 
-	// Begin は、再配信ガードと running の記録です。
+	// Begin is the redelivery guard and the running record.
 	//
-	// done=true なら Run も Finish も呼ばず、成功として返します（完了済みのジョブが
-	// at-least-once 配信で再び届いた場合）。err を返すと同じく何も呼ばず、そのエラーを
-	// そのまま返します。状態を読めないときに「進む」か「再配信に委ねる」かは、この
-	// フックが決めます。nil なら常に実行します。
+	// With done=true neither Run nor Finish is called and it returns success
+	// (a finished job delivered again under at-least-once delivery). Returning
+	// err likewise calls nothing and returns that error as is. Whether to "go
+	// ahead" or "leave it to redelivery" when the status cannot be read is
+	// this hook's decision. nil always runs.
 	Begin func(ctx context.Context, task T) (done bool, err error)
 
-	// Validate は、配り直しても直らない入力の検証です。
+	// Validate checks input that redelivery cannot fix.
 	//
-	// 失敗は Permanent に包んで Finish へ渡します。Finish がそのまま返せば、Handler は
-	// 2xx を返して再配信を止めます。Begin の後に置くので、検証で落ちたジョブも
-	// running を経由して failed に至ります。panic は Run と同じく回復して ErrPanicked に
-	// 畳みます（こちらは Permanent に包みません。入力の不備ではなく実装の欠陥だからです）。
+	// A failure is wrapped in Permanent and passed to Finish. If Finish
+	// returns it as is, the Handler answers 2xx and redelivery stops. It runs
+	// after Begin, so a job rejected by validation also passes through running
+	// on its way to failed. A panic is recovered and folded into ErrPanicked
+	// as in Run (not wrapped in Permanent: it is a defect in the
+	// implementation, not bad input).
 	Validate func(task T) error
 
-	// Run は本体です。Timeout があれば、その上限を被せた ctx で呼ばれます。
-	// panic は回復して ErrPanicked に畳み、スタックをログへ出したうえで Finish へ渡します。
+	// Run is the body. With a Timeout, it is called on a ctx bounded by it. A
+	// panic is recovered, folded into ErrPanicked, its stack logged, and
+	// passed to Finish.
 	Run func(ctx context.Context, task T) (R, error)
 
-	// Finish は、結末の記録と通知です。
+	// Finish records and notifies the outcome.
 	//
-	// Validate の失敗と panic では Run の結果が無いので、result は R のゼロ値です。
-	// 通知に要る値（ジョブ ID など）は result ではなく task から取ってください。
+	// On a Validate failure or a panic there is no result from Run, so result
+	// is R's zero value. Take what notifications need (the job ID and so on)
+	// from task, not from result.
 	//
-	// 成功（cause == nil）でも失敗でも、呼び出し元の ctx から切り離した ctx で必ず
-	// 1 度だけ呼ばれます。返り値が Execute の結果になります。失敗をそのまま返せば
-	// Cloud Tasks が再配信し、Permanent（または Validate 由来の cause）を返せば
-	// 2xx で打ち切られます。nil なら cause をそのまま返します。
+	// On success (cause == nil) and on failure alike, it is called exactly
+	// once, on a ctx detached from the caller's. Its return value becomes
+	// Execute's result. Returning a failure as is makes Cloud Tasks redeliver;
+	// returning Permanent (or a cause from Validate) stops with 2xx. nil
+	// returns cause as is.
 	Finish func(ctx context.Context, task T, result R, cause error) error
 
-	// Timeout は Run に与える実行時間の上限です。0 以下は無制限です。発火した場合、
-	// Run のエラーは errors.Is(err, ErrTimedOut) で判定できる印を付けて Finish へ渡ります。
+	// Timeout is the run-time limit given to Run; 0 or less is unlimited.
+	// When it fires, Run's error reaches Finish marked so that
+	// errors.Is(err, ErrTimedOut) is true.
 	//
-	// Cloud Tasks の dispatch deadline より短く取ってください。アプリが自分で先に
-	// 諦めることで、Finish が失敗を記録して通知する余地が残ります。逆順だと
-	// Cloud Tasks が先にリクエストを打ち切り、記録も通知も残りません。
+	// Keep it shorter than the Cloud Tasks dispatch deadline. The app giving
+	// up first leaves Finish room to record and notify the failure. In the
+	// reverse order Cloud Tasks cuts the request first, and neither a record
+	// nor a notification survives.
 	Timeout time.Duration
 
-	// FinishTimeout は Finish に与える上限です。0 以下なら DefaultFinishTimeout です。
+	// FinishTimeout is the limit given to Finish; 0 or less means DefaultFinishTimeout.
 	FinishTimeout time.Duration
 
-	// Logger は panic のスタックなどを出すロガーです。nil なら slog.Default() です。
+	// Logger reports panic stacks and the like. nil means slog.Default().
 	Logger *slog.Logger
 }
 
-// Execute は TaskExecutor を満たします。
+// Execute satisfies TaskExecutor.
 func (l Lifecycle[T, R]) Execute(ctx context.Context, task T) error {
 	if l.Run == nil {
 		return errors.New("worker: Lifecycle.Run is required")
@@ -140,11 +157,11 @@ func (l Lifecycle[T, R]) execute(ctx context.Context, task T) error {
 	return l.finish(ctx, task, result, err)
 }
 
-// withLabels は、Labels があれば pprof のラベルを被せて fn を実行します。
+// withLabels runs fn under pprof labels when Labels is set.
 //
-// pprof.SetGoroutineLabels ではなく pprof.Do を使います。前者は復帰時にラベルを
-// 戻さないため、keep-alive で同じゴルーチンが次のリクエストを捌くと、前のジョブの
-// ラベルを背負ったままになります。
+// It uses pprof.Do, not pprof.SetGoroutineLabels. The latter does not restore
+// the labels on return, so when the same goroutine serves the next request
+// over keep-alive, it still carries the previous job's labels.
 func (l Lifecycle[T, R]) withLabels(ctx context.Context, task T, fn func(ctx context.Context)) {
 	if l.Labels == nil {
 		fn(ctx)
@@ -162,10 +179,12 @@ func (l Lifecycle[T, R]) withLabels(ctx context.Context, task T, fn func(ctx con
 	pprof.Do(ctx, pprof.Labels(pairs...), fn)
 }
 
-// validate は Validate を呼び、失敗を Permanent に包み、panic をエラーに畳みます。
+// validate calls Validate, wraps a failure in Permanent, and folds a panic
+// into an error.
 //
-// Begin が running を記録した後なので、ここの panic を回復しないと Finish に届かず、
-// ErrPanicked の説明にある「永久に running」がそのまま起きます。
+// It runs after Begin has recorded running, so an unrecovered panic here
+// would never reach Finish, and the "running forever" described on
+// ErrPanicked would happen exactly.
 func (l Lifecycle[T, R]) validate(ctx context.Context, task T) (err error) {
 	if l.Validate == nil {
 		return nil
@@ -181,7 +200,7 @@ func (l Lifecycle[T, R]) validate(ctx context.Context, task T) (err error) {
 	return nil
 }
 
-// run は Run を上限つきの ctx で呼び、panic をエラーに畳みます。
+// run calls Run on a bounded ctx and folds a panic into an error.
 func (l Lifecycle[T, R]) run(ctx context.Context, task T) (result R, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -205,16 +224,18 @@ func (l Lifecycle[T, R]) run(ctx context.Context, task T) (result R, err error) 
 	return result, err
 }
 
-// timedOutError は、Run が Timeout で打ち切られたことを示す印です。
-// permanentError と同じ形で、文面は原因のまま、errors.Is(err, ErrTimedOut) だけが真になります。
+// timedOutError marks that Run was cut off by Timeout. It has the same shape
+// as permanentError: the text stays the cause's, and only
+// errors.Is(err, ErrTimedOut) becomes true.
 type timedOutError struct{ cause error }
 
 func (e timedOutError) Error() string        { return e.cause.Error() }
 func (e timedOutError) Unwrap() error        { return e.cause }
 func (e timedOutError) Is(target error) bool { return target == ErrTimedOut }
 
-// panicked は、回復した panic のスタックをログへ出し、ErrPanicked に畳んで返します。
-// スタックを取るため、recover した defer の中から呼んでください。
+// panicked logs the stack of a recovered panic and returns it folded into
+// ErrPanicked. Call it from inside the deferred function that recovered, so
+// the stack is captured.
 func (l Lifecycle[T, R]) panicked(ctx context.Context, msg string, recovered any) error {
 	l.log().ErrorContext(ctx, msg,
 		"panic", recovered,
@@ -223,12 +244,13 @@ func (l Lifecycle[T, R]) panicked(ctx context.Context, msg string, recovered any
 	return fmt.Errorf("%w: %v", ErrPanicked, recovered)
 }
 
-// finish は Finish を、呼び出し元の ctx から切り離した ctx で呼びます。
+// finish calls Finish on a ctx detached from the caller's.
 //
-// 打ち切りこそが終端の理由である場面（Timeout の発火、dispatch deadline 超過による
-// リクエストのキャンセル）では ctx は既に Done です。そのまま使うと記録も通知も
-// 両方失敗します。切り離したうえで上限を与え直すのは、記録先が応答しないときに
-// ワーカーを無期限に占有しないためです。
+// When a cut-off is the very reason for ending (Timeout firing, or the request
+// cancelled past the dispatch deadline), ctx is already Done, and using it
+// would fail both the record and the notification. It is detached and given a
+// fresh limit so that an unresponsive record store cannot occupy the worker
+// indefinitely.
 func (l Lifecycle[T, R]) finish(ctx context.Context, task T, result R, cause error) error {
 	if l.Finish == nil {
 		return cause

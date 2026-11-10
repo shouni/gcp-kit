@@ -10,8 +10,8 @@ import (
 	"time"
 )
 
-// TestMemoryStoreRoundTrip は、保存した値が同じ ID で読み戻せること、返る map が
-// 保存側と共有されていないことを確認します。
+// TestMemoryStoreRoundTrip checks that saved values read back under the same
+// ID, and that the returned map is not shared with the stored one.
 func TestMemoryStoreRoundTrip(t *testing.T) {
 	t.Parallel()
 
@@ -29,16 +29,16 @@ func TestMemoryStoreRoundTrip(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 	if back[DefaultUserSessionKey] != "user@example.com" {
-		t.Errorf("Load() = %v, want the values as saved（保存後の変更が漏れています）", back)
+		t.Errorf("Load() = %v, want the values as saved (a change made after saving leaked in)", back)
 	}
 	back[DefaultUserSessionKey] = "changed-after-load"
 	if again, _ := store.Load(ctx, "id-1"); again[DefaultUserSessionKey] != "user@example.com" {
-		t.Error("Load() が返した map を書き換えると保存側が変わります")
+		t.Error("modifying the map Load() returned changes the stored values")
 	}
 }
 
-// TestMemoryStoreNotFound は、無い ID が ErrNotFound になることを確認します。
-// Handler はこれを「実体が無い」と読んでクッキーの ID を採用しません。
+// TestMemoryStoreNotFound checks that a missing ID is ErrNotFound. The Handler
+// reads that as "nothing stored" and does not adopt the cookie's ID.
 func TestMemoryStoreNotFound(t *testing.T) {
 	t.Parallel()
 
@@ -47,7 +47,7 @@ func TestMemoryStoreNotFound(t *testing.T) {
 	}
 }
 
-// TestMemoryStoreExpires は、期限を過ぎた実体が読めないことを確認します。
+// TestMemoryStoreExpires checks that an expired stored session cannot be read.
 func TestMemoryStoreExpires(t *testing.T) {
 	t.Parallel()
 
@@ -63,7 +63,7 @@ func TestMemoryStoreExpires(t *testing.T) {
 	}
 }
 
-// TestMemoryStoreDeletes は、Delete が実体を消し、無い ID でもエラーにしないことを確認します。
+// TestMemoryStoreDeletes checks that Delete removes the stored session and does not fail on a missing ID.
 func TestMemoryStoreDeletes(t *testing.T) {
 	t.Parallel()
 
@@ -83,9 +83,10 @@ func TestMemoryStoreDeletes(t *testing.T) {
 	}
 }
 
-// TestSessionCookieAttributes は、Handler が発行するセッションクッキーに防御属性が
-// 載ることを確認します。属性は落ちても機能が動くので気付けません。HttpOnly が外れた
-// クッキーでもログインは通り、壊れているのは XSS に対する防御だけです。
+// TestSessionCookieAttributes checks that the session cookie the Handler issues
+// carries the defensive attributes. Losing an attribute goes unnoticed because
+// everything still works: login passes with a cookie lacking HttpOnly, and
+// only the defence against XSS is broken.
 func TestSessionCookieAttributes(t *testing.T) {
 	t.Parallel()
 
@@ -106,17 +107,19 @@ func TestSessionCookieAttributes(t *testing.T) {
 	if !got.HttpOnly || !got.Secure || got.SameSite != http.SameSiteLaxMode || got.Path != "/" || got.MaxAge != 3600 {
 		t.Errorf("cookie attributes = %+v", got)
 	}
-	// クッキーが運ぶのは不透明な ID だけで、中身は載りません。
+	// The cookie carries only the opaque ID, never the contents.
 	if got.Value != s.id || !isValidSessionID(got.Value) || strings.Contains(got.Value, "example.com") {
-		t.Errorf("cookie value = %q（発行した ID ではありません）", got.Value)
+		t.Errorf("cookie value = %q (not the minted ID)", got.Value)
 	}
 }
 
-// TestLoadSessionIgnoresUnknownID は、保存されていない ID を採用しないことを確認します。
+// TestLoadSessionIgnoresUnknownID checks that an ID that is not stored is never
+// adopted.
 //
-// ★ これがセッション固定攻撃への防御です。ID はクッキー経由で攻撃者が指定できるので、
-// 採用してしまうと「攻撃者が選んだ ID のセッションを被害者が使う」状態を作れます。
-// 形の合う ID で試すのは、形の合わないものは Load の手前で捨てられるためです。
+// This is the defence against session fixation. The attacker can choose the ID
+// through the cookie, so adopting it would create "the victim using a session
+// under the attacker's chosen ID". It is tested with a well-formed ID because
+// malformed ones are dropped before Load.
 func TestLoadSessionIgnoresUnknownID(t *testing.T) {
 	t.Parallel()
 
@@ -133,22 +136,22 @@ func TestLoadSessionIgnoresUnknownID(t *testing.T) {
 		t.Fatalf("loadSession() error = %v", err)
 	}
 	if s.id != "" {
-		t.Fatalf("id = %q、保存されていない ID を採用しています", s.id)
+		t.Fatalf("id = %q, adopted an ID that is not stored", s.id)
 	}
 
-	// 保存すると、攻撃者の知らない ID が振られること。
+	// Saving assigns an ID the attacker does not know.
 	rr := httptest.NewRecorder()
 	if err := h.saveSession(rr, req, s); err != nil {
 		t.Fatalf("saveSession() error = %v", err)
 	}
 	if s.id == "" || s.id == planted {
-		t.Errorf("id = %q, want 新しい ID", s.id)
+		t.Errorf("id = %q, want a new ID", s.id)
 	}
 }
 
-// TestLoadSessionRejectsMalformedIDBeforeTheStore は、形の合わない ID がストアへ
-// 渡らないことを確認します。unavailableStore は呼ばれれば必ずエラーを返すので、
-// エラー無しで戻れば呼ばれていません。
+// TestLoadSessionRejectsMalformedIDBeforeTheStore checks that a malformed ID
+// never reaches the store. unavailableStore always returns an error when
+// called, so returning without one means it was not called.
 func TestLoadSessionRejectsMalformedIDBeforeTheStore(t *testing.T) {
 	t.Parallel()
 
@@ -158,18 +161,18 @@ func TestLoadSessionRejectsMalformedIDBeforeTheStore(t *testing.T) {
 
 	s, err := h.loadSession(req)
 	if err != nil {
-		t.Fatalf("loadSession() error = %v, want nil（ストアに触れていない）", err)
+		t.Fatalf("loadSession() error = %v, want nil (store not touched)", err)
 	}
 	if s.id != "" {
 		t.Fatalf("id = %q, want empty", s.id)
 	}
 }
 
-// TestIsValidSessionID は、発行した形の ID だけを通すことを確認します。
+// TestIsValidSessionID checks that only IDs of the minted shape pass.
 //
-// ID はクッキーで届く＝相手が決められる値で、Firestore ストアはそれをドキュメントの
-// パスに使います。"/" を通してしまうと、Doc() がサブコレクションのパスとして解釈し、
-// 本来のコレクションの外を指せます。
+// The ID arrives in a cookie, so the other side decides it, and the Firestore
+// store uses it as a document path. Letting "/" through would have Doc() read
+// it as a subcollection path, pointing outside the intended collection.
 func TestIsValidSessionID(t *testing.T) {
 	t.Parallel()
 
@@ -178,22 +181,22 @@ func TestIsValidSessionID(t *testing.T) {
 		t.Fatalf("newSessionID() error = %v", err)
 	}
 	if !isValidSessionID(minted) {
-		t.Fatalf("発行した ID %q が弾かれました", minted)
+		t.Fatalf("minted ID %q was rejected", minted)
 	}
 
 	for _, id := range []string{
 		"",
-		"attacker-known-id",                   // 長さが違う
-		minted[:len(minted)-1],                // 1 文字短い
-		minted + "x",                          // 1 文字長い
-		strings.Repeat("a", 42) + "/",         // サブコレクションへのパス
-		strings.Repeat("a", 41) + "/./",       // 同上（相対パス片）
-		strings.Repeat("a", 42) + ".",         // Firestore の禁則
-		strings.Repeat("_", 43),               // Firestore が予約する "__…__"
-		"__" + strings.Repeat("a", 39) + "__", // 同上（文字種と長さは正しい）
-		strings.Repeat("a", 42) + " ",         // 空白
-		strings.Repeat("a", 42) + "\n",        // 制御文字
-		strings.Repeat("a", 42) + "\u00e3",    // 非 ASCII
+		"attacker-known-id",                   // wrong length
+		minted[:len(minted)-1],                // one character short
+		minted + "x",                          // one character long
+		strings.Repeat("a", 42) + "/",         // a path into a subcollection
+		strings.Repeat("a", 41) + "/./",       // likewise (relative path segments)
+		strings.Repeat("a", 42) + ".",         // forbidden by Firestore
+		strings.Repeat("_", 43),               // Firestore's reserved "__…__"
+		"__" + strings.Repeat("a", 39) + "__", // likewise (right characters and length)
+		strings.Repeat("a", 42) + " ",         // whitespace
+		strings.Repeat("a", 42) + "\n",        // control character
+		strings.Repeat("a", 42) + "\u00e3",    // non-ASCII
 	} {
 		if isValidSessionID(id) {
 			t.Errorf("isValidSessionID(%q) = true、want false", id)
@@ -201,9 +204,9 @@ func TestIsValidSessionID(t *testing.T) {
 	}
 }
 
-// TestNewSessionIDIsAlwaysValid は、発行した ID が必ず自分の検証を通ることを
-// 確認します。通らない ID を発行すると、その回だけ保存が失敗し、しかも乱数由来なので
-// 再現しません。
+// TestNewSessionIDIsAlwaysValid checks that a minted ID always passes our own
+// validation. Minting one that does not would fail that one save, and being
+// random it would never reproduce.
 func TestNewSessionIDIsAlwaysValid(t *testing.T) {
 	t.Parallel()
 
@@ -213,17 +216,17 @@ func TestNewSessionIDIsAlwaysValid(t *testing.T) {
 			t.Fatalf("newSessionID() error = %v", err)
 		}
 		if !isValidSessionID(id) {
-			t.Fatalf("発行した ID %q が自分の検証を通りません", id)
+			t.Fatalf("minted ID %q fails our own validation", id)
 		}
 	}
 }
 
-// TestFirestoreStoreRejectsMalformedIDBeforeTheRPC は、形の合わない ID が Firestore へ
-// 渡らないことを確認します。Handler も手前で捨てますが、Store は公開 API なので
-// 自分でも確かめます。
+// TestFirestoreStoreRejectsMalformedIDBeforeTheRPC checks that a malformed ID
+// never reaches Firestore. The Handler drops it earlier too, but Store is
+// public API, so it checks for itself.
 //
-// client を nil にしてあるのが検証そのものです。問い合わせに進めば nil 参照で
-// パニックするので、素通りするようになれば必ずここで落ちます。
+// The nil client is the check itself: proceeding to the query would panic on
+// the nil reference, so if the ID ever slips through, this test fails.
 func TestFirestoreStoreRejectsMalformedIDBeforeTheRPC(t *testing.T) {
 	t.Parallel()
 
@@ -231,10 +234,10 @@ func TestFirestoreStoreRejectsMalformedIDBeforeTheRPC(t *testing.T) {
 	ctx := context.Background()
 
 	if _, err := store.Load(ctx, "sessions/../other/doc"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("Load() error = %v, want ErrNotFound（実体が無いのと同じ扱い）", err)
+		t.Fatalf("Load() error = %v, want ErrNotFound (same as nothing stored)", err)
 	}
 	if err := store.Save(ctx, "sessions/../other/doc", map[string]string{}, time.Hour); err == nil {
-		t.Fatal("Save() error = nil, want error: 手で入れた ID を書いてはいけない")
+		t.Fatal("Save() error = nil, want error: a hand-made ID must not be written")
 	}
 	if err := store.Delete(ctx, "sessions/../other/doc"); err == nil {
 		t.Fatal("Delete() error = nil, want error")

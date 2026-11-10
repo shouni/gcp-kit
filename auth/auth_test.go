@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// fakeAuth は、結果を固定した Authenticator です。
+// fakeAuth is an Authenticator with a fixed result.
 type fakeAuth struct {
 	err       error
 	challenge func(w http.ResponseWriter, r *http.Request, err error)
@@ -23,7 +23,7 @@ func (f *fakeAuth) Authenticate(_ http.ResponseWriter, r *http.Request) (context
 	return context.WithValue(r.Context(), testCtxKey, "ok"), nil
 }
 
-// challenger は Challenger も満たす fakeAuth です。
+// challenger is a fakeAuth that also satisfies Challenger.
 type challenger struct{ fakeAuth }
 
 func (c *challenger) Challenge(w http.ResponseWriter, r *http.Request, err error) {
@@ -41,8 +41,9 @@ func okHandler(reached *bool) http.Handler {
 	})
 }
 
-// Require は、方式が Challenger でない場合に失敗の種類を状態コードへ写します。
-// 設定漏れを 401/403 に混ぜると、呼び出し元の落ち度に見えて調査が逸れます。
+// Require maps the kind of failure to a status code when the method is not a
+// Challenger. Mixing a missing setting into 401/403 makes it look like the
+// caller's fault and sends the investigation the wrong way.
 func TestRequireStatusMapping(t *testing.T) {
 	t.Parallel()
 
@@ -71,13 +72,13 @@ func TestRequireStatusMapping(t *testing.T) {
 				t.Fatalf("status = %d, want %d", rec.Code, tt.want)
 			}
 			if reached != (tt.err == nil) {
-				t.Fatalf("次のハンドラー到達 = %v, want %v", reached, tt.err == nil)
+				t.Fatalf("reached next handler = %v, want %v", reached, tt.err == nil)
 			}
 		})
 	}
 }
 
-// 方式が Challenger なら、失敗時の応答はその方式が決めます。
+// When the method is a Challenger, it decides the failure response.
 func TestRequireDelegatesToChallenger(t *testing.T) {
 	t.Parallel()
 
@@ -93,10 +94,10 @@ func TestRequireDelegatesToChallenger(t *testing.T) {
 	Require(c)(okHandler(&reached)).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 
 	if rec.Code != http.StatusTeapot {
-		t.Fatalf("status = %d, want %d（Challenge に委ねていない）", rec.Code, http.StatusTeapot)
+		t.Fatalf("status = %d, want %d (not delegated to Challenge)", rec.Code, http.StatusTeapot)
 	}
 	if gotErr == nil {
-		t.Fatal("Challenge に失敗理由が渡っていない")
+		t.Fatal("Challenge did not receive the failure reason")
 	}
 }
 
@@ -114,10 +115,10 @@ func TestProtected(t *testing.T) {
 		Protected(first, second)(okHandler(&reached)).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 
 		if !reached {
-			t.Fatal("成立した方式があるのに次へ進んでいない")
+			t.Fatal("a method succeeded but the next handler was not reached")
 		}
 		if second.calls != 0 {
-			t.Fatalf("後続の方式が %d 回呼ばれた, want 0", second.calls)
+			t.Fatalf("later method called %d times, want 0", second.calls)
 		}
 	})
 
@@ -132,15 +133,15 @@ func TestProtected(t *testing.T) {
 		Protected(first, second)(okHandler(&reached)).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 
 		if !reached {
-			t.Fatalf("2 番目の方式で通るはずが status = %d", rec.Code)
+			t.Fatalf("expected to pass on the second method, status = %d", rec.Code)
 		}
 		if second.calls != 1 {
-			t.Fatalf("2 番目の方式の呼び出し = %d, want 1", second.calls)
+			t.Fatalf("second method calls = %d, want 1", second.calls)
 		}
 	})
 
-	// 設定漏れはフォールバックを止めません。止めると、片方の設定を直すまで
-	// 人までログインできなくなります。ただしログには残ります。
+	// A missing setting does not stop the fallback. Stopping it would lock even
+	// people out until the other setting is fixed. It is still logged.
 	t.Run("未設定でも次の方式へ進む", func(t *testing.T) {
 		t.Parallel()
 
@@ -150,12 +151,13 @@ func TestProtected(t *testing.T) {
 			ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 
 		if !reached {
-			t.Fatalf("未設定の方式がフォールバックを止めている status = %d", rec.Code)
+			t.Fatalf("an unconfigured method stopped the fallback, status = %d", rec.Code)
 		}
 	})
 
-	// 資格情報を提示していない方式しか無ければ、最後の方式が応答を決めます。
-	// 人向けの方式を最後に置くと、ブラウザはログイン画面へ送られます。
+	// When no method was presented with credentials, the last method decides
+	// the response. With the browser-facing method last, a browser is sent to
+	// the login page.
 	t.Run("誰も提示していなければ最後の方式が応答を決める", func(t *testing.T) {
 		t.Parallel()
 
@@ -170,15 +172,16 @@ func TestProtected(t *testing.T) {
 			ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 
 		if reached {
-			t.Fatal("どの方式も成立していないのに保護ルートへ到達している")
+			t.Fatal("reached the protected route although no method succeeded")
 		}
 		if rec.Code != http.StatusFound {
-			t.Fatalf("status = %d, want %d（最後の方式の Challenge）", rec.Code, http.StatusFound)
+			t.Fatalf("status = %d, want %d (the last method's Challenge)", rec.Code, http.StatusFound)
 		}
 	})
 
-	// 提示したうえで落ちた方式が応答します。ここを最後の方式に答えさせると、
-	// JSON を求めたエージェントに HTML のログイン画面が返ります。
+	// The method that was presented and failed answers. Letting the last
+	// method answer here would send an HTML login page to an agent that asked
+	// for JSON.
 	t.Run("提示して落ちた方式が応答を決める", func(t *testing.T) {
 		t.Parallel()
 
@@ -194,15 +197,15 @@ func TestProtected(t *testing.T) {
 			ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 
 		if reached {
-			t.Fatal("どの方式も成立していないのに保護ルートへ到達している")
+			t.Fatal("reached the protected route although no method succeeded")
 		}
 		if rec.Code != http.StatusForbidden {
-			t.Fatalf("status = %d, want %d（提示して落ちた方式の応答）", rec.Code, http.StatusForbidden)
+			t.Fatalf("status = %d, want %d (the response of the method that was presented and failed)", rec.Code, http.StatusForbidden)
 		}
 	})
 
-	// 不正な資格情報と有効なセッションを同時に持つ呼び出しを締め出さないため、
-	// 確定的な失敗があっても走査は続けます。
+	// Scanning continues past a decisive failure, so a call holding both bad
+	// credentials and a valid session is not locked out.
 	t.Run("提示して落ちても、後続が成立すれば通す", func(t *testing.T) {
 		t.Parallel()
 
@@ -212,12 +215,12 @@ func TestProtected(t *testing.T) {
 			ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 
 		if !reached {
-			t.Fatalf("後続の方式が成立しているのに拒否されている status = %d", rec.Code)
+			t.Fatalf("rejected although a later method succeeded, status = %d", rec.Code)
 		}
 	})
 
-	// 設定漏れは確定的な失敗として扱いません。止めると、サービス側の設定を
-	// 直すまで人までログインできなくなります。
+	// A missing setting is not treated as a decisive failure. Stopping on it
+	// would lock even people out until the service configuration is fixed.
 	t.Run("未設定は応答役にならない", func(t *testing.T) {
 		t.Parallel()
 
@@ -232,7 +235,7 @@ func TestProtected(t *testing.T) {
 			ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 
 		if rec.Code != http.StatusFound {
-			t.Fatalf("status = %d, want %d（人向けの方式が応答すべき）", rec.Code, http.StatusFound)
+			t.Fatalf("status = %d, want %d (the browser-facing method should answer)", rec.Code, http.StatusFound)
 		}
 		_ = reached
 	})
@@ -245,7 +248,7 @@ func TestProtected(t *testing.T) {
 		Protected(nil, &fakeAuth{})(okHandler(&reached)).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 
 		if !reached {
-			t.Fatalf("nil を挟んだだけで通らなくなっている status = %d", rec.Code)
+			t.Fatalf("a nil in the list stopped the request, status = %d", rec.Code)
 		}
 	})
 
@@ -257,7 +260,7 @@ func TestProtected(t *testing.T) {
 		Protected(nil)(okHandler(&reached)).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 
 		if reached {
-			t.Fatal("方式が無いのに保護ルートへ到達している")
+			t.Fatal("reached the protected route with no methods")
 		}
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)

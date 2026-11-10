@@ -7,8 +7,8 @@ import (
 	"time"
 )
 
-// Cloud Tasks がワーカーへのリクエストに付与するヘッダー。
-// 詳細: https://cloud.google.com/tasks/docs/creating-http-target-tasks
+// Headers Cloud Tasks attaches to requests to the worker.
+// Details: https://cloud.google.com/tasks/docs/creating-http-target-tasks
 const (
 	HeaderTaskName       = "X-CloudTasks-TaskName"
 	HeaderQueueName      = "X-CloudTasks-QueueName"
@@ -17,40 +17,41 @@ const (
 	HeaderTaskETA        = "X-CloudTasks-TaskETA"
 )
 
-// Metadata は Cloud Tasks がリクエストヘッダーで渡す配信情報です。
+// Metadata is the delivery information Cloud Tasks passes in request headers.
 //
-// Cloud Tasks は at-least-once 配信であり、同じタスクが複数回ワーカーに届く可能性があります。
-// RetryCount / ExecutionCount を見ることで、再配信時に処理をスキップする、あるいは
-// 一定回数を超えたら諦める、といった冪等な実装が書けます。
+// Cloud Tasks delivers at least once, so the same task may reach the worker
+// more than once. RetryCount and ExecutionCount let you write idempotent code
+// that skips work on redelivery or gives up after a number of attempts.
 type Metadata struct {
-	// TaskName は完全修飾のタスク名です（projects/.../tasks/...）。
-	// 決定的な名前で投入している場合、冪等キーとして利用できます。
+	// TaskName is the fully qualified task name (projects/.../tasks/...).
+	// When tasks are enqueued under deterministic names, it can serve as an
+	// idempotency key.
 	TaskName string
-	// QueueName は完全修飾のキュー名です。
+	// QueueName is the fully qualified queue name.
 	QueueName string
-	// RetryCount は 5xx 応答等による再試行の回数です。
+	// RetryCount is the number of retries caused by 5xx responses and the like.
 	RetryCount int
-	// ExecutionCount はワーカーが応答を返した回数（5xx 応答を含む）です。
+	// ExecutionCount is the number of times the worker responded (5xx responses included).
 	ExecutionCount int
-	// ETA はタスクの実行予定時刻です。取得できない場合はゼロ値になります。
+	// ETA is when the task was scheduled to run, or the zero value if unavailable.
 	ETA time.Time
 }
 
 type metadataContextKey struct{}
 
-// WithMetadata は Cloud Tasks の配信情報をコンテキストに格納します。
-// ProcessTask が自動的に呼び出すため、通常は利用側が直接呼ぶ必要はありません。
+// WithMetadata stores Cloud Tasks delivery information in the context.
+// ProcessTask calls it automatically, so callers normally need not.
 func WithMetadata(ctx context.Context, md Metadata) context.Context {
 	return context.WithValue(ctx, metadataContextKey{}, md)
 }
 
-// MetadataFromContext は TaskExecutor に渡されたコンテキストから Cloud Tasks の
-// 配信情報を取り出します。ヘッダーが無ければ ok=false です。
+// MetadataFromContext extracts Cloud Tasks delivery information from the
+// context passed to a TaskExecutor. Without the headers, ok is false.
 //
-// 値はリクエストヘッダーそのものなので、これは「呼び出し元が何を名乗ったか」であって
-// 「誰が呼んだか」ではありません。X-CloudTasks-TaskName は誰でも付けられます。
-// 呼び出し元の確認は auth.Require の仕事で、TaskName を冪等キーに使ってよいのは、
-// その検証が掛かっているルートに限ります。
+// The values are the request headers as they are, so this is "what the caller
+// claims", not "who called". Anyone can set X-CloudTasks-TaskName. Confirming
+// the caller is auth.Require's job, and TaskName may serve as an idempotency
+// key only on routes that verification covers.
 func MetadataFromContext(ctx context.Context) (Metadata, bool) {
 	md, ok := ctx.Value(metadataContextKey{}).(Metadata)
 	return md, ok && md.TaskName != ""
@@ -64,7 +65,7 @@ func metadataFromHeader(header http.Header) Metadata {
 		ExecutionCount: atoiOrZero(header.Get(HeaderExecutionCount)),
 	}
 	if eta := header.Get(HeaderTaskETA); eta != "" {
-		// ETA は Unix 秒（小数部つき）で送られてきます。
+		// ETA arrives as Unix seconds (with a fractional part).
 		if seconds, err := strconv.ParseFloat(eta, 64); err == nil {
 			md.ETA = time.UnixMicro(int64(seconds * 1e6)).UTC()
 		}

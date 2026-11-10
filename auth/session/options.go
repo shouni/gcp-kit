@@ -6,8 +6,8 @@ import (
 	"time"
 )
 
-// Option は Handler の任意設定です。
-// 必須の設定は Config が持ちます。
+// Option is an optional setting of a Handler.
+// Required settings live in Config.
 type Option func(*options)
 
 type options struct {
@@ -37,8 +37,8 @@ func newOptions(opts []Option) *options {
 	return o
 }
 
-// WithScopes は OAuth2 の要求スコープを差し替えます。
-// 未指定の場合は openid + userinfo.email です。
+// WithScopes replaces the requested OAuth2 scopes.
+// They default to openid + userinfo.email.
 func WithScopes(scopes ...string) Option {
 	return func(o *options) {
 		if len(scopes) > 0 {
@@ -47,12 +47,12 @@ func WithScopes(scopes ...string) Option {
 	}
 }
 
-// WithPaths は Login / Callback / Logout ハンドラーのマウント先を指定します。
-// 空文字の項目は既定値のままです。
+// WithPaths sets where the Login, Callback and Logout handlers are mounted.
+// Empty values keep their defaults.
 //
-// callbackPath は state / PKCE クッキーの Path 属性としても使われます。
-// 実際のルーティングと一致していないと、コールバック時にクッキーが送信されず
-// 認証が必ず失敗します。
+// callbackPath is also used as the Path attribute of the state and PKCE
+// cookies. If it does not match the actual routing, the cookies are not sent
+// on the callback and authentication always fails.
 func WithPaths(loginPath, callbackPath, logoutPath string) Option {
 	return func(o *options) {
 		if p := strings.TrimSpace(loginPath); p != "" {
@@ -67,11 +67,12 @@ func WithPaths(loginPath, callbackPath, logoutPath string) Option {
 	}
 }
 
-// WithSessionMaxAge はセッションの有効期間を指定します（既定: 7 日）。
-// クッキーの寿命であると同時に、保存した実体の期限でもあります。0 以下は無視されます。
+// WithSessionMaxAge sets how long a session lasts (default: 7 days). It is
+// both the cookie's lifetime and the stored session's expiry. Values of 0 or
+// less are ignored.
 //
-// 以前は Store 側の設定でした。クッキーを Handler が一手に持つようになったので、
-// 寿命もここで決めます。
+// This used to be a Store setting. Now that the Handler owns the cookie
+// outright, the lifetime is decided here too.
 func WithSessionMaxAge(d time.Duration) Option {
 	return func(o *options) {
 		if d > 0 {
@@ -80,8 +81,8 @@ func WithSessionMaxAge(d time.Duration) Option {
 	}
 }
 
-// WithStateMaxAge は state / PKCE クッキーの有効期間を指定します（既定: 10分）。
-// 負値以下は無視されます。
+// WithStateMaxAge sets how long the state and PKCE cookies last (default: 10
+// minutes). Values of 0 or less are ignored.
 func WithStateMaxAge(d time.Duration) Option {
 	return func(o *options) {
 		if d > 0 {
@@ -90,41 +91,44 @@ func WithStateMaxAge(d time.Duration) Option {
 	}
 }
 
-// WithLogger はこのパッケージが使うロガーを指定します。
-// 未指定の場合は slog.Default() です。
+// WithLogger sets the logger this package uses.
+// It defaults to slog.Default().
 func WithLogger(logger *slog.Logger) Option {
 	return func(o *options) { o.logger = logger }
 }
 
-// Prompt は、認可画面で Google に何を尋ねさせるかの指定です
-// （OpenID Connect の prompt パラメータ）。
+// Prompt says what Google should ask on the authorization screen
+// (the OpenID Connect prompt parameter).
 type Prompt string
 
 const (
-	// PromptSelectAccount はアカウント選択画面を必ず挟みます。
+	// PromptSelectAccount always shows the account chooser.
 	//
-	// ログアウトを実効あるものにするのが主な用途です。Logout が消せるのは
-	// このアプリのクッキーだけで、Google 側のセッションは残ります。prompt を
-	// 付けないと、ログアウト後にログイン画面へ送られた時点で Google が何も
-	// 聞かずに承認を返すため、利用者から見ると一瞬ちらついて元のログイン状態に
-	// 戻るだけになります。共用端末で「ログアウト」が効きません。
+	// Its main use is making logout effective. Logout can only clear this
+	// app's cookie; the Google-side session remains. Without a prompt, Google
+	// approves without asking anything as soon as the user is sent to the
+	// login page after logging out, so to the user the screen flickers and
+	// they are back where they were, still signed in. "Log out" does not hold
+	// on a shared machine.
 	PromptSelectAccount Prompt = "select_account"
 
-	// PromptLogin は Google での再認証（パスワード入力など）まで要求します。
+	// PromptLogin goes as far as requiring re-authentication with Google (entering the password, for example).
 	PromptLogin Prompt = "login"
 
-	// PromptConsent は同意画面を毎回表示させます。
+	// PromptConsent shows the consent screen every time.
 	PromptConsent Prompt = "consent"
 
-	// PromptNone は画面を一切出させず、対話が必要な場合はエラーを返させます。
-	// 利用者の操作を伴わない再取得に使います。他の値と併用はできません。
+	// PromptNone shows no screen at all and returns an error when interaction
+	// would be needed. It is for re-fetching without user action. It cannot be
+	// combined with other values.
 	PromptNone Prompt = "none"
 )
 
-// WithPrompt は認可 URL の prompt パラメータを指定します。
+// WithPrompt sets the prompt parameter of the authorization URL.
 //
-// 未指定なら付けません（Google の既定は「聞かずに済むなら聞かない」です）。
-// ログアウト後に必ずアカウントを選ばせたい場合は PromptSelectAccount を渡します。
+// Unset, none is sent (Google's default is "do not ask if it can be avoided").
+// To make users always choose an account after logging out, pass
+// PromptSelectAccount.
 func WithPrompt(prompt Prompt) Option {
 	return func(o *options) { o.prompt = prompt }
 }

@@ -17,49 +17,51 @@ import (
 	"github.com/shouni/gcp-kit/auth"
 )
 
-// userInfoBodyLimit は UserInfo レスポンスとして読み込む最大バイト数です。
-// 想定される応答は数百バイトのため、異常な応答でメモリを消費しないよう制限します。
+// userInfoBodyLimit is the most bytes read as a UserInfo response. A normal
+// response is a few hundred bytes, so this keeps an abnormal one from eating
+// memory.
 const userInfoBodyLimit = 64 << 10
 
-// fetchUserEmail は Google UserInfo API を呼び出してメールアドレスを取得します。
+// fetchUserEmail calls the Google UserInfo API to get the email address.
 func (h *Handler) fetchUserEmail(ctx context.Context, token *oauth2.Token) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, googleUserInfoURL, nil)
 	if err != nil {
-		return "", fmt.Errorf("UserInfo リクエストの生成に失敗: %w", err)
+		return "", fmt.Errorf("build UserInfo request: %w", err)
 	}
 
 	client := h.oauthConfig.Client(ctx, token)
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("google UserInfo API へのアクセスに失敗: %w", err)
+		return "", fmt.Errorf("call google UserInfo API: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// ステータスを先に確認します。エラー応答をそのままデコードすると
-	// 「メールアドレスが未検証」という実態と異なるエラーになってしまいます。
+	// Check the status first. Decoding an error response as is would yield an
+	// "email is not verified" error that misstates what happened.
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("google UserInfo API returned status %d", resp.StatusCode)
 	}
 
 	var u googleUserInfo
 	if err := json.NewDecoder(io.LimitReader(resp.Body, userInfoBodyLimit)).Decode(&u); err != nil {
-		return "", fmt.Errorf("UserInfo レスポンスの解析に失敗: %w", err)
+		return "", fmt.Errorf("decode UserInfo response: %w", err)
 	}
 
-	// 判定そのものを auth.VerifiedEmail に通します。同じ基準を書き写すのではなく
-	// 同じ関数を呼ぶのは、片方だけが緩む余地を残さないためです。UserInfo API の
-	// キーは ID トークンと違う（verified_email / email_verified）ので、詰め替えは
-	// ここで行い、基準の判断は 1 か所に置きます。
+	// The judgement itself goes through auth.VerifiedEmail. Calling the same
+	// function rather than restating the rule leaves no room for one side to
+	// loosen. The UserInfo API's key differs from the ID token's
+	// (verified_email vs email_verified), so the translation happens here and
+	// the rule stays in one place.
 	return auth.VerifiedEmail(map[string]any{
 		"email":          u.Email,
 		"email_verified": u.VerifiedEmail,
 	})
 }
 
-// session は、1 リクエスト分のセッションです。
+// session is the session for one request.
 //
-// id が空なら、まだ保存されていない（または保存されている実体を採用しなかった）
-// セッションで、saveSession が新しい ID を振ります。
+// An empty id means a session not yet saved (or one whose stored counterpart
+// was not adopted), and saveSession assigns a new ID.
 type session struct {
 	id     string
 	values map[string]string
@@ -67,14 +69,17 @@ type session struct {
 
 func newSession() *session { return &session{values: map[string]string{}} }
 
-// loadSession は、クッキーが指すセッションを読み出します。
+// loadSession reads the session the cookie points at.
 //
-// 返す *session は常に非 nil です。エラーのときも、クッキーが運んできた ID を id に
-// 持たせて返すので、呼び出し側はそのまま clearSession に渡して実体ごと消せます。
+// The returned *session is never nil. Even on error it carries the ID the
+// cookie brought in id, so the caller can pass it straight to clearSession to
+// delete the stored session too.
 //
-// ★ 保存されていない ID は採用しません。ID はクッキー経由で攻撃者が指定できるので、
-// 採用すると攻撃者が被害者のセッション識別子を選べます（セッション固定）。実体が
-// 読めたときだけ id を埋め、それ以外は空のまま saveSession に振り直させます。
+// An ID that is not stored is never adopted. The ID arrives in a cookie, so an
+// attacker can choose it, and adopting it would let the attacker pick the
+// victim's session identifier (session fixation). id is filled only when the
+// stored session was read; otherwise it stays empty and saveSession assigns a
+// new one.
 func (h *Handler) loadSession(r *http.Request) (*session, error) {
 	s := newSession()
 
@@ -82,8 +87,9 @@ func (h *Handler) loadSession(r *http.Request) (*session, error) {
 	if err != nil || cookie.Value == "" {
 		return s, nil
 	}
-	// 発行した形でない ID は、保存先に問い合わせる前に捨てます。実体があるはずも
-	// なく、Firestore ではドキュメントのパスになる値です（isValidSessionID を参照）。
+	// An ID not in the shape we mint is dropped before asking the store. There
+	// cannot be a stored session for it, and in Firestore the value becomes a
+	// document path (see isValidSessionID).
 	if !isValidSessionID(cookie.Value) {
 		return s, nil
 	}
@@ -105,7 +111,7 @@ func (h *Handler) loadSession(r *http.Request) (*session, error) {
 	return s, nil
 }
 
-// saveSession は、セッションを保存してクッキーを応答へ書きます。id が空なら振ります。
+// saveSession saves the session and writes the cookie to the response, assigning an id if it is empty.
 func (h *Handler) saveSession(w http.ResponseWriter, r *http.Request, s *session) error {
 	if s.id == "" {
 		id, err := newSessionID()
@@ -123,11 +129,12 @@ func (h *Handler) saveSession(w http.ResponseWriter, r *http.Request, s *session
 	return nil
 }
 
-// clearSession は、セッションの実体を消してクッキーを破棄します。
+// clearSession deletes the stored session and clears the cookie.
 //
-// 実体を消せなくてもクッキーは落とします。ここで戻ると、利用者から見てログアウトが
-// 失敗したのにクッキーだけ残る形になります。クッキーを落とすだけでは盗まれた
-// クッキーは有効なままなので、実体を消すことが「本当のログアウト」の中身です。
+// The cookie is cleared even if the stored session could not be deleted.
+// Returning early here would leave, from the user's view, a failed logout with
+// the cookie still in place. Clearing only the cookie leaves a stolen cookie
+// valid, so deleting the stored session is what a real logout consists of.
 func (h *Handler) clearSession(w http.ResponseWriter, r *http.Request, s *session) error {
 	var err error
 	if s != nil && s.id != "" {
@@ -137,14 +144,14 @@ func (h *Handler) clearSession(w http.ResponseWriter, r *http.Request, s *sessio
 	return err
 }
 
-// sessionCookie は、セッション ID を運ぶクッキーを組み立てます。
+// sessionCookie builds the cookie carrying the session ID.
 //
-// Path は "/"（アプリ全体）、SameSite は Lax です。Strict にすると、Google からの
-// コールバックがクロスサイトのトップレベル遷移なのでクッキーが送られません。
-// Secure は ServiceURL のスキームから決まります（Config.ServiceURL を参照）。
-// maxAge が負なら、ブラウザはその場で破棄します。
+// Path is "/" (the whole app) and SameSite is Lax. With Strict, the cookie
+// would not be sent, because the callback from Google is a cross-site
+// top-level navigation. Secure is decided by ServiceURL's scheme (see
+// Config.ServiceURL). A negative maxAge makes the browser discard it at once.
 func (h *Handler) sessionCookie(value string, maxAge int) *http.Cookie {
-	//nolint:gosec // G124: Secure は ServiceURL が https かどうかに従う（ローカル開発は http）。
+	//nolint:gosec // G124: Secure follows whether ServiceURL is https (local development uses http).
 	return &http.Cookie{
 		Name:     h.sessionName,
 		Value:    value,
@@ -156,14 +163,17 @@ func (h *Handler) sessionCookie(value string, maxAge int) *http.Cookie {
 	}
 }
 
-// IssueSession は、email を認証済みの本人としてセッションを発行します。
-// Callback がログイン成立時に行う保存と同じで、リダイレクトを書かない点だけが違います。
+// IssueSession issues a session for email as an authenticated user. It is the
+// same save Callback performs when a login succeeds, except that it writes no
+// redirect.
 //
-// 本人性は呼び出し元の責任です（ここでは検証しません）。許可リストの判定だけは
-// Callback と同じく必ず通り、許可されない相手には発行せずエラーを返します。
+// Verifying the identity is the caller's responsibility (it is not checked
+// here). The allowlist check, as in Callback, always applies, and a user who
+// is not allowed gets an error and no session.
 //
-// 公開しているのは、認証済みの画面を確かめるテストが OAuth の往復を偽装せずに
-// ログイン状態を作れるようにするためです（WithCSRFToken と同じ理由）。
+// It is exported so that tests checking authenticated screens can create a
+// logged-in state without faking the OAuth round trip (the same reason as
+// WithCSRFToken).
 func (h *Handler) IssueSession(w http.ResponseWriter, r *http.Request, email string) error {
 	if !h.isAuthorized(email) {
 		return fmt.Errorf("issue session: %q is not authorized", email)
@@ -172,29 +182,33 @@ func (h *Handler) IssueSession(w http.ResponseWriter, r *http.Request, email str
 	return err
 }
 
-// issueSession は認証済みのセッションを保存し、ログイン後に戻る先を返します。
-// Callback と IssueSession でセッションの作り方が枝分かれしないよう、ここに集めます。
+// issueSession saves an authenticated session and returns where to go after
+// login. It is shared so that Callback and IssueSession cannot diverge in how
+// they build a session.
 func (h *Handler) issueSession(w http.ResponseWriter, r *http.Request, email string) (string, error) {
 	s, err := h.loadSession(r)
 	if err != nil {
-		h.log().WarnContext(r.Context(), "セッションの取得に失敗したため、新規セッションを作成します", "error", err)
+		h.log().WarnContext(r.Context(), "failed to load session, creating a new one", "error", err)
 		s = newSession()
 	}
 
 	targetURL := redirectTarget(r)
 
-	// ログイン前のセッションに紐づく CSRF トークンは破棄し、認証済みセッション用に
-	// 再生成させます（ログイン前に固定されたトークンを使い回させないため）。
+	// Drop the CSRF token tied to the pre-login session so a new one is minted
+	// for the authenticated session (a token fixed before login must not be
+	// reused).
 	delete(s.values, CSRFTokenKey)
 
-	// ID も捨てて振り直させます（セッション固定攻撃対策）。攻撃者が仕込んだ ID の
-	// まま認証済みにすると、その ID で被害者として振る舞えます。空の ID には
-	// saveSession が新しい ID を振ります。
+	// Drop the ID as well so a new one is assigned (against session fixation).
+	// Authenticating under an ID an attacker planted would let the attacker act
+	// as the victim with it. saveSession assigns a new ID to an empty one.
 	//
-	// 古い実体は保存に成功したあとで消します。ストアに実体があるのは認証済みの
-	// セッションだけ（Save へ到達するのはここと CSRF トークンの発行だけ）なので、
-	// 残すと再ログインやアカウント切替のたびに、Logout では消せない有効なセッションが
-	// 寿命いっぱい残ります。削除の失敗はログイン自体を止めるほどではないので警告に留めます。
+	// The old stored session is deleted after the save succeeds. Only
+	// authenticated sessions exist in the store (only this and CSRF token
+	// issuance reach Save), so leaving it would leave, on every re-login or
+	// account switch, a valid session that Logout cannot reach, for its full
+	// lifetime. A failed delete is not worth stopping the login over, so it
+	// is only a warning.
 	oldID := s.id
 	s.id = ""
 
@@ -204,16 +218,17 @@ func (h *Handler) issueSession(w http.ResponseWriter, r *http.Request, email str
 	}
 	if oldID != "" {
 		if err := h.store.Delete(r.Context(), oldID); err != nil {
-			h.log().WarnContext(r.Context(), "ログイン前のセッション実体の削除に失敗しました", "error", err)
+			h.log().WarnContext(r.Context(), "failed to delete the pre-login session", "error", err)
 		}
 	}
 	return targetURL, nil
 }
 
-// redirectTarget は、ログイン後に戻る先を決めます。無ければ "/" です。
+// redirectTarget decides where to go after login, "/" if nothing is set.
 //
-// 値は Login が発行したクッキーが運びます。書き込み時にも検証していますが、
-// クッキーは相手が書き換えられるので、読み出し時にも必ず確認します。
+// The value rides in the cookie Login issued. It is checked on write too, but
+// the other side can rewrite a cookie, so it is always checked on read as
+// well.
 func redirectTarget(r *http.Request) string {
 	cookie, err := r.Cookie(DefaultRedirectCookie)
 	if err != nil || cookie.Value == "" {
@@ -226,11 +241,11 @@ func redirectTarget(r *http.Request) string {
 	return decoded
 }
 
-// isAuthorized はメールアドレスが許可リストまたは許可ドメインに含まれるか判定します。
+// isAuthorized reports whether the email address is on the allowlist or in an allowed domain.
 func (h *Handler) isAuthorized(email string) bool {
 	normalizedEmail := strings.ToLower(email)
 
-	// 許可リストが空なら全員拒否します (fail-closed)。
+	// With empty allowlists, everyone is denied (fail-closed).
 	if len(h.allowedEmails) == 0 && len(h.allowedDomains) == 0 {
 		return false
 	}
@@ -239,8 +254,9 @@ func (h *Handler) isAuthorized(email string) bool {
 		return true
 	}
 
-	// ドメイン単位の判定に mail.ParseAddress を使いません。"Name <a@b.com>" 形式まで
-	// 受け付けてしまい、許可リストと照合する値がずれるためです。
+	// mail.ParseAddress is not used for the domain check: it also accepts the
+	// "Name <a@b.com>" form, which would shift the value compared against the
+	// allowlist.
 	i := strings.LastIndexByte(normalizedEmail, '@')
 	if i <= 0 || i == len(normalizedEmail)-1 {
 		return false
@@ -249,22 +265,24 @@ func (h *Handler) isAuthorized(email string) bool {
 	return ok
 }
 
-// clearSessionCookie は、クッキーが指すセッションを実体ごと破棄します。
-// 読めなかった場合も、クッキーが運んできた ID の実体は消しに行きます。
+// clearSessionCookie discards the session the cookie points at, stored
+// session included. Even when it cannot be read, it still tries to delete the
+// stored session under the ID the cookie brought.
 func (h *Handler) clearSessionCookie(w http.ResponseWriter, r *http.Request) error {
 	s, err := h.loadSession(r)
 	if err != nil {
-		h.log().WarnContext(r.Context(), "破棄するセッションを読めませんでした。実体の削除は試みます", "error", err)
+		h.log().WarnContext(r.Context(), "could not read the session to clear, trying to delete it anyway", "error", err)
 	}
 	if err := h.clearSession(w, r, s); err != nil {
-		h.log().ErrorContext(r.Context(), "セッションの破棄に失敗", "error", err)
+		h.log().ErrorContext(r.Context(), "failed to clear session", "error", err)
 		return err
 	}
 	return nil
 }
 
-// randomToken は 32 バイトの暗号論的乱数を生成し、指定エンコーディングで文字列化します。
-// state パラメータや CSRF トークンなど、推測不可能なランダム文字列が必要な箇所で共通利用します。
+// randomToken generates 32 cryptographically random bytes and encodes them
+// with the given encoding. It is shared by everything that needs an
+// unguessable random string, such as the state parameter and CSRF tokens.
 func randomToken(encoding *base64.Encoding) (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
@@ -273,7 +291,7 @@ func randomToken(encoding *base64.Encoding) (string, error) {
 	return encoding.EncodeToString(b), nil
 }
 
-// generateState は CSRF 対策のためのランダムな state 文字列を生成します。
+// generateState generates a random state string against CSRF.
 func generateState() (string, error) {
 	return randomToken(base64.URLEncoding)
 }

@@ -9,8 +9,8 @@ import (
 	"github.com/shouni/gcp-kit/auth"
 )
 
-// newCSRFTestHandler は、セッションストアだけを備えた Handler を返します。
-// OAuth 設定は CSRF の経路に関係しないため設定しません。
+// newCSRFTestHandler returns a Handler with only a session store. OAuth
+// settings play no part in the CSRF path, so none are set.
 func newCSRFTestHandler() *Handler {
 	return &Handler{store: newTestStore(), sessionName: "test-session", allowedDomains: testAllowedDomains()}
 }
@@ -33,15 +33,15 @@ func TestAuthenticatePutsCSRFTokenOnContext(t *testing.T) {
 		auth.Require(h)(next).ServeHTTP(rec, req)
 
 		if token == "" {
-			t.Fatal("GET で CSRF トークンが自動生成されていない")
+			t.Fatal("GET did not generate a CSRF token")
 		}
 		if len(rec.Result().Cookies()) == 0 {
-			t.Fatal("生成したトークンを保存するセッションクッキーが設定されていない")
+			t.Fatal("no session cookie was set to store the generated token")
 		}
 	})
 
-	// POST で生成してしまうと、トークンを持たないリクエストに正当なトークンを
-	// 与えることになり、CSRF 検証が意味をなさなくなります。
+	// Minting on POST would hand a valid token to a request that arrived
+	// without one, making CSRF verification meaningless.
 	t.Run("POST ではトークンを生成しない", func(t *testing.T) {
 		t.Parallel()
 
@@ -51,13 +51,13 @@ func TestAuthenticatePutsCSRFTokenOnContext(t *testing.T) {
 			token = CSRFTokenFromContext(r.Context())
 		})
 
-		// CSRF 検証には引っかかりますが、ここで見たいのは「発行しないこと」です。
+		// It fails CSRF verification, but what matters here is that nothing is minted.
 		req := httptest.NewRequest(http.MethodPost, "/web/compose", nil)
 		req.AddCookie(loginSessionCookie(t, h, "user@example.com"))
 		auth.Require(h)(next).ServeHTTP(httptest.NewRecorder(), req)
 
 		if token != "" {
-			t.Fatalf("POST で CSRF トークンが生成されている: %q", token)
+			t.Fatalf("POST generated a CSRF token: %q", token)
 		}
 	})
 
@@ -70,7 +70,7 @@ func TestAuthenticatePutsCSRFTokenOnContext(t *testing.T) {
 			got = CSRFTokenFromContext(r.Context())
 		})
 
-		// 1 回目でトークンを作り、そのクッキーを 2 回目のリクエストへ引き継ぐ。
+		// Mint a token on the first request and carry its cookie to the second.
 		firstReq := httptest.NewRequest(http.MethodGet, "/web/compose", nil)
 		firstReq.AddCookie(loginSessionCookie(t, h, "user@example.com"))
 		first := httptest.NewRecorder()
@@ -84,19 +84,19 @@ func TestAuthenticatePutsCSRFTokenOnContext(t *testing.T) {
 		auth.Require(h)(next).ServeHTTP(httptest.NewRecorder(), req)
 
 		if got != firstToken {
-			t.Fatalf("既存トークンが作り直されている: %q → %q", firstToken, got)
+			t.Fatalf("the existing token was regenerated: %q → %q", firstToken, got)
 		}
 	})
 }
 
-// loginSessionCookie は、ログイン済みセッションを表すクッキーを返します。
+// loginSessionCookie returns a cookie for a logged-in session.
 func loginSessionCookie(t *testing.T, h *Handler, email string) *http.Cookie {
 	t.Helper()
 
 	return seedSession(t, h.store, h.sessionName, map[string]string{DefaultUserSessionKey: email})
 }
 
-// CSRFTokenFromContext は、値が無いコンテキストでも空文字を返すこと。
+// CSRFTokenFromContext returns an empty string for a context without the value.
 func TestCSRFTokenFromContextWithoutValue(t *testing.T) {
 	t.Parallel()
 

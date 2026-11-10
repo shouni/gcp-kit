@@ -15,7 +15,7 @@ type samplePayload struct {
 	Name string `json:"name"`
 }
 
-// newTaskRequest / newRecorder は、ワーカーへの POST を組み立てる共通ヘルパーです。
+// newTaskRequest / newRecorder are shared helpers building a POST to the worker.
 func newTaskRequest(body io.Reader) *http.Request {
 	return httptest.NewRequest(http.MethodPost, "/tasks", body)
 }
@@ -81,7 +81,7 @@ func TestProcessTask_InvalidJSON(t *testing.T) {
 
 	h.ProcessTask(rr, req)
 
-	// 4xx では Cloud Tasks が再配信するため、2xx で打ち切る。
+	// Cloud Tasks redelivers on 4xx, so it stops with 2xx.
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
 	}
@@ -131,9 +131,10 @@ func TestProcessTask_Success(t *testing.T) {
 	}
 }
 
-// TestProcessTask_PermanentError は、リトライしても無意味な失敗を 2xx で打ち切り、
-// Cloud Tasks が最大試行数まで再送し続けるのを防いでいることを確認します。
-// TestPermanent は、Permanent が印だけを足して文面を変えないことを確認します。
+// TestProcessTask_PermanentError checks that a failure retries cannot fix is
+// stopped with 2xx, keeping Cloud Tasks from resending it up to the maximum
+// attempts.
+// TestPermanent checks that Permanent only adds the mark and leaves the text unchanged.
 func TestPermanent(t *testing.T) {
 	t.Parallel()
 
@@ -150,11 +151,11 @@ func TestPermanent(t *testing.T) {
 	if !errors.Is(err, cause) {
 		t.Error("errors.Is(err, cause) = false: the cause must stay reachable")
 	}
-	// センチネルの文言が記録や通知に漏れないこと。
+	// The sentinel's wording must not leak into records or notifications.
 	if got := err.Error(); got != cause.Error() {
 		t.Errorf("Error() = %q, want the cause's text %q", got, cause.Error())
 	}
-	// 一段包んでも印は残ること。
+	// The mark survives one more level of wrapping.
 	if !errors.Is(fmt.Errorf("run job: %w", err), ErrPermanent) {
 		t.Error("the mark must survive further wrapping")
 	}
@@ -187,7 +188,7 @@ func TestProcessTask_BodyTooLarge(t *testing.T) {
 	rr := newRecorder()
 	h.ServeHTTP(rr, newTaskRequest(strings.NewReader(body)))
 
-	// 4xx では Cloud Tasks が再配信するため、2xx で打ち切る。
+	// Cloud Tasks redelivers on 4xx, so it stops with 2xx.
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
 	}
@@ -196,8 +197,8 @@ func TestProcessTask_BodyTooLarge(t *testing.T) {
 	}
 }
 
-// 既定の上限は Cloud Tasks のタスクサイズ上限 (1MB) に合わせてあるため、
-// 通常のペイロードが弾かれることはありません。
+// The default limit matches Cloud Tasks' task size limit (1MB), so normal
+// payloads are never rejected.
 func TestProcessTask_DefaultBodyLimitAcceptsTypicalPayload(t *testing.T) {
 	t.Parallel()
 
@@ -234,7 +235,7 @@ func TestProcessTask_StrictJSON(t *testing.T) {
 		h := NewHandler[samplePayload](exec, WithStrictJSON())
 		rr := newRecorder()
 		h.ServeHTTP(rr, newTaskRequest(strings.NewReader(body)))
-		// 4xx では Cloud Tasks が再配信するため、2xx で打ち切る。
+		// Cloud Tasks redelivers on 4xx, so it stops with 2xx.
 		if rr.Code != http.StatusOK {
 			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
 		}
@@ -244,7 +245,7 @@ func TestProcessTask_StrictJSON(t *testing.T) {
 	})
 }
 
-// TestHandlerImplementsHTTPHandler は、ルーターへ直接渡せることを保証します。
+// TestHandlerImplementsHTTPHandler guarantees it can be passed straight to a router.
 func TestHandlerImplementsHTTPHandler(t *testing.T) {
 	t.Parallel()
 

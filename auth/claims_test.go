@@ -7,10 +7,11 @@ import (
 	"github.com/shouni/gcp-kit/auth"
 )
 
-// VerifiedEmail は、ID トークンによるログイン・UserInfo API・サービス間検証の
-// 3 経路が共有する唯一の判定です。ここが緩むと、緩んだ経路から他人のアドレスを
-// 名乗れます。クレームは外から与えられた JSON なので、型が想定どおりである保証は
-// 無く、想定外はすべて拒否側へ倒れる必要があります。
+// VerifiedEmail is the single check shared by three paths: ID token login, the
+// UserInfo API and service-to-service verification. If it loosens, the
+// loosened path can be used to claim someone else's address. Claims are JSON
+// supplied from outside, with no guarantee of the expected types, so anything
+// unexpected must fall on the rejecting side.
 func TestVerifiedEmail(t *testing.T) {
 	t.Parallel()
 
@@ -20,7 +21,7 @@ func TestVerifiedEmail(t *testing.T) {
 		name    string
 		claims  map[string]any
 		want    string
-		wantErr string // エラーに含まれるべき語
+		wantErr string // a word the error must contain
 	}{
 		{
 			name:   "検証済みなら通す",
@@ -33,14 +34,15 @@ func TestVerifiedEmail(t *testing.T) {
 			wantErr: "not verified",
 		},
 		{
-			// クレームが欠けているのは「検証済み」ではありません。
+			// A missing claim is not "verified".
 			name:    "email_verified が無い場合は拒否",
 			claims:  map[string]any{"email": addr},
 			wantErr: "not verified",
 		},
 		{
-			// JSON の値が bool でなく文字列で来ることがあります。真偽値として
-			// 解釈しにいくと "false" まで真になりうるため、型が違えば拒否します。
+			// A JSON value can arrive as a string rather than a bool. Trying to
+			// interpret it as a boolean could make even "false" true, so a wrong
+			// type is rejected.
 			name:    "email_verified が文字列なら拒否",
 			claims:  map[string]any{"email": addr, "email_verified": "true"},
 			wantErr: "not verified",
@@ -56,7 +58,7 @@ func TestVerifiedEmail(t *testing.T) {
 			wantErr: "no email claim",
 		},
 		{
-			// 空文字を通すと、許可リストの照合に空のアドレスが渡ります。
+			// Letting an empty string through would hand an empty address to the allowlist check.
 			name:    "email が空文字なら拒否",
 			claims:  map[string]any{"email": "", "email_verified": true},
 			wantErr: "no email claim",

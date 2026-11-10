@@ -8,12 +8,12 @@ import (
 	"github.com/shouni/go-utils/jobid"
 )
 
-// TestStoreRejectsInvalidJobID は、ジョブ ID の検証が Firestore へ触れる前に
-// 効いていることを固定します。
+// TestStoreRejectsInvalidJobID pins that job ID validation takes effect before
+// Firestore is touched.
 //
-// ジョブ ID は URL パスとドキュメント ID の双方に現れるため、検証はセキュリティ
-// 境界を兼ねます。ここが通ってしまうと、外から渡された値がそのままドキュメント
-// 参照の組み立てに使われます。
+// The job ID appears both in URL paths and as a document ID, so validation
+// doubles as a security boundary. If this let a value through, an
+// outside-supplied value would be used as is to build a document reference.
 func TestStoreRejectsInvalidJobID(t *testing.T) {
 	t.Parallel()
 
@@ -33,14 +33,14 @@ func TestStoreRejectsInvalidJobID(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			// client が nil でも、検証はその手前で効くので到達しない。
+			// Even with a nil client, validation comes first, so the client is never reached.
 			store := NewStore[testStatus](nil, "jobs")
 
 			_, err := store.Get(t.Context(), tt.jobID)
 			if !errors.Is(err, ErrInvalidJobID) {
 				t.Fatalf("Get: err = %v, want errors.Is(_, ErrInvalidJobID)", err)
 			}
-			// 400 として返したうえで、原因まで辿れるようにしておく。
+			// Answer 400 while keeping the cause reachable.
 			if !errors.Is(err, tt.wantCause) {
 				t.Errorf("Get: err = %v, want errors.Is(_, %v)", err, tt.wantCause)
 			}
@@ -55,8 +55,9 @@ func TestStoreRejectsInvalidJobID(t *testing.T) {
 	}
 }
 
-// TestStoreNormalizesJobID は、パス形式の値が正規化されて通ることを確かめます。
-// 正規化の結果が正当なら、検証ではなく設定漏れのエラーまで進みます。
+// TestStoreNormalizesJobID checks that a path-shaped value is normalised and
+// passes. When the normalised result is valid, it gets as far as the
+// missing-configuration error rather than failing validation.
 func TestStoreNormalizesJobID(t *testing.T) {
 	t.Parallel()
 
@@ -64,7 +65,7 @@ func TestStoreNormalizesJobID(t *testing.T) {
 
 	_, err := store.Get(t.Context(), "jobs/job-1")
 	if errors.Is(err, ErrInvalidJobID) {
-		t.Errorf("err = %v, 正規化で job-1 になるはず", err)
+		t.Errorf("err = %v, normalisation should give job-1", err)
 	}
 }
 
@@ -84,23 +85,24 @@ func TestStoreRequiresConfiguration(t *testing.T) {
 			t.Parallel()
 
 			if _, err := tt.store.Get(t.Context(), "job-1"); err == nil {
-				t.Error("err = nil, 設定漏れを黙って通している")
+				t.Error("err = nil, a missing setting was let through silently")
 			}
 		})
 	}
 }
 
-// TestNewStorePanicsOnPointerType は、ポインタ型での instantiate を構築時に
-// 落とすことを固定します。
+// TestNewStorePanicsOnPointerType pins that instantiating with a pointer type
+// fails at construction.
 //
-// T が *X だと Stamper への型アサートが **X に対して行われ、打刻も引き継ぎも
-// 再実行ガードも無効になったドキュメントが、エラーもログも無しに書かれます。
+// With T = *X the type assertion to Stamper runs against **X, and documents
+// are written with stamping, carry-over and the rerun guard all disabled, with
+// no error and no log.
 func TestNewStorePanicsOnPointerType(t *testing.T) {
 	t.Parallel()
 
 	defer func() {
 		if recover() == nil {
-			t.Error("panic しなかった。ポインタ型は静かに壊れるので構築時に落とす")
+			t.Error("did not panic; a pointer type breaks silently, so it must fail at construction")
 		}
 	}()
 
@@ -112,7 +114,7 @@ func TestNewRecorderPanicsOnPointerType(t *testing.T) {
 
 	defer func() {
 		if recover() == nil {
-			t.Error("panic しなかった")
+			t.Error("did not panic")
 		}
 	}()
 

@@ -15,7 +15,7 @@ func TestStatusIsTerminal(t *testing.T) {
 		{state: StateQueued, want: false},
 		{state: StateRunning, want: false},
 		{state: StateSucceeded, want: true},
-		// failed は Cloud Tasks が再試行しうるので終了ではない。
+		// failed may be retried by Cloud Tasks, so it is not the end.
 		{state: StateFailed, want: false},
 	}
 
@@ -36,7 +36,7 @@ func TestStatusStamp(t *testing.T) {
 	now := time.Date(2026, 8, 30, 9, 0, 0, 0, time.UTC)
 	status := Status{State: StateRunning}
 
-	// 呼び出し側が UpdatedAt を設定し忘れても記録が残るようにする。
+	// The record holds even if the caller forgot to set UpdatedAt.
 	status.Stamp("job-1", now)
 
 	if status.JobID != "job-1" {
@@ -45,7 +45,7 @@ func TestStatusStamp(t *testing.T) {
 	if !status.UpdatedAt.Equal(now) {
 		t.Errorf("UpdatedAt = %v, want %v", status.UpdatedAt, now)
 	}
-	// 一覧は queued_at の降順なので、打刻を忘れたジョブは末尾に沈む。未設定なら埋める。
+	// Listings sort by queued_at descending, so a job missing the stamp sinks to the bottom. Fill it when unset.
 	if !status.QueuedAt.Equal(now) {
 		t.Errorf("QueuedAt = %v, want %v (filled when zero)", status.QueuedAt, now)
 	}
@@ -58,9 +58,9 @@ func TestStatusStamp(t *testing.T) {
 	}
 }
 
-// TestStatusPredicates は、再実行ガード用の IsTerminal と表示・ポーリング用の
-// Finished / InFlight が別物であることを固定します。failed は前者では終端ではなく、
-// 後者では終端です。
+// TestStatusPredicates pins that IsTerminal, for the rerun guard, differs from
+// Finished / InFlight, for display and polling. failed is not terminal for the
+// former, and is for the latter.
 func TestStatusPredicates(t *testing.T) {
 	t.Parallel()
 
@@ -90,7 +90,7 @@ func TestStatusEnsureJobID(t *testing.T) {
 		initial string
 		want    string
 	}{
-		// job_id を持たない古い記録を読んだときに、ID 無しの構造体を返さない。
+		// Do not return a struct without an ID when reading an old record that has no job_id.
 		{name: "空なら補う", initial: "", want: "job-1"},
 		{name: "入っていれば触らない", initial: "job-9", want: "job-9"},
 	}
@@ -109,9 +109,10 @@ func TestStatusEnsureJobID(t *testing.T) {
 	}
 }
 
-// TestStatusSatisfiesInterfaces は、埋め込んだ型がメソッドの昇格だけで
-// Stamper と Carrier を満たすことを固定します。利用側に実装を要求しないための
-// 前提なので、崩れると打刻も引き継ぎも黙って無効になります。
+// TestStatusSatisfiesInterfaces pins that an embedding type satisfies Stamper
+// and Carrier through method promotion alone. That is the premise for asking
+// callers to implement nothing, so if it broke, stamping and carry-over would
+// silently stop working.
 func TestStatusSatisfiesInterfaces(t *testing.T) {
 	t.Parallel()
 

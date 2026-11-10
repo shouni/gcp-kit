@@ -163,12 +163,13 @@ func TestMiddlewareAllowsAuthenticatedRequest(t *testing.T) {
 	})
 }
 
-// TestStoreUnavailableKeepsTheSession は、保存先へ到達できないだけのときに
-// セッションクッキーを消さないことを確認します。
+// TestStoreUnavailableKeepsTheSession checks that the session cookie is not
+// cleared when the store is merely unreachable.
 //
-// 一時障害を「壊れたセッション」と同じ扱いにすると、Firestore の瞬断がその瞬間に
-// アクセスしていた利用者全員のログアウトになり、復旧しても元に戻りません。
-// 応答は 503 で、ログイン画面へは送りません（送っても直らないためです）。
+// Treating a transient outage like a broken session turns a Firestore blip
+// into a logout for every user accessing at that moment, and recovery does not
+// undo it. The response is 503, not a redirect to the login page (which would
+// not help).
 func TestStoreUnavailableKeepsTheSession(t *testing.T) {
 	t.Parallel()
 
@@ -178,7 +179,7 @@ func TestStoreUnavailableKeepsTheSession(t *testing.T) {
 		allowedDomains: testAllowedDomains(),
 	}
 
-	// 形の合う ID でないと Load に届かず、ストアの障害に当たる前に「セッション無し」になります。
+	// Only a well-formed ID reaches Load; anything else becomes "no session" before hitting the store failure.
 	id, err := newSessionID()
 	if err != nil {
 		t.Fatalf("newSessionID() error = %v", err)
@@ -201,9 +202,10 @@ func TestStoreUnavailableKeepsTheSession(t *testing.T) {
 	}
 }
 
-// TestBrokenSessionClearsTheCookie は、保存先には届いたが実体を解釈できない場合に、
-// クッキーを消してログイン画面へ送り、壊れた実体も消すことを確認します。
-// こちらは作り直せば直るので、消すのが正しい処置です。
+// TestBrokenSessionClearsTheCookie checks that when the store was reached but
+// the stored session cannot be decoded, the cookie is cleared, the user is
+// sent to the login page, and the broken stored session is deleted. This one
+// is fixed by starting over, so clearing it is the right remedy.
 func TestBrokenSessionClearsTheCookie(t *testing.T) {
 	t.Parallel()
 
@@ -214,8 +216,8 @@ func TestBrokenSessionClearsTheCookie(t *testing.T) {
 		allowedDomains: testAllowedDomains(),
 	}
 
-	// 形の合わない ID は Load の手前で捨てられるので、壊れた実体を読む経路には
-	// 発行と同じ形の ID で入ります。
+	// An ID of the wrong shape is dropped before Load, so the path reading a
+	// broken stored session is entered with an ID of the minted shape.
 	id, err := newSessionID()
 	if err != nil {
 		t.Fatalf("newSessionID() error = %v", err)
@@ -243,18 +245,19 @@ func TestBrokenSessionClearsTheCookie(t *testing.T) {
 	}
 }
 
-// TestMiddlewareRejectsRevokedSession は、許可リストから外れたアドレスのセッションが
-// 有効期限内でも通らないことを確認します。認可をログイン時に一度きりしか評価しないと、
-// 許可リストから削除してもクッキーの有効期限まで通り続けてしまいます。
+// TestMiddlewareRejectsRevokedSession checks that a session for an address
+// removed from the allowlist does not pass, even before it expires. If
+// authorization were evaluated only once at login, a removed address would
+// keep passing until the cookie expired.
 func TestMiddlewareRejectsRevokedSession(t *testing.T) {
 	t.Parallel()
 
 	store := newTestStore()
 
-	// セッションを作った時点では許可されていた利用者。
+	// A user who was allowed when the session was created.
 	seeded := seedSession(t, store, "test-session", map[string]string{DefaultUserSessionKey: "user@example.com"})
 
-	// 許可リストから外した後の Handler。セッションクッキー自体は有効なままです。
+	// The Handler after the user was removed from the allowlist. The session cookie itself is still valid.
 	revoked := &Handler{
 		store:          store,
 		sessionName:    "test-session",
@@ -276,7 +279,7 @@ func TestMiddlewareRejectsRevokedSession(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusFound)
 	}
 
-	// 使えないセッションを残すと、以降のリクエストごとに同じ警告を出し続けます。
+	// Leaving an unusable session would repeat the same warning on every later request.
 	var cleared bool
 	for _, c := range rr.Result().Cookies() {
 		if c.Name == "test-session" && c.MaxAge < 0 {
@@ -368,9 +371,9 @@ func TestValidateCSRF(t *testing.T) {
 	})
 }
 
-// TestValidateOrigin は、トークン検証に加えた多層防御としての Origin 検証を確認します。
-// Origin が無いリクエスト（ブラウザ以外のAPIクライアント等）は素通しし、
-// 提示されている場合のみ一致を要求します。
+// TestValidateOrigin checks the Origin check as defence in depth on top of
+// token verification. A request without an Origin (a non-browser API client,
+// for example) passes; only when one is presented must it match.
 func TestValidateOrigin(t *testing.T) {
 	t.Parallel()
 
@@ -403,8 +406,8 @@ func TestValidateOrigin(t *testing.T) {
 	}
 }
 
-// TestMiddlewareRejectsCrossOriginPost は、正しいCSRFトークンを持っていても
-// Origin が一致しないリクエストは拒否されることを確認します。
+// TestMiddlewareRejectsCrossOriginPost checks that a request with a mismatched
+// Origin is rejected even when it holds a correct CSRF token.
 func TestMiddlewareRejectsCrossOriginPost(t *testing.T) {
 	t.Parallel()
 
@@ -495,11 +498,12 @@ func TestGenerateAndSaveCSRFToken(t *testing.T) {
 	})
 }
 
-// TestAuthenticateIssuesCSRFTokenOnGet は、トークンを持たない認証済み GET が
-// トークンを発行し、それをコンテキストへ載せることを確認します。
+// TestAuthenticateIssuesCSRFTokenOnGet checks that an authenticated GET
+// without a token mints one and puts it in the context.
 //
-// これが空になると、テンプレートの hidden input が空のまま描画され、その画面から
-// の POST が一律 403 になります（利用アプリはここからトークンを受け取ります）。
+// If this were empty, templates would render the hidden input empty and every
+// POST from that screen would be a 403 (consuming apps get the token from
+// here).
 func TestAuthenticateIssuesCSRFTokenOnGet(t *testing.T) {
 	t.Parallel()
 
@@ -522,7 +526,7 @@ func TestAuthenticateIssuesCSRFTokenOnGet(t *testing.T) {
 		t.Fatal("CSRF token in context is empty")
 	}
 
-	// 2 回目の GET は、発行済みのトークンをそのまま返します。
+	// The second GET returns the token already issued.
 	req2 := httptest.NewRequest(http.MethodGet, "/x", nil)
 	for _, c := range cookies {
 		req2.AddCookie(c)
@@ -536,11 +540,12 @@ func TestAuthenticateIssuesCSRFTokenOnGet(t *testing.T) {
 	}
 }
 
-// TestAuthenticateReadsStoreOnce は、認証済みリクエスト 1 本につきストアの読み出しが
-// 1 回であることを固定します。
+// TestAuthenticateReadsStoreOnce pins the store reads per authenticated
+// request at one.
 //
-// Firestore ストアでは 1 回が 1 件の課金対象の読み取りで、しかも往復が 1 つ増えます。
-// 手元のセッションを使わずに読み直す実装へ戻ると、この数字が黙って倍になります。
+// With the Firestore store each read is one billed read plus another round
+// trip. An implementation that re-reads instead of using the session at hand
+// would silently double this number.
 func TestAuthenticateReadsStoreOnce(t *testing.T) {
 	t.Parallel()
 
@@ -548,7 +553,7 @@ func TestAuthenticateReadsStoreOnce(t *testing.T) {
 	h := &Handler{store: counting, sessionName: "test-session", allowedDomains: testAllowedDomains()}
 	cookies := seedAuthenticatedSession(t, h, "user@example.com")
 
-	// 最初の GET は CSRF トークンの発行を伴うため、保存が 1 回だけ増えます。
+	// The first GET also mints a CSRF token, so there is exactly one extra save.
 	for i, want := range []struct{ gets, saves int }{{1, 1}, {1, 0}} {
 		counting.reset()
 		req := httptest.NewRequest(http.MethodGet, "/x", nil)

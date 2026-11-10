@@ -1,12 +1,13 @@
-// Package session は、人（ブラウザ）の認証を提供します。
+// Package session authenticates people (browsers).
 //
-// Google OAuth2 + PKCE でログインし、サーバー側のセッションで維持し、状態を変える
-// リクエストには CSRF 検証を掛けます。Handler は auth.Authenticator と
-// auth.Challenger を満たすため、サービス間検証（auth/oidc）と並べて
-// auth.Protected に渡せます。
+// It logs in with Google OAuth2 + PKCE, keeps the login in a server-side
+// session, and applies CSRF verification to state-changing requests. Handler
+// satisfies auth.Authenticator and auth.Challenger, so it can be passed to
+// auth.Protected alongside service-to-service verification (auth/oidc).
 //
-// セッションの実体は Store にあり、クッキーが運ぶのは不透明な ID だけです。
-// だからセッション鍵を配る必要がなく、ログアウトと失効が実際に効きます。
+// The session lives in a Store, and the cookie carries only an opaque ID. So
+// there are no session keys to distribute, and logout and revocation actually
+// take effect.
 //
 //	store, err := session.NewFirestoreStore(session.FirestoreConfig{
 //		Client: fsClient, Collection: "sessions",
@@ -29,23 +30,25 @@ import (
 )
 
 const (
-	// DefaultUserSessionKey は、認証済みユーザーのメールアドレスを保持するセッションキーです。
+	// DefaultUserSessionKey is the session key holding the authenticated user's email address.
 	DefaultUserSessionKey = "user_email"
-	// DefaultStateCookie は、OAuth2の state パラメータを一時保持するクッキー名です。
+	// DefaultStateCookie is the name of the cookie that temporarily holds the OAuth2 state parameter.
 	DefaultStateCookie = "oauth_state"
-	// DefaultVerifierCookie は、PKCE の code_verifier を一時保持するクッキー名です。
+	// DefaultVerifierCookie is the name of the cookie that temporarily holds the PKCE code_verifier.
 	DefaultVerifierCookie = "oauth_verifier"
-	// DefaultRedirectCookie は、ログイン後の戻り先を一時保持するクッキー名です。
-	// state / verifier と同じ寿命・同じ Path で、コールバックで消費されます。
+	// DefaultRedirectCookie is the name of the cookie that temporarily holds
+	// where to return after login. It has the same lifetime and Path as the
+	// state and verifier cookies and is consumed by the callback.
 	DefaultRedirectCookie = "oauth_redirect"
 
-	// DefaultLoginPath は Login ハンドラーを配置する既定パスです。
+	// DefaultLoginPath is the default path the Login handler is mounted on.
 	DefaultLoginPath = "/auth/login"
-	// DefaultCallbackPath は Callback ハンドラーを配置する既定パスです。
-	// state / PKCE クッキーの Path 属性にも使われるため、実際のマウント先と
-	// 一致していない場合、コールバック時にクッキーが送信されず認証に失敗します。
+	// DefaultCallbackPath is the default path the Callback handler is mounted
+	// on. It is also the Path attribute of the state and PKCE cookies, so if
+	// it does not match the actual mount point, the cookies are not sent on
+	// the callback and authentication fails.
 	DefaultCallbackPath = "/auth/callback"
-	// DefaultLogoutPath は Logout ハンドラーを配置する既定パスです。
+	// DefaultLogoutPath is the default path the Logout handler is mounted on.
 	DefaultLogoutPath = "/auth/logout"
 
 	googleUserInfoURL = "https://www.googleapis.com/oauth2/v2/userinfo"
@@ -54,38 +57,43 @@ const (
 	defaultStateMaxAge   = 10 * time.Minute
 )
 
-// defaultScopes は、メールアドレスによる認可判定に必要な最小のスコープ集合です。
+// defaultScopes is the minimal set of scopes needed to authorize by email address.
 var defaultScopes = []string{
 	"openid",
 	"https://www.googleapis.com/auth/userinfo.email",
 }
 
-// Config は Handler の必須設定です。
-// 任意の項目は Option（With で始まる関数）で指定します。
+// Config holds the required settings of a Handler.
+// Optional settings are given as Options (the functions starting with With).
 type Config struct {
 	ClientID     string
 	ClientSecret string
 
-	// ServiceURL は、このアプリがブラウザから見えるオリジンです（例: https://app.example.com）。
-	// パスは持てません。
+	// ServiceURL is the origin at which browsers see this app (for example
+	// https://app.example.com). It cannot carry a path.
 	//
-	// ここから 2 つを導出します。OAuth のリダイレクト先（ServiceURL + callbackPath()）と、
-	// クッキーの Secure 属性（スキームが https かどうか）です。呼び出し側に組み立てさせて
-	// いた頃は、"/auth/callback" というリテラルがルート登録と別の場所にもう 1 つあり、
-	// WithPaths を変えても片方だけが動いてビルドは通りました。
+	// Two things are derived from it: the OAuth redirect URL
+	// (ServiceURL + callbackPath()) and the cookie's Secure attribute (whether
+	// the scheme is https). When callers assembled the redirect themselves, the
+	// "/auth/callback" literal existed a second time apart from the route
+	// registration, and changing WithPaths moved only one of them while the
+	// build still passed.
 	//
-	// Secure をスキームだけで決めるのは、それがクッキーの問い（TLS か）そのものだから
-	// です。「開発機なら http でもよいか」は設定値の妥当性の問いで、別の場所の判断です。
+	// Secure is decided by the scheme alone because that is exactly the
+	// cookie's question (is it TLS?). "Is http acceptable on a development
+	// machine?" is a question about whether a setting is valid, and is decided
+	// elsewhere.
 	ServiceURL string
 
 	SessionName string
 
-	// Store はセッションの保存先です（必須）。
+	// Store is where sessions are kept (required).
 	//
-	// 既定を持たないのは、置ける既定が無いからです。プロセス内に持つと Cloud Run の
-	// インスタンスが替わるたびに利用者がログアウトされ、しかも開発中は 1 インスタンス
-	// なので気付けません。NewFirestoreStore を渡してください（テストとローカル開発には
-	// NewMemoryStore があります）。
+	// It has no default because there is no default that would work. Kept in
+	// the process, users would be logged out every time the Cloud Run instance
+	// changed, and during development there is one instance, so nobody would
+	// notice. Pass NewFirestoreStore (NewMemoryStore exists for tests and local
+	// development).
 	Store Store
 
 	AllowedEmails  []string
@@ -97,7 +105,7 @@ type googleUserInfo struct {
 	VerifiedEmail bool   `json:"verified_email"`
 }
 
-// Handler は認証ロジックを保持する構造体です
+// Handler holds the authentication logic.
 type Handler struct {
 	oauthConfig    *oauth2.Config
 	store          Store
@@ -115,7 +123,7 @@ type Handler struct {
 	logger           *slog.Logger
 }
 
-// New は設定に基づき Handler を生成します。
+// New builds a Handler from the configuration.
 func New(cfg Config, opts ...Option) (*Handler, error) {
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
@@ -125,7 +133,7 @@ func New(cfg Config, opts ...Option) (*Handler, error) {
 		return nil, err
 	}
 
-	serviceURL, _ := url.Parse(cfg.ServiceURL) // validateConfig が形を確かめています
+	serviceURL, _ := url.Parse(cfg.ServiceURL) // validateConfig has checked its shape
 	redirectURL, err := url.JoinPath(cfg.ServiceURL, o.callbackPath)
 	if err != nil {
 		return nil, fmt.Errorf("auth config: cannot build the redirect URL: %w", err)
@@ -160,7 +168,7 @@ func New(cfg Config, opts ...Option) (*Handler, error) {
 }
 
 func validateConfig(cfg Config) error {
-	// エラーメッセージを再現可能にするため、map ではなく順序の定まったスライスで検証します。
+	// Checked over an ordered slice rather than a map so the error message is reproducible.
 	required := []struct {
 		name  string
 		value string
@@ -177,7 +185,7 @@ func validateConfig(cfg Config) error {
 		}
 	}
 
-	// 保存先に既定は置きません（Config.Store を参照）。
+	// The store has no default (see Config.Store).
 	if cfg.Store == nil {
 		return errors.New("auth config Store must not be nil")
 	}
@@ -186,8 +194,9 @@ func validateConfig(cfg Config) error {
 	if err != nil || serviceURL.Scheme == "" || serviceURL.Host == "" {
 		return errors.New("auth config ServiceURL must be an absolute URL")
 	}
-	// パスを許すと、リダイレクト先には付くのに Routes の照合には付かない、という
-	// ずれが生まれます。オリジンだけを受け、パスは WithPaths に一本化します。
+	// Allowing a path would let it reach the redirect URL but not the route
+	// matching in Routes. Only an origin is accepted; paths go through
+	// WithPaths alone.
 	if (serviceURL.Path != "" && serviceURL.Path != "/") || serviceURL.RawQuery != "" || serviceURL.Fragment != "" {
 		return errors.New("auth config ServiceURL must be an origin without path, query or fragment")
 	}
@@ -195,10 +204,11 @@ func validateConfig(cfg Config) error {
 	return nil
 }
 
-// validatePaths は、3 つのマウント先が Routes で衝突しないことを確かめます。
-// 同じパスを 2 つ登録すると http.ServeMux は panic するので、先に読める形で止めます。
+// validatePaths checks that the three mount points do not collide in Routes.
+// http.ServeMux panics when the same path is registered twice, so this stops
+// earlier with a readable error.
 func validatePaths(loginPath, callbackPath, logoutPath string) error {
-	// エラー文を再現可能にするため、順序の定まったスライスで見ます。
+	// Walked as an ordered slice so the error text is reproducible.
 	named := []struct{ name, path string }{
 		{"login", loginPath}, {"callback", callbackPath}, {"logout", logoutPath},
 	}
@@ -215,7 +225,7 @@ func validatePaths(loginPath, callbackPath, logoutPath string) error {
 	return nil
 }
 
-// log は設定されたロガー、未設定なら slog.Default() を返します。
+// log returns the configured logger, or slog.Default() if none is set.
 func (h *Handler) log() *slog.Logger {
 	if h != nil && h.logger != nil {
 		return h.logger
@@ -223,8 +233,9 @@ func (h *Handler) log() *slog.Logger {
 	return slog.Default()
 }
 
-// 以下のアクセサは、New を通さず組み立てた Handler（テストなど）でも
-// 既定値で動くよう、ゼロ値を既定へ倒します。このリポジトリの他の型と同じ方針です。
+// The accessors below turn zero values into defaults, so a Handler built
+// without New (in tests, for example) still works with the defaults. This is
+// the same policy as the other types in this repository.
 
 func (h *Handler) loginPath() string    { return pathOrDefault(h.cfgLoginPath, DefaultLoginPath) }
 func (h *Handler) callbackPath() string { return pathOrDefault(h.cfgCallbackPath, DefaultCallbackPath) }
@@ -237,7 +248,7 @@ func pathOrDefault(path, fallback string) string {
 	return path
 }
 
-// promptParam は認可 URL へ載せる prompt の値を返します。未指定なら空です。
+// promptParam returns the prompt value to put on the authorization URL, or empty if unset.
 func (h *Handler) promptParam() string {
 	return strings.TrimSpace(string(h.prompt))
 }
@@ -249,7 +260,7 @@ func (h *Handler) stateCookieMaxAge() int {
 	return int(defaultStateMaxAge.Seconds())
 }
 
-// sessionMaxAge はセッションの寿命です。クッキーと保存した実体の両方に同じ値を使います。
+// sessionMaxAge is the session's lifetime. The same value is used for both the cookie and the stored session.
 func (h *Handler) sessionMaxAge() time.Duration {
 	if h.cfgSessionMaxAge > 0 {
 		return h.cfgSessionMaxAge
@@ -257,9 +268,10 @@ func (h *Handler) sessionMaxAge() time.Duration {
 	return defaultSessionMaxAge
 }
 
-// toLowerMap は許可リストを正規化（トリム + 小文字化）して map にします。
-// 空白のみの要素を捨てるのは、環境変数を分割した値に空要素が混ざっても、
-// 「空ではないが誰も許可しない」リストにならないようにするためです。
+// toLowerMap normalises the allowlist (trim + lowercase) into a map.
+// Whitespace-only entries are dropped so that empty elements from splitting
+// an environment variable cannot make a list that is "not empty but allows
+// nobody".
 func toLowerMap(slice []string) map[string]struct{} {
 	m := make(map[string]struct{}, len(slice))
 	for _, s := range slice {

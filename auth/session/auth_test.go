@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// validTestConfig は、必須項目だけを埋めた最小の有効な Config を返します。
+// validTestConfig returns the smallest valid Config, with only the required fields filled.
 func validTestConfig() Config {
 	return Config{
 		ClientID:     "client-id",
@@ -21,7 +21,7 @@ func validTestConfig() Config {
 func TestNewHandlerValidatesConfig(t *testing.T) {
 	t.Parallel()
 
-	// 必須項目を1つだけ欠いた Config を作ります。
+	// Builds a Config missing exactly one required field.
 	without := func(invalidate func(*Config)) Config {
 		cfg := validTestConfig()
 		invalidate(&cfg)
@@ -45,7 +45,7 @@ func TestNewHandlerValidatesConfig(t *testing.T) {
 			cfg:  without(func(c *Config) { c.ServiceURL = "/app" }),
 		},
 		{
-			// パスを許すと、リダイレクト先には付くのに Routes の照合には付きません。
+			// Allowing a path would let it reach the redirect URL but not the route matching in Routes.
 			name: "service url with a path",
 			cfg:  without(func(c *Config) { c.ServiceURL = "https://example.com/app" }),
 		},
@@ -54,8 +54,9 @@ func TestNewHandlerValidatesConfig(t *testing.T) {
 			cfg:  without(func(c *Config) { c.SessionName = "" }),
 		},
 		{
-			// 保存先に既定は置きません。通すと、プロセス内に持つ実装へ黙って倒れ、
-			// インスタンスが替わるたびに利用者がログアウトされます。
+			// The store has no default. Letting this through would silently fall
+			// back to an in-process implementation, logging users out every time
+			// the instance changes.
 			name: "missing store",
 			cfg:  without(func(c *Config) { c.Store = nil }),
 		},
@@ -75,8 +76,9 @@ func TestNewHandlerValidatesConfig(t *testing.T) {
 	}
 }
 
-// TestValidateConfigErrorIsDeterministic は、複数フィールドが空のときのエラーが
-// 実行ごとに変わらないこと（map 反復順に依存しないこと）を確認します。
+// TestValidateConfigErrorIsDeterministic checks that the error for several
+// empty fields does not change between runs (does not depend on map iteration
+// order).
 func TestValidateConfigErrorIsDeterministic(t *testing.T) {
 	t.Parallel()
 
@@ -141,9 +143,9 @@ func TestOptionOverrides(t *testing.T) {
 	}
 }
 
-// TestRedirectURLFollowsCallbackPath は、OAuth のリダイレクト先が ServiceURL と
-// callbackPath() から組み立てられることを確認します。呼び出し側に組ませていた頃は、
-// WithPaths を変えてもリダイレクト先だけが古いままになれました。
+// TestRedirectURLFollowsCallbackPath checks that the OAuth redirect URL is
+// built from ServiceURL and callbackPath(). When callers built it, changing
+// WithPaths could leave the redirect URL alone on the old value.
 func TestRedirectURLFollowsCallbackPath(t *testing.T) {
 	t.Parallel()
 
@@ -164,9 +166,10 @@ func TestRedirectURLFollowsCallbackPath(t *testing.T) {
 	}
 }
 
-// TestSecureCookieFollowsScheme は、Secure 属性が ServiceURL のスキームだけで決まることを
-// 確認します。TLS でない通信に Secure を立てても守られるものは無く、開発機の http では
-// ブラウザ次第でクッキーが捨てられます。
+// TestSecureCookieFollowsScheme checks that the Secure attribute is decided by
+// ServiceURL's scheme alone. Setting Secure on non-TLS traffic protects
+// nothing, and over http on a development machine some browsers discard the
+// cookie.
 func TestSecureCookieFollowsScheme(t *testing.T) {
 	t.Parallel()
 
@@ -191,8 +194,9 @@ func TestSecureCookieFollowsScheme(t *testing.T) {
 	}
 }
 
-// TestNewRejectsCollidingPaths は、同じパスを 2 つの役に割り当てた設定を New が
-// 止めることを確認します。Routes まで進めば http.ServeMux が panic します。
+// TestNewRejectsCollidingPaths checks that New stops a configuration giving
+// the same path two roles. Getting as far as Routes would make http.ServeMux
+// panic.
 func TestNewRejectsCollidingPaths(t *testing.T) {
 	t.Parallel()
 
@@ -204,8 +208,9 @@ func TestNewRejectsCollidingPaths(t *testing.T) {
 	}
 }
 
-// TestRoutes は、Routes が 3 つのハンドラーを設定どおりのパスとメソッドで受けることを
-// 確認します。プレフィックスの下に置いても完全なパスで照合します。
+// TestRoutes checks that Routes serves the three handlers on the configured
+// paths and methods. Mounted under a prefix, it still matches on the full
+// path.
 func TestRoutes(t *testing.T) {
 	t.Parallel()
 
@@ -219,12 +224,12 @@ func TestRoutes(t *testing.T) {
 		method, path string
 		want         int
 	}{
-		{http.MethodGet, "/signin", http.StatusTemporaryRedirect},   // Google へ
-		{http.MethodPost, "/signin", http.StatusMethodNotAllowed},   // GET のみ
-		{http.MethodGet, "/signin/callback", http.StatusBadRequest}, // state 無し
-		{http.MethodGet, "/signout", http.StatusSeeOther},           // ログインへ
-		{http.MethodPost, "/signout", http.StatusSeeOther},          // メソッドを限らない
-		{http.MethodGet, DefaultLoginPath, http.StatusNotFound},     // 既定パスは登録されない
+		{http.MethodGet, "/signin", http.StatusTemporaryRedirect},   // to Google
+		{http.MethodPost, "/signin", http.StatusMethodNotAllowed},   // GET only
+		{http.MethodGet, "/signin/callback", http.StatusBadRequest}, // no state
+		{http.MethodGet, "/signout", http.StatusSeeOther},           // to login
+		{http.MethodPost, "/signout", http.StatusSeeOther},          // any method
+		{http.MethodGet, DefaultLoginPath, http.StatusNotFound},     // the default path is not registered
 	} {
 		rr := newRecorderForCookies()
 		routes.ServeHTTP(rr, newRequestForRoutes(tt.method, tt.path))
@@ -234,9 +239,9 @@ func TestRoutes(t *testing.T) {
 	}
 }
 
-// TestCallbackPathDrivesStateCookiePath は、CallbackPath を変えると state/PKCE
-// クッキーの Path も追随することを確認します（一致していないとコールバック時に
-// クッキーが送信されず、ログインが必ず失敗します）。
+// TestCallbackPathDrivesStateCookiePath checks that changing CallbackPath
+// moves the Path of the state/PKCE cookies too (if they do not match, the
+// cookies are not sent on the callback and login always fails).
 func TestCallbackPathDrivesStateCookiePath(t *testing.T) {
 	t.Parallel()
 
@@ -270,7 +275,7 @@ func TestStoreInjection(t *testing.T) {
 	}
 }
 
-// ログアウトはセッションを破棄してログインページへ 303 を返します。
+// Logout clears the session and answers 303 to the login page.
 func TestLogoutRedirectsToLogin(t *testing.T) {
 	t.Parallel()
 

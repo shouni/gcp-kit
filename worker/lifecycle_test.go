@@ -12,12 +12,12 @@ import (
 
 type lifecycleTask struct{ ID string }
 
-// lifecycleTrace は、フックが呼ばれた順序と、Finish に渡された値を記録します。
+// lifecycleTrace records the order hooks were called in and the values passed to Finish.
 type lifecycleTrace struct {
 	order  []string
 	result string
 	cause  error
-	// finishCtxErr は Finish に渡された ctx の状態です。切り離されていれば nil です。
+	// finishCtxErr is the state of the ctx passed to Finish; nil when detached.
 	finishCtxErr error
 }
 
@@ -43,8 +43,9 @@ func (tr *lifecycleTrace) lifecycle(run func(ctx context.Context, task lifecycle
 	}
 }
 
-// TestLifecycleRunsHooksInOrder は、順序が Begin → Validate → Run → Finish で固定されて
-// いることを確かめます。順序自体が再発防止なので、ここが規約の本体です。
+// TestLifecycleRunsHooksInOrder checks that the order is fixed at Begin →
+// Validate → Run → Finish. The order itself is what prevents recurrences, so
+// this is the core of the contract.
 func TestLifecycleRunsHooksInOrder(t *testing.T) {
 	t.Parallel()
 
@@ -62,8 +63,8 @@ func TestLifecycleRunsHooksInOrder(t *testing.T) {
 	}
 }
 
-// TestLifecycleSkipsWhenBeginSaysDone は、完了済みの再配信では Run も Finish も
-// 走らず、成功として返ることを確かめます。
+// TestLifecycleSkipsWhenBeginSaysDone checks that on redelivery of a finished
+// job neither Run nor Finish runs, and it returns success.
 func TestLifecycleSkipsWhenBeginSaysDone(t *testing.T) {
 	t.Parallel()
 
@@ -79,8 +80,9 @@ func TestLifecycleSkipsWhenBeginSaysDone(t *testing.T) {
 	}
 }
 
-// TestLifecycleReturnsBeginErrorWithoutRunning は、状態を読めないときに何も走らせず
-// エラーをそのまま返すことを確かめます（進むか委ねるかは Begin が決めます）。
+// TestLifecycleReturnsBeginErrorWithoutRunning checks that when the status
+// cannot be read, nothing runs and the error comes back as is (whether to go
+// ahead or defer is Begin's decision).
 func TestLifecycleReturnsBeginErrorWithoutRunning(t *testing.T) {
 	t.Parallel()
 
@@ -97,8 +99,9 @@ func TestLifecycleReturnsBeginErrorWithoutRunning(t *testing.T) {
 	}
 }
 
-// TestLifecycleValidationFailureIsPermanentAndFinished は、検証の失敗が Permanent として
-// Finish に届き、Run は走らないことを確かめます。検証で落ちたジョブも failed に至ります。
+// TestLifecycleValidationFailureIsPermanentAndFinished checks that a
+// validation failure reaches Finish as Permanent and Run does not run. A job
+// rejected by validation still reaches failed.
 func TestLifecycleValidationFailureIsPermanentAndFinished(t *testing.T) {
 	t.Parallel()
 
@@ -119,8 +122,8 @@ func TestLifecycleValidationFailureIsPermanentAndFinished(t *testing.T) {
 	}
 }
 
-// TestLifecycleTurnsPanicIntoFailure は、Run の panic が ErrPanicked として Finish に
-// 届くことを確かめます。届かないと状態が running のまま固着します。
+// TestLifecycleTurnsPanicIntoFailure checks that a panic in Run reaches Finish
+// as ErrPanicked. Otherwise the state gets stuck at running.
 func TestLifecycleTurnsPanicIntoFailure(t *testing.T) {
 	t.Parallel()
 
@@ -139,9 +142,9 @@ func TestLifecycleTurnsPanicIntoFailure(t *testing.T) {
 	}
 }
 
-// TestLifecycleTurnsValidatePanicIntoFailure は、Validate の panic も ErrPanicked として
-// Finish に届くことを確かめます。Begin が running を記録した後なので、届かないと Run の
-// panic と同じく running のまま固着します。
+// TestLifecycleTurnsValidatePanicIntoFailure checks that a panic in Validate
+// also reaches Finish as ErrPanicked. It runs after Begin recorded running, so
+// otherwise it would get stuck at running just like a panic in Run.
 func TestLifecycleTurnsValidatePanicIntoFailure(t *testing.T) {
 	t.Parallel()
 
@@ -170,9 +173,9 @@ func TestLifecycleTurnsValidatePanicIntoFailure(t *testing.T) {
 	}
 }
 
-// TestLifecycleTimesOutRunButNotFinish は、Timeout が Run にだけ効き、Finish は
-// 切り離した ctx で呼ばれることを確かめます。打ち切りこそが終端の理由である場面で
-// 記録が残るための配線です。
+// TestLifecycleTimesOutRunButNotFinish checks that Timeout applies to Run
+// only, and Finish is called on a detached ctx. This is the wiring that keeps
+// the record when a cut-off is the very reason for ending.
 func TestLifecycleTimesOutRunButNotFinish(t *testing.T) {
 	t.Parallel()
 
@@ -187,7 +190,7 @@ func TestLifecycleTimesOutRunButNotFinish(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Execute() error = %v, want deadline exceeded", err)
 	}
-	// パイプライン全体の打ち切りは、下流 1 回の期限切れと区別できる印が付く。
+	// Cutting off the whole pipeline is marked so it can be told from one downstream call expiring.
 	if !errors.Is(err, ErrTimedOut) {
 		t.Errorf("Execute() error = %v, want errors.Is(..., ErrTimedOut)", err)
 	}
@@ -199,9 +202,10 @@ func TestLifecycleTimesOutRunButNotFinish(t *testing.T) {
 	}
 }
 
-// TestLifecycleDownstreamDeadlineIsNotTimedOut は、Run の中の下流呼び出しが自分の期限で
-// 切れただけのときは ErrTimedOut の印が付かないことを確かめます。両方とも
-// DeadlineExceeded で返るため、印が無いと通知の文面で区別できません。
+// TestLifecycleDownstreamDeadlineIsNotTimedOut checks that ErrTimedOut is not
+// marked when a downstream call inside Run merely hit its own deadline. Both
+// come back as DeadlineExceeded, so without the mark a notification could not
+// tell them apart.
 func TestLifecycleDownstreamDeadlineIsNotTimedOut(t *testing.T) {
 	t.Parallel()
 
@@ -220,8 +224,8 @@ func TestLifecycleDownstreamDeadlineIsNotTimedOut(t *testing.T) {
 	}
 }
 
-// TestLifecycleFinishRunsOnCancelledParent は、呼び出し元の ctx が切れていても Finish が
-// 生きた ctx で呼ばれることを確かめます（dispatch deadline 超過の場面）。
+// TestLifecycleFinishRunsOnCancelledParent checks that Finish is called on a
+// live ctx even when the caller's ctx is done (the dispatch deadline passing).
 func TestLifecycleFinishRunsOnCancelledParent(t *testing.T) {
 	t.Parallel()
 
@@ -237,8 +241,9 @@ func TestLifecycleFinishRunsOnCancelledParent(t *testing.T) {
 	}
 }
 
-// TestLifecycleFinishDecidesTheResult は、Finish の返り値が Execute の結果になること
-// （失敗を Permanent に包み直して再配信を止める、など）を確かめます。
+// TestLifecycleFinishDecidesTheResult checks that Finish's return value becomes
+// Execute's result (rewrapping a failure in Permanent to stop redelivery, for
+// example).
 func TestLifecycleFinishDecidesTheResult(t *testing.T) {
 	t.Parallel()
 
@@ -251,8 +256,8 @@ func TestLifecycleFinishDecidesTheResult(t *testing.T) {
 	}
 }
 
-// TestLifecycleLabelsGoroutine は、Labels が pprof のゴルーチンラベルとして Run から
-// 見えることを確かめます。
+// TestLifecycleLabelsGoroutine checks that Labels are visible from Run as
+// pprof goroutine labels.
 func TestLifecycleLabelsGoroutine(t *testing.T) {
 	t.Parallel()
 
@@ -272,7 +277,7 @@ func TestLifecycleLabelsGoroutine(t *testing.T) {
 	}
 }
 
-// TestLifecycleRequiresRun は、Run の無い Lifecycle を設定ミスとして落とすことを確かめます。
+// TestLifecycleRequiresRun checks that a Lifecycle without Run fails as a configuration error.
 func TestLifecycleRequiresRun(t *testing.T) {
 	t.Parallel()
 

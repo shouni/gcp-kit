@@ -89,7 +89,7 @@ func TestValidateConfig(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			// Audience は省略可能で、その場合は WorkerURL が使われます。
+			// Audience is optional; WorkerURL is used in its place.
 			name: "missing audience defaults to worker url",
 			cfg: Config{
 				ProjectID:           valid.ProjectID,
@@ -136,8 +136,9 @@ func TestValidateConfig(t *testing.T) {
 	}
 }
 
-// Cloud Tasks はリクエストのデッドラインが 30 秒より先だと InvalidArgument を返すため、
-// ジョブ全体の寿命を表す長い context をそのまま投入 RPC に渡してはいけません。
+// Cloud Tasks returns InvalidArgument when a request's deadline is more than 30
+// seconds out, so the long context covering a whole job must not be passed to
+// the enqueue RPC as is.
 func TestEnqueueShortensALongCallerDeadlineForTheRPC(t *testing.T) {
 	t.Parallel()
 
@@ -147,7 +148,7 @@ func TestEnqueueShortensALongCallerDeadlineForTheRPC(t *testing.T) {
 		t.Fatalf("newEnqueuerWithClient() returned error: %v", err)
 	}
 
-	// ワーカーのパイプライン上限のような長い context。
+	// A long context, like the worker's pipeline limit.
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 	defer cancel()
 
@@ -170,7 +171,7 @@ func TestEnqueueShortensALongCallerDeadlineForTheRPC(t *testing.T) {
 	}
 }
 
-// 呼び出し元がすでに短い期限を切っている場合、それを延ばしてはいけません。
+// When the caller already set a shorter deadline, it must not be extended.
 func TestEnqueueKeepsAnEarlierCallerDeadline(t *testing.T) {
 	t.Parallel()
 
@@ -311,8 +312,9 @@ func TestEnqueueWithNameRejectsEmptyTaskID(t *testing.T) {
 		t.Fatalf("newEnqueuerWithClient() returned error: %v", err)
 	}
 
-	// "" も含めます。EnqueueWithOptions では空が「名前指定なし」を意味するため、素通しすると
-	// 名前なしのタスクが作られ、重複排除がエラーも出さずに効かなくなります。
+	// "" is included too. In EnqueueWithOptions an empty one means "no name", so
+	// letting it through would create an unnamed task and silently disable
+	// deduplication.
 	for _, taskID := range []string{"", "  "} {
 		if err := enqueuer.EnqueueWithName(context.Background(), taskID, samplePayload{}); err == nil {
 			t.Errorf("EnqueueWithName(%q) error = nil, want error for empty taskID", taskID)
@@ -323,7 +325,7 @@ func TestEnqueueWithNameRejectsEmptyTaskID(t *testing.T) {
 	}
 }
 
-// TestValidateTaskID は、Cloud Tasks に往復させる前に不正なIDを弾くことを確認します。
+// TestValidateTaskID checks that an invalid ID is rejected before a round trip to Cloud Tasks.
 func TestValidateTaskID(t *testing.T) {
 	t.Parallel()
 
@@ -369,9 +371,10 @@ func TestEnqueueWithNameRejectsInvalidTaskIDBeforeCallingAPI(t *testing.T) {
 	}
 }
 
-// TestWorkerPathBuildsTheTarget は、WorkerURL と WorkerPath から配送先が組み立てられ、
-// 末尾スラッシュや二重の継ぎ足しが正規化されることを確認します。配送先はルータの
-// 登録と一字一句一致していないと届かないので、この正規化が要ります。
+// TestWorkerPathBuildsTheTarget checks that the target is built from WorkerURL
+// and WorkerPath, with trailing slashes and double appends normalised. The
+// target must match the router's registration byte for byte to arrive, so this
+// normalisation is needed.
 func TestWorkerPathBuildsTheTarget(t *testing.T) {
 	t.Parallel()
 
@@ -410,7 +413,7 @@ func TestWorkerPathBuildsTheTarget(t *testing.T) {
 			if got := client.req.GetTask().GetHttpRequest().GetUrl(); got != tt.want {
 				t.Fatalf("target URL = %q, want %q", got, tt.want)
 			}
-			// Audience の既定は継ぎ足す前の WorkerURL のままです（受信側はサービスの URL で照合します）。
+			// Audience still defaults to WorkerURL before appending (the receiver compares against the service URL).
 			if got := client.req.GetTask().GetHttpRequest().GetOidcToken().GetAudience(); got != tt.workerURL {
 				t.Fatalf("Audience = %q, want the bare WorkerURL %q", got, tt.workerURL)
 			}
@@ -477,16 +480,17 @@ func TestEnqueueWithOptions(t *testing.T) {
 	if headers["X-Trace-Id"] != "trace-123" {
 		t.Fatalf("X-Trace-Id = %q, want %q", headers["X-Trace-Id"], "trace-123")
 	}
-	// カスタムヘッダーを渡しても Content-Type は維持されます。
+	// Content-Type is kept even when custom headers are passed.
 	if headers["Content-Type"] != "application/json" {
 		t.Fatalf("Content-Type = %q, want application/json", headers["Content-Type"])
 	}
 }
 
-// TestConfigDispatchDeadlineAppliesToEveryTask は、キュー共通の応答待ち時間が
-// オプション無しの投入にも乗ることを確認します。長時間ジョブでは Cloud Tasks の
-// 既定 10 分が実行時間の実効上限になってしまうため、ここが効かないと
-// 呼び出し側が投入のたびにオプションを付ける運用に戻ります。
+// TestConfigDispatchDeadlineAppliesToEveryTask checks that the queue-wide
+// dispatch deadline applies to enqueues without options too. For long jobs
+// Cloud Tasks' default of 10 minutes becomes the effective run-time limit, so
+// if this did not work, callers would be back to passing the option on every
+// enqueue.
 func TestConfigDispatchDeadlineAppliesToEveryTask(t *testing.T) {
 	t.Parallel()
 
@@ -508,8 +512,8 @@ func TestConfigDispatchDeadlineAppliesToEveryTask(t *testing.T) {
 	}
 }
 
-// TestWithDispatchDeadlineOverridesConfig は、タスク個別の指定がキュー共通の設定に
-// 優先することを確認します。
+// TestWithDispatchDeadlineOverridesConfig checks that a per-task value takes
+// precedence over the queue-wide setting.
 func TestWithDispatchDeadlineOverridesConfig(t *testing.T) {
 	t.Parallel()
 
@@ -532,8 +536,8 @@ func TestWithDispatchDeadlineOverridesConfig(t *testing.T) {
 	}
 }
 
-// TestDispatchDeadlineIsUnsetByDefault は、未指定なら Cloud Tasks の既定に委ねる
-// （フィールドを立てない）ことを確認します。
+// TestDispatchDeadlineIsUnsetByDefault checks that, when unset, it is left to
+// Cloud Tasks' default (the field is not set).
 func TestDispatchDeadlineIsUnsetByDefault(t *testing.T) {
 	t.Parallel()
 
@@ -552,8 +556,8 @@ func TestDispatchDeadlineIsUnsetByDefault(t *testing.T) {
 	}
 }
 
-// TestValidateDispatchDeadline は、Cloud Tasks に往復させる前に範囲外の値を弾くことを
-// 確認します。0 は「指定しない」なので許容します。
+// TestValidateDispatchDeadline checks that an out-of-range value is rejected
+// before a round trip to Cloud Tasks. 0 means "not set" and is allowed.
 func TestValidateDispatchDeadline(t *testing.T) {
 	t.Parallel()
 
@@ -580,8 +584,9 @@ func TestValidateDispatchDeadline(t *testing.T) {
 	}
 }
 
-// TestNewEnqueuerRejectsOutOfRangeDispatchDeadline は、範囲外の設定が起動時に
-// 落ちることを確認します。投入のたびに失敗させるより、構築時に気付けるほうがよいためです。
+// TestNewEnqueuerRejectsOutOfRangeDispatchDeadline checks that an
+// out-of-range setting fails at startup. Finding out at construction beats
+// failing on every enqueue.
 func TestNewEnqueuerRejectsOutOfRangeDispatchDeadline(t *testing.T) {
 	t.Parallel()
 
@@ -593,8 +598,8 @@ func TestNewEnqueuerRejectsOutOfRangeDispatchDeadline(t *testing.T) {
 	}
 }
 
-// TestEnqueueRejectsOutOfRangeDispatchDeadlineBeforeCallingAPI は、タスク個別の
-// 指定も投入前に弾かれることを確認します。
+// TestEnqueueRejectsOutOfRangeDispatchDeadlineBeforeCallingAPI checks that a
+// per-task value is also rejected before enqueuing.
 func TestEnqueueRejectsOutOfRangeDispatchDeadlineBeforeCallingAPI(t *testing.T) {
 	t.Parallel()
 
@@ -642,7 +647,7 @@ func TestEnqueueWithOptionsReturnsCreatedTaskName(t *testing.T) {
 		t.Fatalf("newEnqueuerWithClient() returned error: %v", err)
 	}
 
-	// ALREADY_EXISTS は成功扱いのため、要求した名前がそのまま返ります。
+	// ALREADY_EXISTS counts as success, so the requested name comes back as is.
 	name, err := enqueuer.EnqueueWithOptions(context.Background(), samplePayload{}, WithTaskID("job-1"))
 	if err != nil {
 		t.Fatalf("EnqueueWithOptions() returned error: %v", err)

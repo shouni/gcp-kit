@@ -10,8 +10,8 @@ import (
 	"cloud.google.com/go/firestore"
 )
 
-// newEmulatorStore は、Firestore エミュレータに向けた Store を返します。
-// FIRESTORE_EMULATOR_HOST が無ければテストを飛ばします（CI では起動していません）。
+// newEmulatorStore returns a Store pointed at the Firestore emulator. Without
+// FIRESTORE_EMULATOR_HOST the test is skipped (CI does not start one).
 //
 //	gcloud emulators firestore start --host-port=localhost:8086
 //	FIRESTORE_EMULATOR_HOST=localhost:8086 go test ./jobstatus/ -run Modify
@@ -44,7 +44,7 @@ func TestStoreModify(t *testing.T) {
 		}
 		got, err := store.Get(ctx, "job-new")
 		if err != nil || got.State != StateRunning || got.JobID != "job-new" {
-			t.Errorf("Get() = %+v, %v, want running を打刻済みで", got, err)
+			t.Errorf("Get() = %+v, %v, want running, stamped", got, err)
 		}
 	})
 
@@ -72,12 +72,12 @@ func TestStoreModify(t *testing.T) {
 			return testStatus{}, false, sentinel
 		})
 		if !errors.Is(err, sentinel) || errors.Is(err, ErrUnavailable) {
-			t.Errorf("err = %v, want sentinel のまま", err)
+			t.Errorf("err = %v, want the sentinel as is", err)
 		}
 	})
 
 	t.Run("同時に Begin しても succeeded は巻き戻らない", func(t *testing.T) {
-		// 完了の記録と、再配信の Begin が競合する状況を並行で起こす。
+		// Race the completion record against a redelivery's Begin, concurrently.
 		rec := newTestRecorder(store)
 		const jobID = "job-race"
 		if err := store.Save(ctx, jobID, testStatus{Status: Status{State: StateRunning}}); err != nil {
@@ -93,9 +93,9 @@ func TestStoreModify(t *testing.T) {
 			t.Fatal(err)
 		}
 		wg.Wait()
-		// 完了を記録した後に走った Begin は、どれも succeeded を見て打ち切っているはず。
+		// Every Begin that ran after completion was recorded should have seen succeeded and stopped.
 		if got, _ := store.Get(ctx, jobID); got.State != StateSucceeded {
-			t.Errorf("state = %s, want succeeded（Begin が完了を running へ巻き戻した）", got.State)
+			t.Errorf("state = %s, want succeeded (Begin rolled completion back to running)", got.State)
 		}
 	})
 }

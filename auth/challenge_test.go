@@ -29,10 +29,10 @@ func newTestSession(t *testing.T) *session.Handler {
 	return h
 }
 
-// 人とエージェントが同じルートに来たとき、それぞれが解釈できる応答を受け取ること。
+// When people and agents share a route, each gets a response it can interpret.
 //
-// RFC 9110, Section 15.5.2 は 401 に WWW-Authenticate を要求し、RFC 6750, Section 3.1 は
-// トークン不正を 401、許可されない呼び出し元を 403 と定めています。
+// RFC 9110, Section 15.5.2 requires WWW-Authenticate on a 401, and RFC 6750,
+// Section 3.1 makes an invalid token 401 and a caller that is not allowed 403.
 func TestChallengeMatrix(t *testing.T) {
 	t.Parallel()
 
@@ -40,7 +40,7 @@ func TestChallengeMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("oidc.New() error = %v", err)
 	}
-	// New は未設定の Verifier を返さないので、ゼロ値で「設定漏れ」を再現します。
+	// New never returns an unconfigured Verifier, so the zero value reproduces a missing setting.
 	unconfigured := &oidc.Verifier{}
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 
@@ -48,15 +48,15 @@ func TestChallengeMatrix(t *testing.T) {
 		name       string
 		accept     string
 		authz      string
-		protected  bool // false なら Require（サービス専用ルート）
+		protected  bool // false means Require (a service-only route)
 		badConfig  bool
 		wantStatus int
 		wantWWW    string
 		wantRedir  bool
-		wantVary   bool // session の応答は Accept で変わるため Vary が要る
+		wantVary   bool // session's response varies by Accept, so it needs Vary
 	}{
 		{
-			// リダイレクトを返すと、エージェントは HTML のログイン画面を受け取ります。
+			// A redirect would hand the agent an HTML login page.
 			name: "Protected: エージェントが Bearer を忘れた", accept: "application/json",
 			protected: true, wantStatus: http.StatusUnauthorized, wantVary: true,
 		},
@@ -65,7 +65,7 @@ func TestChallengeMatrix(t *testing.T) {
 			protected: true, wantStatus: http.StatusUnauthorized, wantWWW: `Bearer error="invalid_token"`,
 		},
 		{
-			// ブラウザの挙動は変わりません。
+			// Browser behaviour is unchanged.
 			name: "Protected: 未ログインのブラウザ", accept: browserAccept,
 			protected: true, wantStatus: http.StatusFound, wantRedir: true, wantVary: true,
 		},
@@ -78,7 +78,7 @@ func TestChallengeMatrix(t *testing.T) {
 			wantStatus: http.StatusUnauthorized, wantWWW: `Bearer error="invalid_token"`,
 		},
 		{
-			// 設定漏れはサーバー側の落ち度なので、チャレンジは返しません。
+			// A missing setting is the server's fault, so no challenge is sent.
 			name: "Require: 検証器が未設定", accept: "application/json", authz: "Bearer x",
 			badConfig: true, wantStatus: http.StatusInternalServerError,
 		},
@@ -112,10 +112,10 @@ func TestChallengeMatrix(t *testing.T) {
 				t.Errorf("WWW-Authenticate = %q, want %q", got, tt.wantWWW)
 			}
 			if gotRedir := rec.Header().Get("Location") != ""; gotRedir != tt.wantRedir {
-				t.Errorf("リダイレクト = %v, want %v (Location=%q)", gotRedir, tt.wantRedir, rec.Header().Get("Location"))
+				t.Errorf("redirect = %v, want %v (Location=%q)", gotRedir, tt.wantRedir, rec.Header().Get("Location"))
 			}
-			// Accept で応答が変わる経路では、それをキャッシュへ伝えないと
-			// JSON を求めた呼び出し元へログイン画面の HTML が返りえます。
+			// On a path whose response varies by Accept, failing to tell caches
+			// can serve the login page's HTML to a caller that asked for JSON.
 			if gotVary := rec.Header().Get("Vary") == "Accept"; gotVary != tt.wantVary {
 				t.Errorf("Vary: Accept = %v, want %v", gotVary, tt.wantVary)
 			}

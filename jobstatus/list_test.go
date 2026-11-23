@@ -90,12 +90,12 @@ func TestNewListOptions(t *testing.T) {
 	}
 }
 
-// TestListAndLatestRejectAnUnconfiguredStore checks that both listings refuse
+// TestListingEntriesRejectAnUnconfiguredStore checks that every listing entry refuses
 // a missing configuration the same way.
 //
 // Even with shared assembly, if only one of them ran the entry check, an
 // unconfigured Store would go to call Firestore with a nil client.
-func TestListAndLatestRejectAnUnconfiguredStore(t *testing.T) {
+func TestListingEntriesRejectAnUnconfiguredStore(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]*Store[Status]{
@@ -112,6 +112,9 @@ func TestListAndLatestRejectAnUnconfiguredStore(t *testing.T) {
 			}
 			if _, err := store.Latest(context.Background(), 5); err == nil {
 				t.Error("Latest() error = nil, want an error")
+			}
+			if _, err := store.Count(context.Background()); err == nil {
+				t.Error("Count() error = nil, want an error")
 			}
 		})
 	}

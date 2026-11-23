@@ -72,7 +72,7 @@ Response writing with `Accept` negotiation, defensive headers and the web/worker
 * **`jobstatus`**: recording progress and history in Firestore (`Status` / `Store[T]` / `Recorder`)
   * The "record" alongside `tasks` (enqueue) and `worker` (receive) completes the trio.
   * **`List` pages by offset.** Firestore bills for the documents it skips too, so
-    use `Latest` on screens that show only an excerpt.
+    use `Latest` on screens that show only an excerpt, and `Count` when only the number is needed.
 
 ---
 

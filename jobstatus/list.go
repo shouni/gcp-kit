@@ -142,6 +142,23 @@ func (s *Store[T]) List(ctx context.Context, page, perPage int, opts ...ListOpti
 	return items, meta, nil
 }
 
+// Count returns how many job statuses match the filters, reading none of them.
+//
+// It runs the same filtered aggregation List runs for its total, and nothing
+// else. A caller that wants only the number (a per-filter count beside a
+// listing, say) used to call List(ctx, 1, 1, ...) and discard the item, which
+// costs one extra document read and round trip whenever the count is not zero.
+//
+// Ordering options are ignored: a count does not depend on order, and leaving
+// the order out keeps the query on the index the filters alone need.
+func (s *Store[T]) Count(ctx context.Context, opts ...ListOption) (int, error) {
+	query, err := s.filteredQuery(newListOptions(opts))
+	if err != nil {
+		return 0, err
+	}
+	return count(ctx, query)
+}
+
 // Latest returns limit job statuses matching the filters, newest first. A
 // limit of 0 or less returns every match.
 //
